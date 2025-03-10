@@ -1,52 +1,5 @@
 use serde::{Serialize, Deserialize};
-use tide_websockets::WebSocketConnection;
 
-
-pub async fn send_ws_msg(ws: &WebSocketConnection, msg: serde_json::Value) -> Result<(), String> {
-    // let msg_in_json = serde_json::to_string(&msg).unwrap();
-
-    ws.send_json(&msg).await.map_err(|e| {
-        println!("WebSocket message sending error: {}", e);
-        e.to_string()
-    })
-}
-
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct BaseMessage {
-    pub message_id: String,
-    pub timestamp: String,
-    pub request_id: Option<String>
-}
-
-// Info
-#[derive(Serialize, Deserialize, Debug)]
-pub struct InfoMessage {
-    #[serde(flatten)]
-    pub base: BaseMessage,
-
-    pub message: String,
-}
-
-
-// Error
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ErrorMessage {
-    pub message: String,
-    pub message_id: String,
-    pub message_type: String,
-    pub timestamp: String,
-    pub details: ErrorDetails,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ErrorDetails {
-    pub reason: String,
-    pub suggestions: Vec<String>,
-}
-
-
-// Progress
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ProgressMessage {
     pub message_id: String,

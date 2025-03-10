@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 pub mod info;
 pub mod base;
 pub mod progress;
+pub mod scan;
 
 
 // Errors
@@ -14,9 +15,9 @@ pub struct ErrorDetails {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ErrorMessage {
-    #[serde(flatten)]
-    pub base: BaseMessage,
+pub struct ErrorMessage<'a> {
+    #[serde(flatten, borrow)]
+    pub base: BaseMessage<'a>,
 
     pub details: ErrorDetails,
 }

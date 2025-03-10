@@ -1,15 +1,16 @@
-pub mod metacache;
+pub mod download;
 pub mod instance_manifest;
 pub mod instances_list;
-pub mod download;
+pub mod metacache;
 
 
 pub fn extract_filename(path: &str) -> Option<&str> {
-    if let Some(filename) = path.rsplit('/').next() {
-        if let Some(word) = filename.split('.').next() {
-            return Some(word);
-        }
-    }
+    let last_slash = path.rfind('/')?;
+    let last_dot = path.rfind('.')?;
 
-    None
+    if last_slash < last_dot {
+        Some(&path[last_slash + 1..last_dot])
+    } else {
+        None
+    }
 }
