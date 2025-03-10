@@ -32,7 +32,7 @@ pub async fn start_extraction(metacache_path: String, metacache_value: &mut serd
     match parse_java_manifest(java_manifest, &java, metacache_path, metacache_value, local_paths).await {
         Ok(data) => {
             if let Some(exec_file) = data {
-                // println!("Downloaded");
+                println!("Downloaded");
                 return Ok(exec_file);
             } else {
                 return Err(format!("Failed to find executable file"));

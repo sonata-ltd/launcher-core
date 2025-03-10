@@ -12,12 +12,20 @@ pub async fn send_ws_msg(ws: &WebSocketConnection, msg: serde_json::Value) -> Re
 }
 
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BaseMessage {
+    pub message_id: String,
+    pub timestamp: String,
+    pub request_id: Option<String>
+}
+
 // Info
 #[derive(Serialize, Deserialize, Debug)]
 pub struct InfoMessage {
+    #[serde(flatten)]
+    pub base: BaseMessage,
+
     pub message: String,
-    pub message_id: String,
-    pub timestamp: String,
 }
 
 

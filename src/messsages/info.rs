@@ -7,4 +7,6 @@ use super::BaseMessage;
 pub struct InfoMessage {
     #[serde(flatten)]
     pub base: BaseMessage,
+
+    pub message: String
 }

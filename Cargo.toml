@@ -21,3 +21,6 @@ sys-info = "0.9.1"
 lzma-rs = "0.3.0"
 uuid = { version = "1.11.0", features = ["v5"] }
 sha1_smol = "1.0.1"
+strum = { version = "0.27", features = ["derive"] }
+ts-rs = { version = "10.1", features = ["chrono-impl", "serde-json-impl", "no-serde-warnings"] }
+http-types = "2.12.0"

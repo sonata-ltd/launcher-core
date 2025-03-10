@@ -4,4 +4,5 @@ use serde::{Serialize, Deserialize};
 pub struct BaseMessage {
     pub message_id: String,
     pub timestamp: String,
+    pub request_id: Option<String>
 }
