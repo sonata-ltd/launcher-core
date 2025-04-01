@@ -10,7 +10,6 @@ use std::{collections::HashSet, io::Write};
 use tide_websockets::WebSocketConnection;
 
 use crate::{
-    _depretaced_ws::send_ws_msg,
     instance::Paths,
     websocket::messages::WsMessageType,
     websocket::messages::{
@@ -78,9 +77,7 @@ pub async fn sync_assets<'a>(
     }
     .into();
 
-    if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-        println!("Failed to send update info, {e}");
-    }
+    msg.send(&ws).await.unwrap();
 }
 
 #[derive(Eq, PartialEq, Debug, Hash)]
@@ -178,9 +175,8 @@ async fn process_futures(
             }
             .into();
 
-            if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-                println!("Failed to send update info, {e}");
-            }
+            msg.send(&ws).await.unwrap();
+
             downloaded_assets.insert(asset_info);
         }
     }
