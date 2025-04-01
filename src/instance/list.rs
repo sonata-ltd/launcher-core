@@ -6,7 +6,6 @@ use async_std::path::Path;
 use tide_websockets::WebSocketConnection;
 
 use crate::{
-    _depretaced_ws::send_ws_msg,
     utils::instances_list,
     websocket::messages::{
         operation::{
@@ -16,7 +15,7 @@ use crate::{
             OperationMessage,
         },
         scan::ScanInfo,
-        BaseMessage, WsMessage,
+        BaseMessage, WsMessage, WsMessageType,
     },
 };
 
@@ -105,9 +104,7 @@ impl List {
                 }.into(),
             }.into();
 
-            if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-                println!("Failed to send update info, {e}");
-            }
+            msg.send(&ws).await.unwrap();
 
 
             for (i, item) in instances.iter().enumerate() {
@@ -166,9 +163,7 @@ impl List {
                     // }
                     // .into();
 
-                    if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-                        println!("Failed to send update info, {e}");
-                    }
+                    msg.send(&ws).await.unwrap();
                 }
             }
 
@@ -198,10 +193,7 @@ impl List {
                 }.into()
             }.into();
 
-            if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-                println!("Failed to send update info, {e}");
-            }
-
+            msg.send(&ws).await.unwrap();
 
             return Ok(format!("{:#?}", instances));
         } else {

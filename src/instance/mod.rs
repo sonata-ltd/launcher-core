@@ -14,9 +14,9 @@ use tide_websockets::WebSocketConnection;
 pub mod launch;
 pub mod list;
 
-use crate::types::ws::send_ws_msg;
 use crate::utils::instance_manifest::gen_manifest;
 use crate::utils::instances_list::add_to_registry;
+use crate::websocket::messages::WsMessageType;
 use crate::websocket::messages::{
     operation::{
         event::{OperationStart, OperationUpdate},
@@ -25,6 +25,7 @@ use crate::websocket::messages::{
     },
     BaseMessage, WsMessage,
 };
+
 
 pub struct Paths {
     pub root: String,
@@ -102,10 +103,7 @@ impl<'a> Instance {
         }
         .into();
 
-        if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-            println!("Error occured: {}", e);
-            return Err(e.to_string());
-        }
+        msg.send(&ws).await.unwrap();
 
         // Get Minecraft version manifest - Stage 1
         // TODO: Find already downloaded manifest and redownload
@@ -130,9 +128,7 @@ impl<'a> Instance {
                 }
                 .into();
 
-                if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-                    return Err(e);
-                }
+                msg.send(&ws).await.unwrap();
 
                 // Update info in Paths structure for instance manifest generation
                 paths.version_manifest_file = path_to_manifest;

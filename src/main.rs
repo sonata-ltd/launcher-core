@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use config::Config;
 use home::home_dir;
 
 use async_std::stream::StreamExt;
@@ -27,9 +26,7 @@ use tide_websockets::Message;
 use tide_websockets::WebSocket;
 use tide_websockets::WebSocketConnection;
 
-mod _depretaced_ws;
 mod manifest;
-mod types;
 mod utils;
 mod websocket;
 mod config;
@@ -42,6 +39,8 @@ struct Animal {
 
 #[async_std::main]
 async fn main() -> tide::Result<()> {
+
+
     let mut app = tide::new();
 
     app.with(CorsMiddleware::new()

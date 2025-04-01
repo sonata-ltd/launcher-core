@@ -12,7 +12,6 @@ use std::fs::OpenOptions;
 use tide_websockets::WebSocketConnection;
 
 use crate::instance::Paths;
-use crate::types::ws::send_ws_msg;
 use crate::utils::metacache;
 use crate::websocket::messages::operation::event::OperationUpdate;
 use crate::websocket::messages::operation::process::{FileStatus, ProcessStatus, ProcessTarget};
@@ -73,9 +72,7 @@ pub async fn sync_libs(
     }
     .into();
 
-    if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-        println!("Failed to send update info, {e}");
-    }
+    msg.send(&ws).await.unwrap();
 
     Ok((format!("{}/.sonata/libraries/", paths.root), done_paths))
 }
@@ -289,9 +286,8 @@ async fn process_futures(
             }
             .into();
 
-            if let Err(e) = send_ws_msg(ws, json!(msg)).await {
-                println!("Failed to send update info, {e}");
-            }
+            msg.send(&ws).await.unwrap();
+
             downloaded_libraries.insert(asset_info);
         }
     }
