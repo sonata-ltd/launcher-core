@@ -59,6 +59,8 @@ pub fn add_to_registry(name: &str, paths: &Paths) -> Result<(), String> {
         for item in instances.iter() {
             if let Some(config_path) = item.get("config") {
                 if let Some(instance_name) = extract_filename(&config_path.to_string()) {
+                    println!("{} {}", name, instance_name);
+
                     if name == instance_name {
                         println!("Instance with the same name is already exist");
                         return Ok(());
