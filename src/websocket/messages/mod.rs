@@ -17,7 +17,6 @@ pub trait WsMessageType: Serialize {
             return e;
         }).unwrap();
 
-        println!("Message sent");
         return Ok(());
     }
 }

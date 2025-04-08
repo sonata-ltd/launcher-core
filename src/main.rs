@@ -1,55 +1,42 @@
-use std::collections::HashMap;
-use home::home_dir;
-
 use async_std::stream::StreamExt;
-use instance::list::List;
-use manifest::get_version_manifest;
-use serde_json;
-use serde_json::Value;
-use surf;
-use tide::prelude::*;
-use tide::security::CorsMiddleware;
-use tide::security::Origin;
-use tide::Request;
+use data::GlobalDataState;
+use endpoints::debug_ws;
+use endpoints::{
+    handle_init_root,
+    instance::{init_instance_ws, list_instances_ws, run_instance_ws},
+    java::download_java_ws,
+    versions::{get_version_ws, get_versions},
+};
+
 use http_types::headers::HeaderValue;
+use tide::security::CorsMiddleware;
+use tide::{security::Origin, Request};
+use tide_websockets::{WebSocket, WebSocketConnection, Message};
 
 pub mod instance;
-use instance::Instance;
-
 pub mod java;
-use java::Java;
-
 pub mod root;
-use root::LauncherRoot;
 
-use tide_websockets::Message;
-use tide_websockets::WebSocket;
-use tide_websockets::WebSocketConnection;
-
+// mod config;
+mod data;
+mod endpoints;
 mod manifest;
 mod utils;
 mod websocket;
-mod config;
 
-#[derive(Debug, Deserialize)]
-struct Animal {
-    name: String,
-    legs: u16,
-}
+
+pub type EndpointRequest<'a> = Request<GlobalDataState<'a>>;
 
 #[async_std::main]
 async fn main() -> tide::Result<()> {
+    let state = GlobalDataState::new();
+    let mut app = tide::with_state(state);
 
-
-    let mut app = tide::new();
-
-    app.with(CorsMiddleware::new()
-        .allow_origin(Origin::from("*"))
-        .allow_methods("GET, POST, OPTIONS".parse::<HeaderValue>().unwrap()));
-
-
-    // Example Data
-    app.at("/orders/shoes").post(order_shoes);
+    app.with(
+        CorsMiddleware::new()
+            .allow_origin(Origin::from("*"))
+            .allow_methods("GET, POST".parse::<HeaderValue>().unwrap()),
+    );
 
     // Init routes
     app.at("/init/root").post(handle_init_root);
@@ -64,14 +51,16 @@ async fn main() -> tide::Result<()> {
         .get(WebSocket::new(|_req, ws| get_version_ws(ws)));
 
     app.at("/ws/instance/init")
-        .get(WebSocket::new(|_req, ws| init_instance_ws(ws)));
+        .get(WebSocket::new(|req, ws| init_instance_ws(req, ws)));
     app.at("/ws/instance/run")
-        .get(WebSocket::new(|_req, ws| run_instance_ws(ws)));
+        .get(WebSocket::new(|req, ws| run_instance_ws(req, ws)));
     app.at("/ws/instance/list")
         .get(WebSocket::new(|_req, ws| list_instances_ws(ws)));
 
     app.at("/debug/ws")
         .get(WebSocket::new(|_req, stream| debug_ws(stream)));
+    app.at("/debug/tasks/notif")
+        .get(WebSocket::new(|req, ws| debug_tasks(req, ws)));
 
     // Run server
     app.listen("127.0.0.1:8080").await?;
@@ -79,264 +68,26 @@ async fn main() -> tide::Result<()> {
     Ok(())
 }
 
+async fn debug_tasks(
+    req: EndpointRequest<'_>,
+    ws: WebSocketConnection,
+) -> tide::Result<()> {
+    let mut rx = req.state().notifier.new_receiver();
 
-#[derive(Debug, Deserialize)]
-struct DownloadRequest {
-    java_ver: String,
-}
-
-async fn download_java_ws(mut ws: WebSocketConnection) -> tide::Result<()> {
-    while let Some(Ok(Message::Text(input))) = ws.next().await {
-        let download_request: DownloadRequest = serde_json::from_str(&input).map_err(|e| {
-            tide::Error::from_str(400, format!("Failed to parse recieved JSON: {}", e))
-        })?;
-
-        let DownloadRequest { java_ver } = download_request;
-        // let available_java_url = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
-
-        match home_dir() {
-            Some(path) => {
-                let java_path = format!("{}/.sonata/java", path.display());
-                let metacache_path = format!("{}/.sonata/metacache.json", path.display());
-                let java_properties = Java::new(
-                    "21".to_string(),
-                    "java-runtime-delta".to_string(),
-                    java_path,
-                );
-                Java::init(java_properties, metacache_path).await.unwrap();
-            }
-            None => (),
-        };
-
-        println!("Recieved java version: {}", java_ver);
-    }
-
-    Ok(())
-}
-
-async fn init_instance_ws(mut ws: WebSocketConnection) -> tide::Result<()> {
-    while let Some(Ok(Message::Text(input))) = ws.next().await {
-        let mut instance_request: Instance = serde_json::from_str(&input).map_err(|e| {
-            println!("Failed to parse JSON");
-            tide::Error::from_str(400, format!("Failed to parse recieved JSON: {}", e))
-        })?;
-
-        let response: serde_json::Value;
-        match Instance::init(&mut instance_request, &ws).await {
-            Ok(_) => response = json!({
-                "message": "instance initialized"
-            }),
-
-            Err(e) => {
-                println!("{e}");
-                response = json!({
-                    "result": format!("Failed"),
-                    "error": format!("Failed to create instance, {}", e)
-                });
-            }
-        }
-
-        ws.send_string(format!("{response}")).await?;
-    }
-
-    Ok(())
-}
-
-#[derive(Deserialize, Debug)]
-struct RunRequest {
-    name: String,
-    url: String,
-    info: HashMap<String, String>,
-    request_id: String,
-}
-
-async fn run_instance_ws(mut ws: WebSocketConnection) -> tide::Result<()> {
-    while let Some(Ok(Message::Text(input))) = ws.next().await {
-        let RunRequest {
-            name,
-            url,
-            info,
-            request_id,
-        } = serde_json::from_str(&input).map_err(|e| {
-            println!("Failed to parse JSON");
-            tide::Error::from_str(400, format!("Failed to parse recieved JSON: {}", e))
-        })?;
-
-        let response: serde_json::Value;
-        let instance_request = Instance::new(name, url, Some(info), request_id);
-
-        match Instance::run(instance_request, &ws).await {
-            Ok(result) => response = json!(result),
-
-            Err(e) => {
-                println!("{e}");
-                response = json!({
-                    "result": format!("Failed"),
-                    "error": format!("Failed to create instance, {}", e)
-                });
-            }
-        }
-
-        ws.send_string(format!("{response}")).await?;
-    }
-
-    Ok(())
-}
-
-async fn list_instances_ws(mut ws: WebSocketConnection) -> tide::Result<()> {
-    while let Some(Ok(Message::Text(_input))) = ws.next().await {
-        println!("Updating instances list");
-
-        let list_struct = List::new("/Users/quartix/.sonata/headers/main.json".to_string());
-
-        let _result;
-        match List::start_paths_checking(&list_struct, &ws).await {
-            Ok(_) => {
-                _result = json!({
-                    "message": "Scan Completed"
-                })
+    loop {
+        match rx.recv().await {
+            Ok(notif) => {
+                println!("notification sent");
+                if ws.send(Message::Text(notif.to_string())).await.is_err() {
+                    break;
+                }
             }
             Err(e) => {
-                _result = json!({
-                    "message": e
-                })
+                eprintln!("Failed to receive notification: {:?}", e);
+                break;
             }
-        };
-
-        // ws.send_string(format!("{result}")).await?;
-    }
-
-    Ok(())
-}
-
-async fn debug_ws(mut stream: WebSocketConnection) -> tide::Result<()> {
-    while let Some(Ok(Message::Text(input))) = stream.next().await {
-        let output: String = input.chars().rev().collect();
-
-        for _ in 0..10 {
-            stream
-                .send_string(format!("{} | {}", &input, &output))
-                .await?;
         }
     }
 
     Ok(())
 }
-
-async fn order_shoes(mut req: Request<()>) -> tide::Result {
-    let Animal { name, legs } = req.body_json().await?;
-    let response_body = json!({
-        "message": format!("Hello, {}! I've put in an order for {} shoes", name, legs)
-    });
-
-    Ok(tide::Response::builder(200)
-        .body(response_body)
-        .content_type(tide::http::mime::JSON)
-        .build())
-}
-
-async fn handle_init_root(mut req: Request<()>) -> tide::Result {
-    let launcher_root: LauncherRoot = req.body_json().await?;
-
-    let response = json!({ "message": launcher_root.init_root() });
-
-    Ok(tide::Response::builder(200)
-        .body(response)
-        .content_type(tide::http::mime::JSON)
-        .build())
-}
-
-async fn get_versions(_req: Request<()>) -> tide::Result {
-    let url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-
-    let result;
-    let code;
-
-    match surf::get(url).await {
-        Ok(mut response) => match response.body_json::<serde_json::Value>().await {
-            Ok(data) => {
-                result = data;
-                code = 200;
-            }
-            Err(_) => {
-                result = json!({ "message": "Failed to parse JSON" });
-                code = 500;
-            }
-        },
-
-        Err(_) => {
-            result = json!({ "message": "Failed to download versions manifest" });
-            code = 500;
-        }
-    }
-
-    Ok(tide::Response::builder(code)
-        .body(result)
-        .content_type(tide::http::mime::JSON)
-        .build())
-}
-
-#[derive(Debug, Deserialize)]
-struct Version<'a> {
-    id: &'a str,
-}
-
-async fn get_version_ws(mut ws: WebSocketConnection) -> tide::Result<()> {
-    #[derive(Debug, Serialize)]
-    struct Result {
-        status: String,
-        target: Value,
-    }
-
-    while let Some(Ok(Message::Text(input))) = ws.next().await {
-        let version_request: Version = serde_json::from_str(&input).map_err(|e| {
-            tide::Error::from_str(400, format!("Failed to parse recieved JSON: {}", e))
-        })?;
-
-        let result = match get_version_manifest(version_request.id).await {
-            Ok(data) => {
-                json!(Result {
-                    status: "done".to_string(),
-                    target: data
-                })
-            }
-            Err(e) => json!({
-                "error": e
-            }),
-        };
-
-        println!("{}", result);
-        ws.send_json(&result).await?;
-    }
-
-    Ok(())
-}
-
-// async fn create_instance(mut req: Request<()>) -> tide::Result {
-//     let InstanceRequest { name, url, info } = req.body_json().await?;
-
-//     for (k, v) in info.iter() {
-//         println!("k: {}, v: {}", k, v);
-//     }
-
-//     let response: serde_json::Value;
-//     match Instance::init(&mut Instance::new(name, url, info)).await {
-//         Ok(result) => {
-//             response = json!({
-//                 "result": format!("Created, {}", result)
-//             });
-
-//         },
-
-//         Err(e) => {
-//             response = json!({
-//                 "result": format!("Failed to create instance, {}", e)
-//             });
-//         }
-//     }
-
-//     Ok(tide::Response::builder(200)
-//         .body(response)
-//         .content_type(tide::http::mime::JSON)
-//         .build())
-// }
