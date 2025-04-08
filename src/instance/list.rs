@@ -1,5 +1,4 @@
 use chrono::Utc;
-use serde_json::json;
 use std::fs::OpenOptions;
 
 use async_std::path::Path;

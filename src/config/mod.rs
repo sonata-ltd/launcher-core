@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-
 use home::home_dir;
+
 
 pub struct Config {
     pub launcher_root_dir: Option<OsString>,

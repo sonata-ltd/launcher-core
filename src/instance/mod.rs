@@ -8,12 +8,12 @@ use std::collections::HashMap;
 pub mod download;
 use download::assets;
 use download::libs;
-use serde_json::json;
 use tide_websockets::WebSocketConnection;
 
 pub mod launch;
 pub mod list;
 
+use crate::data::task::Task;
 use crate::utils::instance_manifest::gen_manifest;
 use crate::utils::instances_list::add_to_registry;
 use crate::websocket::messages::WsMessageType;
@@ -25,6 +25,7 @@ use crate::websocket::messages::{
     },
     BaseMessage, WsMessage,
 };
+use crate::EndpointRequest;
 
 
 pub struct Paths {
@@ -72,7 +73,14 @@ impl<'a> Instance {
         }
     }
 
-    pub async fn init(&mut self, ws: &WebSocketConnection) -> Result<LaunchInfo, String> {
+    pub async fn init(
+        &mut self,
+        req: &EndpointRequest<'a>,
+        ws: &WebSocketConnection
+    ) -> Result<LaunchInfo, String> {
+        let global_app_state = req.state();
+        global_app_state.add_task(Task::new("download instance")).await?;
+
         // Get default paths
         let mut paths = match get_required_paths(&self.name) {
             Ok(paths) => paths,
@@ -190,8 +198,12 @@ impl<'a> Instance {
         });
     }
 
-    pub async fn run(mut self, ws: &WebSocketConnection) -> Result<(), String> {
-        match Self::init(&mut self, ws).await {
+    pub async fn run(
+        mut self,
+        req: &EndpointRequest<'a>,
+        ws: &WebSocketConnection
+    ) -> Result<(), String> {
+        match Self::init(&mut self, req, ws).await {
             Ok(launch_info) => {
                 if let Some(info) = self.info {
                     let LaunchInfo {
