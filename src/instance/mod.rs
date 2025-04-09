@@ -3,6 +3,7 @@ use chrono::Utc;
 use download::manifest;
 use home::home_dir;
 use serde::Deserialize;
+use thiserror::Error;
 use std::collections::HashMap;
 
 pub mod download;
@@ -58,6 +59,29 @@ pub struct Instance {
     pub request_id: String,
 }
 
+#[derive(Error, Debug)]
+pub enum InstanceError {
+    #[error("Failed to create new instance: {0}")]
+    CreationFailed(String),
+
+    #[error("Failed to run instance: {0}")]
+    RunFailed(String),
+
+    #[error("Failed to register instance: {0}")]
+    RegistrationFailed(String),
+
+    #[error("Failed to generate manifest for instance: {0}")]
+    ManifestGenerationFailed(String),
+
+    #[error("Failed to create instance directory: {0}")]
+    DirCreationFailed(String),
+
+    #[error("Failed to get home direcory")]
+    HomeDirNotFound
+}
+
+pub type Result<T> = std::result::Result<T, InstanceError>;
+
 impl<'a> Instance {
     pub fn new(
         name: String,
@@ -77,9 +101,20 @@ impl<'a> Instance {
         &mut self,
         req: &EndpointRequest<'a>,
         ws: &WebSocketConnection
-    ) -> Result<LaunchInfo, String> {
+    ) -> Result<LaunchInfo> {
+        // Init task
         let global_app_state = req.state();
-        global_app_state.add_task(Task::new("download instance")).await?;
+        let task_handle = match global_app_state.add_task(
+            Task::new_shared("download instance")
+        ).await {
+            Ok(handle) => handle,
+            Err(e) => return Err(InstanceError::CreationFailed(e.to_string()))
+        };
+
+        global_app_state.update_task(task_handle.id, |t| {
+            t.name = "instance is downloaded";
+        }).await.unwrap();
+
 
         // Get default paths
         let mut paths = match get_required_paths(&self.name) {
@@ -143,7 +178,11 @@ impl<'a> Instance {
 
                 data
             }
-            Err(e) => return Err(format!("Failed to download version manifest: {}", e)),
+            Err(e) => return Err(
+                InstanceError::CreationFailed(
+                    format!("Failed to download version manifest: {}", e)
+                )
+            )
         };
 
         // Sync & download all libs needed by this version - Stage 2
@@ -159,7 +198,11 @@ impl<'a> Instance {
                 self.update_info("${libs_directory}", dir.to_string());
                 self.update_info("${classpath_libs_directories}", paths_string);
             }
-            Err(e) => return Err(format!("Failed to download and register libs: {e}")),
+            Err(e) => return Err(
+                InstanceError::CreationFailed(
+                    format!("Failed to download and register libs: {e}")
+                )
+            )
         };
 
         // Get version assets manifest
@@ -172,7 +215,11 @@ impl<'a> Instance {
                     self.update_info("${assets_index_name}", id.to_string());
                     data
                 }
-                Err(e) => return Err(format!("Failed to download assets manifest: {}", e)),
+                Err(e) => return Err(
+                    InstanceError::CreationFailed(
+                        format!("Failed to download assets manifest: {}", e)
+                    )
+                )
             };
 
         // Sync & download all assets needed by this version - Stage 3
@@ -184,12 +231,20 @@ impl<'a> Instance {
             Some(data) => InstanceInfo {
                 version: data.to_string(),
             },
-            None => return Err("Failed to determine version".to_string()),
+            None => return Err(
+                InstanceError::CreationFailed(
+                    "Failed to determine version".to_string()
+                )
+            )
         };
 
         match Self::register_instance(&self, &paths, &instance_version).await {
             Ok(_) => {}
-            Err(e) => return Err(format!("Failed to initialize instance directory: {}", e)),
+            Err(e) => return Err(
+                InstanceError::CreationFailed(
+                    format!("Failed to initialize instance directory: {}", e)
+                )
+            )
         };
 
         return Ok(LaunchInfo {
@@ -202,7 +257,7 @@ impl<'a> Instance {
         mut self,
         req: &EndpointRequest<'a>,
         ws: &WebSocketConnection
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         match Self::init(&mut self, req, ws).await {
             Ok(launch_info) => {
                 if let Some(info) = self.info {
@@ -217,7 +272,11 @@ impl<'a> Instance {
 
                     return Ok(());
                 } else {
-                    return Err(format!("info hashmap is not provided"));
+                    return Err(
+                        InstanceError::RunFailed(
+                            format!("info hashmap is not provided")
+                        )
+                    )
                 }
             }
             Err(e) => {
@@ -237,35 +296,41 @@ impl<'a> Instance {
         instance: &Instance,
         paths: &Paths,
         instance_info: &InstanceInfo,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         match create_dir_all(&paths.instance).await {
             Ok(_) => {
                 println!("Initialized instance dir");
 
                 match add_to_registry(&instance.name, &paths) {
                     Ok(_) => {}
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(
+                        InstanceError::RegistrationFailed(e)
+                    )
                 };
 
                 match gen_manifest(&instance, &paths, &instance_info) {
                     Ok(_) => {}
-                    Err(e) => return Err(e),
+                    Err(e) => return Err(
+                        InstanceError::ManifestGenerationFailed(e)
+                    )
                 };
 
                 Ok(())
             }
             Err(e) => {
-                return Err(e.to_string());
+                return Err(
+                    InstanceError::DirCreationFailed(e.to_string())
+                );
             }
         }
     }
 }
 
 // Return Libs path, Assets path, Instances path
-fn get_required_paths(instance_name: &String) -> Result<Paths, String> {
+fn get_required_paths(instance_name: &String) -> Result<Paths> {
     let root = match home_dir() {
         Some(path) => format!("{}/.sonata", path.display()),
-        None => return Err("Failed to get home directory".to_string()),
+        None => return Err(InstanceError::HomeDirNotFound),
     };
 
     Ok(Paths {
