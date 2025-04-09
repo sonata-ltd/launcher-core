@@ -1,4 +1,3 @@
-use async_std::stream::StreamExt;
 use data::GlobalDataState;
 use endpoints::debug_ws;
 use endpoints::{
@@ -9,6 +8,7 @@ use endpoints::{
 };
 
 use http_types::headers::HeaderValue;
+use serde_json::json;
 use tide::security::CorsMiddleware;
 use tide::{security::Origin, Request};
 use tide_websockets::{WebSocket, WebSocketConnection, Message};
@@ -72,6 +72,11 @@ async fn debug_tasks(
     req: EndpointRequest<'_>,
     ws: WebSocketConnection,
 ) -> tide::Result<()> {
+    let all_tasks = req.state().get_all_tasks_json().await;
+    if ws.send(Message::Text(json!({"all_tasks": all_tasks}).to_string())).await.is_err() {
+        println!("Failed to send all tasks");
+    }
+
     let mut rx = req.state().notifier.new_receiver();
 
     loop {
