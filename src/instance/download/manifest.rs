@@ -1,15 +1,21 @@
+use std::path::Path;
+
 use async_std::{fs::{self, File}, io::WriteExt};
 
 use crate::utils::download::download_in_json;
 
-pub async fn download_manifest(url: &str, save_path: &str) -> Result<(serde_json::Value, Option<String>), String> {
+pub async fn download_manifest<P>(
+    url: &str,
+    save_path: Option<P>
+) -> Result<(serde_json::Value, Option<String>), String>
+where
+    P: AsRef<Path>
+{
     match download_in_json(url).await {
         Ok(data) => {
-            println!("Version manifest downloaded");
-
-            if !save_path.is_empty() {
+            if let Some(save_path) = save_path {
                 let name_start_pos = url.rfind('/').unwrap();
-                let full_path = format!("{}{}", save_path, url[name_start_pos..].to_string());
+                let full_path = format!("{:?}{}", save_path.as_ref(), url[name_start_pos..].to_string());
                 let dir_last_pos = full_path.rfind('/').unwrap();
 
                 match fs::create_dir_all(full_path[..dir_last_pos].to_string()).await {
@@ -23,16 +29,19 @@ pub async fn download_manifest(url: &str, save_path: &str) -> Result<(serde_json
                 return Ok((data, Some(full_path)));
             }
 
-            Ok((data, None))
+            return Ok((data, None))
         },
-        Err(e) => Err(format!("Failed to parse JSON: {}", e)),
+        Err(e) => return Err(format!("Failed to parse JSON: {}", e)),
     }
 }
 
-pub async fn get_assets_manifest<'a>(version_manifest: &'a serde_json::Value, assets_path: &'a str) -> Result<(serde_json::Value, &'a str), String> {
+pub async fn get_assets_manifest<'a>(
+    version_manifest: &'a serde_json::Value,
+    assets_path: &'a str
+) -> Result<(serde_json::Value, &'a str), String> {
     if let Some(asset_index) = version_manifest["assetIndex"].as_object() {
         if let Some(asset_url) = asset_index["url"].as_str() {
-            match download_manifest(&asset_url.to_string(), &assets_path) .await {
+            match download_manifest(&asset_url.to_string(), Some(&assets_path)).await {
                 Ok(manifest) => return Ok((manifest.0, asset_index["id"].as_str().unwrap())),
                 Err(e) => return Err(format!("Failed to download assets manifest: {}", e)),
             };

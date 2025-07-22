@@ -46,16 +46,23 @@ impl List {
             };
 
         if let Some(general) = instance_manifest.get("general").and_then(|v| v.as_object()) {
-            // Safely retrieve name, version, and loader
-            let name = general.get("name").and_then(|v| v.as_str())?;
             let version = general.get("version").and_then(|v| v.as_str())?;
             let loader = general.get("loader").and_then(|v| v.as_str())?;
 
-            Some(ScanInfo {
-                name: name.to_string(),
-                version: version.to_string(),
-                loader: loader.to_string(),
-            })
+            if let Some(overview) = instance_manifest
+                .get("overview")
+                .and_then(|v| v.as_object())
+            {
+                let name = overview.get("name").and_then(|v| v.as_str())?;
+
+                Some(ScanInfo {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    loader: loader.to_string(),
+                })
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -99,12 +106,13 @@ impl List {
                     correlation_id: None,
                 },
                 data: OperationStart {
-                    stages: vec![STAGE_TYPE]
-                }.into(),
-            }.into();
+                    stages: vec![STAGE_TYPE],
+                }
+                .into(),
+            }
+            .into();
 
             msg.send(&ws).await.unwrap();
-
 
             for (i, item) in instances.iter().enumerate() {
                 if let (Some(manifest_path), Some(instance_path)) =
@@ -188,9 +196,11 @@ impl List {
                     correlation_id: None,
                 },
                 data: OperationFinish {
-                    status: OperationStatus::Completed
-                }.into()
-            }.into();
+                    status: OperationStatus::Completed,
+                }
+                .into(),
+            }
+            .into();
 
             msg.send(&ws).await.unwrap();
 

@@ -33,7 +33,7 @@ pub async fn sync_assets<'a>(
     manifest: &serde_json::Value,
     assets_path: &'a str,
     ws: &WebSocketConnection,
-    paths: &Paths,
+    paths: &Paths<'a>,
 ) {
     let msg: WsMessage = OperationMessage {
         base: BaseMessage {
@@ -90,7 +90,7 @@ async fn extract_manifest_assets<'a>(
     manifest: &'a serde_json::Value,
     assets_path: &str,
     ws: &WebSocketConnection,
-    paths: &Paths,
+    paths: &Paths<'a>,
 ) {
     let base_url = "https://resources.download.minecraft.net/";
     let metacache_file = std::fs::File::open(&paths.metacache_file).unwrap();
@@ -218,10 +218,10 @@ async fn download_asset(
     }
 }
 
-async fn register_assets(
+async fn register_assets<'a>(
     downloaded_assets: HashSet<AssetInfo>,
     mut metacache: serde_json::Value,
-    paths: &Paths,
+    paths: &Paths<'a>,
 ) {
     if let Some(assets) = metacache["assets"].as_array_mut() {
         for item in downloaded_assets.iter() {

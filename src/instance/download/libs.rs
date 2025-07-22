@@ -21,9 +21,9 @@ use crate::websocket::messages::{BaseMessage, WsMessage, WsMessageType};
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadLibs;
 
-pub async fn sync_libs(
+pub async fn sync_libs<'a>(
     manifest: &serde_json::Value,
-    paths: &Paths,
+    paths: &Paths<'a>,
     ws: &WebSocketConnection,
 ) -> Result<(String, Vec<String>), String> {
     let msg: WsMessage = OperationMessage {
@@ -74,13 +74,13 @@ pub async fn sync_libs(
 
     msg.send(&ws).await.unwrap();
 
-    Ok((format!("{}/.sonata/libraries/", paths.root), done_paths))
+    Ok((format!("{}/.sonata/libraries/", paths.root.display()), done_paths))
 }
 
-async fn extract_manifest_libs(
+async fn extract_manifest_libs<'a>(
     manifest: &serde_json::Value,
     current_os: &str,
-    paths: &Paths,
+    paths: &Paths<'a>,
     ws: &WebSocketConnection,
 ) -> Result<Vec<String>, String> {
     // Hashmap contains: hash, (name, path, url)
@@ -189,7 +189,7 @@ struct LibInfo {
 
 async fn download_missing_libs<'a>(
     version_libs: HashMap<&str, (String, String, &str)>,
-    paths: &'a Paths,
+    paths: &'a Paths<'a>,
     ws: &WebSocketConnection,
 ) -> Result<Vec<String>, String> {
     let metacache_file = OpenOptions::new()
@@ -201,7 +201,7 @@ async fn download_missing_libs<'a>(
 
     let metacache: serde_json::Value = match serde_json::from_reader(&metacache_file) {
         Ok(value) => value,
-        Err(_) => match metacache::recreate(&paths.metacache_file) {
+        Err(_) => match metacache::recreate(&paths.metacache_file.display().to_string()) {
             Ok((_file, value)) => value,
             Err(e) => {
                 println!("Failed to recreate metacache file: {}", e);
@@ -223,9 +223,9 @@ async fn download_missing_libs<'a>(
             let lib_url = v.2.to_string();
 
             if libs_paths.is_empty() {
-                libs_paths.push(format!("{}/{}", paths.libs, lib_path));
+                libs_paths.push(format!("{}/{}", paths.libs.display(), lib_path));
             } else {
-                libs_paths.push(format!(":{}/{}", paths.libs, lib_path));
+                libs_paths.push(format!(":{}/{}", paths.libs.display(), lib_path));
             }
 
             if !libraries
@@ -235,7 +235,7 @@ async fn download_missing_libs<'a>(
                 let libs_path = paths.libs.clone();
 
                 futures.push(task::spawn(async move {
-                    match download_libs(&lib_name, &lib_path, &lib_url, &lib_hash, &libs_path).await
+                    match download_libs(&lib_name, &lib_path, &lib_url, &lib_hash, &libs_path.to_str().unwrap()).await
                     {
                         Ok(lib_info) => Some(lib_info),
                         Err(e) => {
@@ -337,10 +337,10 @@ async fn download_libs(
     }
 }
 
-async fn register_libs(
+async fn register_libs<'a>(
     downloaded_libs: HashSet<LibInfo>,
     mut metacache: serde_json::Value,
-    paths: &Paths,
+    paths: &Paths<'a>,
 ) {
     if let Some(libs) = metacache["libraries"].as_array_mut() {
         for item in downloaded_libs.iter() {

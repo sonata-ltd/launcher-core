@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, process::exit};
 
 use async_std::process::Command;
 
-use super::Paths;
+use super::{LaunchInfo, Paths};
 
-pub async fn launch_instance(manifest: serde_json::Value, info: &HashMap<String, String>, paths: &Paths) {
+pub async fn launch_instance<'a>(
+    manifest: serde_json::Value,
+    info: &HashMap<String, String>,
+    paths: &Paths<'a>
+) {
     let args = define_launch_args(manifest, info, paths).await;
     println!("{:#?}", args);
 
@@ -18,7 +22,11 @@ pub async fn launch_instance(manifest: serde_json::Value, info: &HashMap<String,
     println!("{:#?}", output);
 }
 
-async fn define_launch_args(manifest: serde_json::Value, info: &HashMap<String, String>, _paths: &Paths) -> Vec<String> {
+async fn define_launch_args<'a>(
+    manifest: serde_json::Value,
+    info: &HashMap<String, String>,
+    _paths: &Paths<'a>
+) -> Vec<String> {
     let mut tmp_args: Vec<String> = Vec::new();
 
     println!("{:#?}", info);

@@ -1,10 +1,6 @@
 use data::GlobalDataState;
-use endpoints::debug_ws;
 use endpoints::{
-    handle_init_root,
-    instance::{init_instance_ws, list_instances_ws, run_instance_ws},
-    java::download_java_ws,
-    versions::{get_version_ws, get_versions},
+    debug_ws, handle_init_root, instance::{init_instance_ws, instance_options_dispatcher, list_instances_ws, run_instance_ws}, java::download_java_ws, versions::{get_version_ws, get_versions}
 };
 
 use http_types::headers::HeaderValue;
@@ -29,7 +25,8 @@ pub type EndpointRequest<'a> = Request<GlobalDataState<'a>>;
 
 #[async_std::main]
 async fn main() -> tide::Result<()> {
-    let state = GlobalDataState::new();
+    let state = GlobalDataState::new().await;
+
     let mut app = tide::with_state(state);
 
     app.with(
@@ -56,6 +53,7 @@ async fn main() -> tide::Result<()> {
         .get(WebSocket::new(|req, ws| run_instance_ws(req, ws)));
     app.at("/ws/instance/list")
         .get(WebSocket::new(|_req, ws| list_instances_ws(ws)));
+    app.at("/instance/:id/:tab").get(instance_options_dispatcher);
 
     app.at("/debug/ws")
         .get(WebSocket::new(|_req, stream| debug_ws(stream)));
