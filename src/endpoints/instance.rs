@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use async_std::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+use tide::StatusCode;
 use tide_websockets::WebSocketConnection;
 use tide_websockets::Message;
+use uuid::Uuid;
 
 use crate::instance::list::List;
 use crate::instance::Instance;
@@ -112,4 +114,19 @@ pub async fn list_instances_ws(mut ws: WebSocketConnection) -> tide::Result<()> 
     }
 
     Ok(())
+}
+
+pub async fn instance_options_dispatcher<'a>(req: EndpointRequest<'a>) -> tide::Result {
+    let id_param = req.param("id")
+        .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Missing ID"))?;
+    let _instance_id = Uuid::parse_str(id_param)
+        .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Invalid ID"))?;
+
+    let _tab = req.param("tab")
+        .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Missing Tab"))?;
+
+    Ok(tide::Response::builder(200)
+        .body("ok")
+        .content_type(tide::http::mime::PLAIN)
+        .build())
 }

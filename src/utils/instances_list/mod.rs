@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::{fs::File, io::ErrorKind};
 use std::io::Write;
 use std::fs::OpenOptions;
@@ -7,7 +8,10 @@ use crate::instance::Paths;
 
 use super::extract_filename;
 
-pub fn recreate(file: &String) -> Result<(File, Value), String> {
+pub fn recreate<P>(file: &P) -> Result<(File, Value), String>
+where
+    P: AsRef<Path>
+{
     let instaces_list_default_struct: serde_json::Value = json!({
         "instances": []
     });
@@ -70,7 +74,7 @@ pub fn add_to_registry(name: &str, paths: &Paths) -> Result<(), String> {
         }
 
         instances.push(json!({
-            "config": format!("{}/{}.json", paths.headers, name),
+            "config": format!("{}/{}.json", paths.headers.display(), name),
             "folder": paths.instance
         }));
 

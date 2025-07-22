@@ -8,6 +8,7 @@ use ts_rs::TS;
 
 pub mod operation;
 pub mod scan;
+pub mod task;
 
 
 pub trait WsMessageType: Serialize {
@@ -35,7 +36,8 @@ impl<'a> WsMessageType for WsMessage<'a> {}
 pub enum WsMessage<'a> {
     #[serde(borrow)]
     Operation(OperationMessage<'a>),
-    Scan(ScanMessage<'a>)
+    Scan(ScanMessage<'a>),
+    Task
 }
 
 #[derive(Serialize, Deserialize, Debug)]
