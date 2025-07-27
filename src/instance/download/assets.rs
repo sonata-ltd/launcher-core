@@ -3,81 +3,46 @@ use async_std::{
     io::WriteExt,
     task,
 };
-use chrono::Utc;
 use futures::{stream::FuturesUnordered, StreamExt};
 use serde_json::json;
-use std::{collections::HashSet, io::Write};
-use tide_websockets::WebSocketConnection;
+use std::{collections::HashSet, io::Write, path::Path, sync::Arc};
 
 use crate::{
-    instance::Paths,
-    websocket::messages::WsMessageType,
-    websocket::messages::{
-        operation::{
-            event::OperationUpdate,
-            process::{FileStatus, ProcessStatus, ProcessTarget},
-            stage::{OperationStage, StageResult, StageStatus},
-            OperationMessage,
-        },
-        BaseMessage, WsMessage,
+    instance::websocket::{OperationWsExt, OperationWsMessageLocked},
+    websocket::messages::operation::{
+        process::{FileStatus, ProcessTarget},
+        stage::{OperationStage, StageStatus},
     },
 };
 
 use super::manifest::is_array_exists;
 
-
 const STAGE_TYPE: OperationStage = OperationStage::DownloadAssets;
 
+pub async fn sync_assets<'a, T>(
+    manifest: &'a serde_json::Value,
+    assets_path: T,
+    metacache_path: T,
+    ws_status: OperationWsMessageLocked<'a>,
+) where
+    T: AsRef<Path>,
+{
+    ws_status
+        .clone()
+        .start_stage_determinable(STAGE_TYPE, None, 0, 0)
+        .await;
 
-pub async fn sync_assets<'a>(
-    manifest: &serde_json::Value,
-    assets_path: &'a str,
-    ws: &WebSocketConnection,
-    paths: &Paths<'a>,
-) {
-    let msg: WsMessage = OperationMessage {
-        base: BaseMessage {
-            message_id: "todo",
-            operation_id: Some("todo"),
-            request_id: Some("todo"),
-            timestamp: Utc::now(),
-            correlation_id: None,
-        },
-        data: OperationUpdate::Determinable {
-            stage: OperationStage::DownloadAssets,
-            status: ProcessStatus::Started,
-            target: None,
-            current: 0,
-            total: 0,
-        }
-        .into(),
-    }
-    .into();
+    extract_manifest_assets(
+        manifest,
+        assets_path,
+        metacache_path,
+        Arc::clone(&ws_status),
+    )
+    .await;
 
-    msg.send(&ws).await.unwrap();
-
-    extract_manifest_assets(manifest, assets_path, ws, paths).await;
-    println!("Asset extraction completed");
-
-    let msg: WsMessage = OperationMessage {
-        base: BaseMessage {
-            message_id: "todo",
-            operation_id: Some("todo"),
-            request_id: Some("todo"),
-            timestamp: Utc::now(),
-            correlation_id: None,
-        },
-        data: OperationUpdate::Completed(StageResult {
-            status: StageStatus::Completed,
-            stage: STAGE_TYPE,
-            duration_secs: 0.0, // TODO
-            error: None,
-        })
-        .into(),
-    }
-    .into();
-
-    msg.send(&ws).await.unwrap();
+    ws_status
+        .complete_stage(StageStatus::Completed, STAGE_TYPE, 0.0, None)
+        .await;
 }
 
 #[derive(Eq, PartialEq, Debug, Hash)]
@@ -86,21 +51,23 @@ struct AssetInfo {
     hash: String,
 }
 
-async fn extract_manifest_assets<'a>(
+async fn extract_manifest_assets<'a, T>(
     manifest: &'a serde_json::Value,
-    assets_path: &str,
-    ws: &WebSocketConnection,
-    paths: &Paths<'a>,
-) {
+    assets_path: T,
+    metacache_file_path: T,
+    ws_status: OperationWsMessageLocked<'a>,
+) where
+    T: AsRef<Path>,
+{
     let base_url = "https://resources.download.minecraft.net/";
-    let metacache_file = std::fs::File::open(&paths.metacache_file).unwrap();
+    let metacache_file = std::fs::File::open(&metacache_file_path).unwrap();
     let mut metacache: serde_json::Value = serde_json::from_reader(&metacache_file).unwrap();
     let mut downloaded_assets: HashSet<AssetInfo> = HashSet::new();
 
     if !is_array_exists(&metacache, "assets") {
         if let Some(metacache_object) = metacache.as_object_mut() {
             metacache_object.insert("assets".to_string(), json!([]));
-            let mut metacache_file = std::fs::File::create(&paths.metacache_file).unwrap();
+            let mut metacache_file = std::fs::File::create(&metacache_file_path).unwrap();
             metacache_file
                 .write_all(serde_json::to_string_pretty(&metacache).unwrap().as_bytes())
                 .unwrap();
@@ -121,7 +88,7 @@ async fn extract_manifest_assets<'a>(
                     let base_url = base_url.to_string();
                     let hash = v["hash"].as_str().unwrap().to_string();
                     let name = k.to_string();
-                    let assets_path = assets_path.to_string();
+                    let assets_path = assets_path.as_ref().display().to_string();
 
                     futures.push(task::spawn(async move {
                         println!("Downloading asset '{}'", name);
@@ -135,47 +102,51 @@ async fn extract_manifest_assets<'a>(
                     }));
 
                     if futures.len() >= 100 {
-                        process_futures(&mut futures, &mut downloaded_assets, objects.len(), ws)
-                            .await;
+                        process_futures(
+                            &mut futures,
+                            &mut downloaded_assets,
+                            objects.len(),
+                            Arc::clone(&ws_status),
+                        )
+                        .await;
                     }
                 }
             }
 
-            process_futures(&mut futures, &mut downloaded_assets, objects.len(), ws).await;
+            process_futures(
+                &mut futures,
+                &mut downloaded_assets,
+                objects.len(),
+                ws_status,
+            )
+            .await;
         }
     }
 
-    register_assets(downloaded_assets, metacache, paths).await;
+    register_assets(downloaded_assets, metacache, metacache_file_path).await;
 }
 
-async fn process_futures(
+async fn process_futures<'a>(
     futures: &mut FuturesUnordered<async_std::task::JoinHandle<std::option::Option<AssetInfo>>>,
     downloaded_assets: &mut HashSet<AssetInfo>,
     max: usize,
-    ws: &WebSocketConnection,
+    ws_status: OperationWsMessageLocked<'a>,
 ) {
+    let mut ws_status = ws_status;
+
     while let Some(result) = futures.next().await {
         if let Some(asset_info) = result {
-            let msg: WsMessage = OperationMessage {
-                base: BaseMessage {
-                    message_id: "todo",
-                    operation_id: Some("todo"),
-                    request_id: Some("todo"),
-                    timestamp: Utc::now(),
-                    correlation_id: None,
-                },
-                data: OperationUpdate::Determinable {
-                    stage: STAGE_TYPE,
-                    status: ProcessStatus::InProgress,
-                    target: Some(ProcessTarget::file(&asset_info.name, FileStatus::Downloaded)),
-                    current: downloaded_assets.len(),
-                    total: max,
-                }
-                .into(),
-            }
-            .into();
-
-            msg.send(&ws).await.unwrap();
+            ws_status = ws_status
+                .update_determinable(
+                    STAGE_TYPE,
+                    Some(ProcessTarget::file(
+                        asset_info.name.clone(),
+                        FileStatus::Downloaded,
+                    )),
+                    downloaded_assets.len(),
+                    max,
+                )
+                .await;
 
             downloaded_assets.insert(asset_info);
         }
@@ -218,11 +189,13 @@ async fn download_asset(
     }
 }
 
-async fn register_assets<'a>(
+async fn register_assets<'a, T>(
     downloaded_assets: HashSet<AssetInfo>,
     mut metacache: serde_json::Value,
-    paths: &Paths<'a>,
-) {
+    metacache_file_path: T,
+) where
+    T: AsRef<Path>,
+{
     if let Some(assets) = metacache["assets"].as_array_mut() {
         for item in downloaded_assets.iter() {
             assets.push(json!({
@@ -235,7 +208,10 @@ async fn register_assets<'a>(
         return;
     }
 
-    let mut metacache_file = File::create(&paths.metacache_file).await.unwrap();
+    let mut metacache_file = File::create(metacache_file_path.as_ref().display().to_string())
+        .await
+        .unwrap();
+
     metacache_file
         .write_all(serde_json::to_string_pretty(&metacache).unwrap().as_bytes())
         .await

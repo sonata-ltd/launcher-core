@@ -99,9 +99,9 @@ impl List {
 
             let msg: WsMessage = OperationMessage {
                 base: BaseMessage {
-                    message_id: "asd",
-                    operation_id: Some("asd"),
-                    request_id: Some("asd"),
+                    message_id: "asd".to_string(),
+                    operation_id: Some("asd".to_string()),
+                    request_id: Some("asd".to_string()),
                     timestamp: Utc::now(),
                     correlation_id: None,
                 },
@@ -126,9 +126,9 @@ impl List {
 
                     let msg: WsMessage = OperationMessage {
                         base: BaseMessage {
-                            message_id: "asd",
-                            operation_id: Some("asd"),
-                            request_id: Some("asd"),
+                            message_id: "asd".to_string(),
+                            operation_id: Some("asd".to_string()),
+                            request_id: Some("asd".to_string()),
                             timestamp: Utc::now(),
                             correlation_id: None,
                         },
@@ -136,9 +136,9 @@ impl List {
                             stage: STAGE_TYPE,
                             status: ProcessStatus::InProgress,
                             target: Some(ProcessTarget::instance(
-                                manifest_path,
+                                manifest_path.to_string(),
                                 manifest_exist,
-                                instance_path,
+                                instance_path.to_string(),
                                 instance_exist,
                                 scan_info,
                             )),
@@ -189,9 +189,9 @@ impl List {
 
             let msg: WsMessage = OperationMessage {
                 base: BaseMessage {
-                    message_id: "asd",
-                    operation_id: Some("asd"),
-                    request_id: Some("asd"),
+                    message_id: "asd".to_string(),
+                    operation_id: Some("asd".to_string()),
+                    request_id: Some("asd".to_string()),
                     timestamp: Utc::now(),
                     correlation_id: None,
                 },

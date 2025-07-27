@@ -4,7 +4,8 @@ use std::io::Write;
 use std::fs::OpenOptions;
 use serde_json::{json, Value};
 
-use crate::instance::Paths;
+use crate::instance::paths::InstancePaths;
+use crate::instance::Instance;
 
 use super::extract_filename;
 
@@ -25,12 +26,12 @@ where
     }
 }
 
-pub fn add_to_registry(name: &str, paths: &Paths) -> Result<(), String> {
+pub fn add_to_registry(instance: &Instance, paths: &InstancePaths) -> Result<(), String> {
     let instances_list_file = match OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
-        .open(&paths.instances_list_file) {
+        .open(paths.instances_list_file()) {
         Ok(file) => {
             println!("Instances list found");
             file
@@ -38,13 +39,13 @@ pub fn add_to_registry(name: &str, paths: &Paths) -> Result<(), String> {
 
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
-                match recreate(&paths.instances_list_file) {
+                match recreate(paths.instances_list_file()) {
                     Ok(_) => {
                         match OpenOptions::new()
                             .read(true)
                             .write(false)
                             .create(false)
-                            .open(&paths.instances_list_file) {
+                            .open(paths.instances_list_file()) {
                                 Ok(file) => file,
                                 Err(e) => return Err(e.to_string()),
                             }
@@ -63,9 +64,9 @@ pub fn add_to_registry(name: &str, paths: &Paths) -> Result<(), String> {
         for item in instances.iter() {
             if let Some(config_path) = item.get("config") {
                 if let Some(instance_name) = extract_filename(&config_path.to_string()) {
-                    println!("{} {}", name, instance_name);
+                    println!("{} {}", instance.name, instance_name);
 
-                    if name == instance_name {
+                    if instance.name == instance_name {
                         println!("Instance with the same name is already exist");
                         return Ok(());
                     }
@@ -74,11 +75,11 @@ pub fn add_to_registry(name: &str, paths: &Paths) -> Result<(), String> {
         }
 
         instances.push(json!({
-            "config": format!("{}/{}.json", paths.headers.display(), name),
-            "folder": paths.instance
+            "config": format!("{}/{}.json", paths.headers().display(), instance.name),
+            "folder": paths.instance()
         }));
 
-        let mut instances_list_file = File::create(&paths.instances_list_file).unwrap();
+        let mut instances_list_file = File::create(paths.instances_list_file()).unwrap();
         instances_list_file.write_all(serde_json::to_string_pretty(&instances_list).unwrap().as_bytes()).unwrap();
 
     } else {

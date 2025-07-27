@@ -13,7 +13,6 @@ use thiserror::Error;
 use crate::{utils::get_home_dir, websocket::messages::task::Task};
 
 pub mod definitions;
-pub mod paths;
 pub mod task;
 
 pub type _GlobalAppDataGuard<'a> = MutexGuard<'a, GlobalAppData<'a>>;

@@ -1,15 +1,10 @@
-use std::{collections::HashMap, process::exit};
-
 use async_std::process::Command;
 
-use super::{LaunchInfo, Paths};
+use super::LaunchInfo;
 
-pub async fn launch_instance<'a>(
-    manifest: serde_json::Value,
-    info: &HashMap<String, String>,
-    paths: &Paths<'a>
-) {
-    let args = define_launch_args(manifest, info, paths).await;
+
+pub async fn launch_instance<'a>(manifest: serde_json::Value, launch_info: LaunchInfo) {
+    let args = define_launch_args(manifest, launch_info);
     println!("{:#?}", args);
 
     // Command execution
@@ -22,16 +17,12 @@ pub async fn launch_instance<'a>(
     println!("{:#?}", output);
 }
 
-async fn define_launch_args<'a>(
-    manifest: serde_json::Value,
-    info: &HashMap<String, String>,
-    _paths: &Paths<'a>
-) -> Vec<String> {
+fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -> Vec<String> {
     let mut tmp_args: Vec<String> = Vec::new();
 
     println!("{:#?}", info);
 
-/*     let natives_dir = "/home/quartix/.sonata/instances/natives"; */
+    /*     let natives_dir = "/home/quartix/.sonata/instances/natives"; */
 
     let mut jvm_args = vec![
         "-XX:+UnlockExperimentalVMOptions".to_string(),
@@ -61,20 +52,22 @@ async fn define_launch_args<'a>(
     // tmp_args.push("-Dio.netty.native.workdir=/".to_owned() + natives_dir);
 
     tmp_args.push("-cp".to_string());
-    tmp_args.push(info.get("${classpath_libs_directories}").unwrap().to_string());
+    tmp_args.push(info.classpath);
 
-    if let Some(classpath) = manifest["mainClass"].as_str() {
-        tmp_args.push(classpath.to_string());
+    // Append main class that contains run point
+    if let Some(main_class) = info.main_class {
+        tmp_args.push(main_class);
+    } else if let Some(main_class) = manifest["mainClass"].as_str() {
+        tmp_args.push(main_class.to_string());
     }
 
     if let Some(arguments) = manifest["arguments"].as_object() {
         if let Some(game_args) = arguments["game"].as_array() {
-
             for arg in game_args {
                 if let Some(simple_arg) = arg.as_str() {
                     if simple_arg[..2] == *"${" {
                         let default = " ".to_string();
-                        let value = info.get(simple_arg).unwrap_or(&default);
+                        let value = info.game_args.get(simple_arg).unwrap_or(&default);
                         tmp_args.push(value.to_owned());
                     } else {
                         tmp_args.push(simple_arg.to_string());
@@ -84,7 +77,6 @@ async fn define_launch_args<'a>(
                 }
             }
         }
-
     } else if let Some(arguments) = manifest["minecraftArguments"].as_str() {
         println!("Using legacy manifest extraction pattern...");
         let arguments = arguments.split_whitespace();
@@ -92,7 +84,7 @@ async fn define_launch_args<'a>(
         for arg in arguments {
             if &arg[..2] == "${" {
                 let default = " ".to_string();
-                let value = info.get(arg).unwrap_or(&default);
+                let value = info.game_args.get(arg).unwrap_or(&default);
                 tmp_args.push(value.to_owned());
             } else {
                 tmp_args.push(arg.to_string());

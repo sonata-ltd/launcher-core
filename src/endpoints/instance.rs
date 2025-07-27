@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use async_std::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -8,23 +6,36 @@ use tide_websockets::WebSocketConnection;
 use tide_websockets::Message;
 use uuid::Uuid;
 
+use crate::instance::launch::ClientOptions;
 use crate::instance::list::List;
 use crate::instance::Instance;
 use crate::EndpointRequest;
 
+
+#[derive(Deserialize)]
+struct CreateRequest {
+    name: String,
+    url: String,
+    request_id: String,
+}
 
 pub async fn init_instance_ws<'a>(
     req: EndpointRequest<'a>,
     mut ws: WebSocketConnection,
 ) -> tide::Result<()> {
     while let Some(Ok(Message::Text(input))) = ws.next().await {
-        let mut instance_request: Instance = serde_json::from_str(&input).map_err(|e| {
+        let CreateRequest {
+            name,
+            url,
+            request_id
+        } = serde_json::from_str(&input).map_err(|e| {
             println!("Failed to parse JSON");
             tide::Error::from_str(400, format!("Failed to parse recieved JSON: {}", e))
         })?;
 
         let response: serde_json::Value;
-        match Instance::init(&mut instance_request, &req, &ws).await {
+        let instance = Instance::new(name, url, request_id);
+        match Instance::init(instance, None, &req, &ws).await {
             Ok(_) => {
                 response = json!({
                     "message": "instance initialized"
@@ -50,8 +61,8 @@ pub async fn init_instance_ws<'a>(
 struct RunRequest {
     name: String,
     url: String,
-    info: HashMap<String, String>,
     request_id: String,
+    launch_options: Option<ClientOptions>,
 }
 
 pub async fn run_instance_ws<'a>(
@@ -62,7 +73,7 @@ pub async fn run_instance_ws<'a>(
         let RunRequest {
             name,
             url,
-            info,
+            launch_options,
             request_id,
         } = serde_json::from_str(&input).map_err(|e| {
             println!("Failed to parse JSON");
@@ -70,9 +81,13 @@ pub async fn run_instance_ws<'a>(
         })?;
 
         let response: serde_json::Value;
-        let instance_request = Instance::new(name, url, Some(info), request_id);
+        let instance_request = Instance::new(
+            name,
+            url,
+            request_id
+        );
 
-        match Instance::run(instance_request, &req, &ws).await {
+        match Instance::run(instance_request, launch_options, &req, &ws).await {
             Ok(result) => response = json!(result),
 
             Err(e) => {
