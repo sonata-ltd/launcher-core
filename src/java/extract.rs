@@ -148,7 +148,7 @@ async fn parse_main_manifest
 {
     let manifest = match download_in_json(&java.manifest_url).await {
         Ok(data) => data,
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.to_string()),
     };
 
     let osarch = match arch::manifest_osarch() {
@@ -204,7 +204,7 @@ async fn parse_main_manifest
                                         ), None)
                                     );
                                 },
-                                Err(e) => return Err(e),
+                                Err(e) => return Err(e.to_string()),
                             };
                         }
                     }

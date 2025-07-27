@@ -1,14 +1,25 @@
-use std::process::exit;
+use std::sync::Arc;
+
+use launch::{ClientOptions, LaunchInfoBuilder};
+
+use crate::{
+    instance::websocket::{OperationWsExt, OperationWsMessage},
+    websocket::messages::operation::stage::{OperationStage, StageStatus},
+};
 
 use super::*;
 
 impl<'a> Instance {
     pub async fn init<'b>(
-        &mut self,
+        mut self,
+        _launch_options: Option<ClientOptions>,
         req: &'b EndpointRequest<'a>,
         ws: &WebSocketConnection,
-    ) -> Result<LaunchInfo<'b>> {
-        // Init task
+    ) -> Result<(Self, LaunchInfo)> {
+        // Init WebSocket sync task
+        let ws_status = OperationWsMessage::create_init_task(&ws, &self.request_id).await;
+
+        // Init internal task
         let global_app_state = req.state();
         let task_handle = match global_app_state
             .add_task(Task::new_shared(
@@ -25,37 +36,19 @@ impl<'a> Instance {
         };
 
         // Get default paths
-        let mut paths = match get_required_paths(&self.name, &global_app_state.static_data.launcher_root_path) {
-            Ok(paths) => paths,
-            Err(e) => return Err(e),
-        };
+        let mut paths = paths::InstancePaths::get_required_paths(
+            &self.name,
+            &global_app_state.static_data.launcher_root_path,
+        );
 
-        // Update launch arguments if info is not `None`
-        self.update_info("${game_directory}", paths.instance.display().to_string());
-        self.update_info("${assets_root}", paths.assets.display().to_string());
-        self.update_info("${user_properties}", "{}".to_string());
+        // Init launch_info struct builder
+        let mut launch_builder = LaunchInfoBuilder::new();
 
-        let msg: WsMessage = OperationMessage {
-            base: BaseMessage {
-                message_id: "todo",
-                operation_id: Some("todo"),
-                request_id: Some("todo"),
-                timestamp: Utc::now(),
-                correlation_id: None,
-            },
-            data: OperationStart {
-                stages: vec![
-                    OperationStage::FetchManifest,
-                    OperationStage::DownloadLibs,
-                    OperationStage::DownloadAssets,
-                ],
-            }
-            .into(),
-        }
-        .into();
-
-        msg.send(&ws).await.unwrap();
-
+        // Sync WebSocket task and internal task
+        ws_status
+            .clone()
+            .start_stage_indeterminable(OperationStage::FetchManifest)
+            .await;
         global_app_state
             .update_task(task_handle.id, |t| {
                 t.status = TaskStatus::Running;
@@ -68,34 +61,29 @@ impl<'a> Instance {
         // Get Minecraft version manifest - Stage 1
         // TODO: Find already downloaded manifest and redownload
         // it if outdated
-        let version_manifest = match manifest::download_manifest(&self.url, Some(&paths.meta)).await {
+        match manifest::download_manifest(&self.url, Some(paths.meta())).await {
             Ok((data, path_to_manifest)) => {
-                let msg: WsMessage = OperationMessage {
-                    base: BaseMessage {
-                        message_id: "todo",
-                        operation_id: Some("todo"),
-                        request_id: Some("todo"),
-                        timestamp: Utc::now(),
-                        correlation_id: None,
-                    },
-                    data: OperationUpdate::Completed(StageResult {
-                        status: StageStatus::Completed,
-                        stage: OperationStage::FetchManifest,
-                        duration_secs: 0.0, // TODO
-                        error: None,
-                    })
-                    .into(),
-                }
-                .into();
-
-                msg.send(&ws).await.unwrap();
-
-                // Update info in Paths structure for instance manifest generation
-                if let Some(path_to_manifest) = path_to_manifest {
-                    paths.version_manifest_file = Some(PathBuf::from(path_to_manifest));
+                if let Some(version) = data["id"].as_str() {
+                    self.version = Some(version.to_string());
+                } else {
+                    return Err(InstanceError::VersionNotAvailable);
                 }
 
-                data
+                self.manifest = data;
+
+                if let Some(path) = path_to_manifest {
+                    paths.set_version_manifest_file(path);
+                }
+
+                ws_status
+                    .clone()
+                    .complete_stage(
+                        StageStatus::Completed,
+                        OperationStage::FetchManifest,
+                        0.0,
+                        None,
+                    )
+                    .await;
             }
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
@@ -104,7 +92,6 @@ impl<'a> Instance {
                 )))
             }
         };
-
 
         global_app_state
             .update_task(task_handle.id, |t| {
@@ -115,17 +102,9 @@ impl<'a> Instance {
             .unwrap();
 
         // Sync & download all libs needed by this version - Stage 2
-        match libs::sync_libs(&version_manifest, &paths, &ws).await {
-            Ok((dir, paths)) => {
-                let mut paths_string = String::new();
-
-                for path in paths.iter() {
-                    paths_string.push_str(&path);
-                }
-
-                // Update launch args if info is not None
-                self.update_info("${libs_directory}", dir.to_string());
-                self.update_info("${classpath_libs_directories}", paths_string);
+        match libs::sync_libs(&self.manifest, &paths, Arc::clone(&ws_status)).await {
+            Ok(classpaths) => {
+                launch_builder.add_cps(classpaths);
             }
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
@@ -134,24 +113,25 @@ impl<'a> Instance {
             }
         };
 
-
         // Get version assets manifest
-        let assets_manifest_location = paths.assets.to_owned().join("indexes");
-        println!("{}", version_manifest);
-        let assets_manifest =
-            match manifest::get_assets_manifest(&version_manifest, &assets_manifest_location.to_str().unwrap()).await
-            {
-                Ok((data, id)) => {
-                    self.update_info("${assets_index_name}", id.to_string());
-                    data
-                }
-                Err(e) => {
-                    return Err(InstanceError::CreationFailed(format!(
-                        "Failed to download assets manifest: {}",
-                        e
-                    )))
-                }
-            };
+        let assets_manifest_location = paths.assets().join("indexes");
+        let assets_manifest = match manifest::get_assets_manifest(
+            &self.manifest,
+            &assets_manifest_location.to_str().unwrap(),
+        )
+        .await
+        {
+            Ok((data, id)) => {
+                launch_builder.add_arg("${assets_index_name}", id);
+                data
+            }
+            Err(e) => {
+                return Err(InstanceError::CreationFailed(format!(
+                    "Failed to download assets manifest: {}",
+                    e
+                )))
+            }
+        };
 
         global_app_state
             .update_task(task_handle.id, |t| {
@@ -162,23 +142,18 @@ impl<'a> Instance {
             .unwrap();
 
         // Sync & download all assets needed by this version - Stage 3
-        let assets_objects_location = paths.assets.display().to_string().to_owned() + "/objects";
-        assets::sync_assets(&assets_manifest, &assets_objects_location, ws, &paths).await;
-        println!("pizda");
+        let assets_objects_dir = paths.assets().join("objects");
+        assets::sync_assets(
+            &assets_manifest,
+            &assets_objects_dir,
+            &paths.metacache_file(),
+            Arc::clone(&ws_status),
+        )
+        .await;
 
         // Initialize instance directory
-        let instance_version = match version_manifest["id"].as_str() {
-            Some(data) => InstanceInfo {
-                version: data.to_string(),
-            },
-            None => {
-                return Err(InstanceError::CreationFailed(
-                    "Failed to determine version".to_string(),
-                ))
-            }
-        };
-
-        match Self::register_instance(&self, &paths, &instance_version).await {
+        self.paths = Some(paths);
+        match Self::register_instance(&self).await {
             Ok(_) => {}
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
@@ -188,7 +163,6 @@ impl<'a> Instance {
             }
         };
 
-
         global_app_state
             .update_task(task_handle.id, |t| {
                 t.stage = None;
@@ -197,9 +171,6 @@ impl<'a> Instance {
             .await
             .unwrap();
 
-        return Ok(LaunchInfo {
-            version_manifest,
-            paths,
-        });
+        return Ok((self, launch_builder.build()));
     }
 }

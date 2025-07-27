@@ -5,7 +5,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::Path;
 
-use crate::instance::{Instance, InstanceInfo, Paths};
+use crate::instance::paths::InstancePaths;
+use crate::instance::Instance;
 
 pub fn recreate<P>(file: &P) -> Result<(File, Value), String>
 where
@@ -57,14 +58,13 @@ pub struct Java<'a> {
 
 pub fn gen_manifest<'a>(
     instance: &Instance,
-    paths: &Paths,
-    instance_info: &InstanceInfo,
+    paths: &InstancePaths, // Instance manifest file path
 ) -> Result<(), String> {
     let instance_manifest_file = match OpenOptions::new()
         .read(true)
         .write(false)
         .create(false)
-        .open(&paths.instance_manifest_file)
+        .open(paths.instance_manifest_file())
     {
         Ok(file) => {
             println!("Instance manifest found");
@@ -73,13 +73,13 @@ pub fn gen_manifest<'a>(
 
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
-                match recreate(&paths.instance_manifest_file) {
+                match recreate(paths.instance_manifest_file()) {
                     Ok(_) => {
                         match OpenOptions::new()
                             .read(true)
                             .write(false)
                             .create(false)
-                            .open(&paths.instance_manifest_file)
+                            .open(paths.instance_manifest_file())
                         {
                             Ok(file) => file,
                             Err(e) => return Err(e.to_string()),
@@ -102,9 +102,12 @@ pub fn gen_manifest<'a>(
             Err(_) => json!({}),
         };
 
+    let instance_version = instance.version().as_ref().unwrap();
+    let instance_name = &instance.name;
+
     // Generate UUID for instance
     let mut hasher = Sha1::new();
-    let hasher_ready_input = format!("{}_{}", instance.name, &instance_info.version);
+    let hasher_ready_input = format!("{}_{}", instance_name, instance_version);
     hasher.update(hasher_ready_input.as_bytes());
     let uuid = hasher.digest().to_string();
 
@@ -112,10 +115,10 @@ pub fn gen_manifest<'a>(
         general: General {
             id: &uuid,
             loader: "vanilla",
-            version: &instance_info.version,
+            version: &instance_version,
         },
         overview: Overview {
-            name: &instance.name,
+            name: &instance_name,
             tags: "",
             selected_export_type: None,
             playtime: 0,
@@ -124,7 +127,10 @@ pub fn gen_manifest<'a>(
     };
 
 
-    let mut instance_manifest_file = File::create(format!("{}/{}.json", &paths.headers.display(), &uuid)).unwrap();
+    let mut instance_manifest_file = File::create(
+        format!("{}/{}.json", paths.headers().display(), &uuid)
+    ).unwrap();
+
     instance_manifest_file
         .write_all(
             serde_json::to_string_pretty(

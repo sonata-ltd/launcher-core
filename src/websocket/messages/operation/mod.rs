@@ -10,17 +10,16 @@ pub mod process;
 pub mod progress;
 
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
 #[ts(export)]
-pub struct OperationMessage<'a> {
-    #[serde(flatten, borrow)]
-    pub base: BaseMessage<'a>,
-    pub data: OperationEvent<'a>
+pub struct OperationMessage {
+    pub base: BaseMessage,
+    pub data: OperationEvent
 }
 
-impl<'a> From<OperationMessage<'a>> for WsMessage<'a> {
-    fn from(msg: OperationMessage<'a>) -> Self {
+impl From<OperationMessage> for WsMessage {
+    fn from(msg: OperationMessage) -> Self {
         WsMessage::Operation(msg)
     }
 }

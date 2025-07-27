@@ -3,85 +3,51 @@ use async_std::{
     fs::{create_dir_all, File},
     io::WriteExt,
 };
-use chrono::Utc;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use serde_json::{self, json};
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use tide_websockets::WebSocketConnection;
+use std::sync::Arc;
 
-use crate::instance::Paths;
+use crate::instance::paths::InstancePaths;
+use crate::instance::websocket::{OperationWsExt, OperationWsMessageLocked};
 use crate::utils::metacache;
-use crate::websocket::messages::operation::event::OperationUpdate;
-use crate::websocket::messages::operation::process::{FileStatus, ProcessStatus, ProcessTarget};
-use crate::websocket::messages::operation::stage::{OperationStage, StageResult, StageStatus};
-use crate::websocket::messages::operation::OperationMessage;
-use crate::websocket::messages::{BaseMessage, WsMessage, WsMessageType};
+use crate::websocket::messages::operation::process::{FileStatus, ProcessTarget};
+use crate::websocket::messages::operation::stage::{OperationStage, StageStatus};
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadLibs;
 
 pub async fn sync_libs<'a>(
     manifest: &serde_json::Value,
-    paths: &Paths<'a>,
-    ws: &WebSocketConnection,
-) -> Result<(String, Vec<String>), String> {
-    let msg: WsMessage = OperationMessage {
-        base: BaseMessage {
-            message_id: "todo",
-            operation_id: Some("todo"),
-            request_id: Some("todo"),
-            timestamp: Utc::now(),
-            correlation_id: None,
-        },
-        data: OperationUpdate::Determinable {
-            stage: OperationStage::DownloadLibs,
-            status: ProcessStatus::Started,
-            target: None,
-            current: 0,
-            total: 0,
-        }
-        .into(),
-    }
-    .into();
+    paths: &InstancePaths,
+    ws_status: OperationWsMessageLocked<'a>
+) -> Result<Vec<String>, String> {
+    // Sync status through WebSocket
+    ws_status
+        .clone()
+        .start_stage_determinable(STAGE_TYPE, None, 0, 0)
+        .await;
 
-    msg.send(&ws).await.unwrap();
+    let done_paths =
+        match extract_manifest_libs(manifest, "osx", paths, Arc::clone(&ws_status)).await
+        {
+            Ok(paths) => paths,
+            Err(e) => return Err(e),
+        };
 
-    let done_paths = match extract_manifest_libs(manifest, "osx", paths, ws).await {
-        Ok(paths) => paths,
-        Err(e) => return Err(e),
-    };
+    ws_status
+        .complete_stage(StageStatus::Completed, STAGE_TYPE, 0.0, None)
+        .await;
 
-    println!("Download Finished");
-
-    let msg: WsMessage = OperationMessage {
-        base: BaseMessage {
-            message_id: "todo",
-            operation_id: Some("todo"),
-            request_id: Some("todo"),
-            timestamp: Utc::now(),
-            correlation_id: None,
-        },
-        data: OperationUpdate::Completed(StageResult {
-            status: StageStatus::Completed,
-            stage: STAGE_TYPE,
-            duration_secs: 0.0,
-            error: None,
-        })
-        .into(),
-    }
-    .into();
-
-    msg.send(&ws).await.unwrap();
-
-    Ok((format!("{}/.sonata/libraries/", paths.root.display()), done_paths))
+    Ok(done_paths)
 }
 
 async fn extract_manifest_libs<'a>(
     manifest: &serde_json::Value,
     current_os: &str,
-    paths: &Paths<'a>,
-    ws: &WebSocketConnection,
+    paths: &InstancePaths,
+    ws_status: OperationWsMessageLocked<'a>,
 ) -> Result<Vec<String>, String> {
     // Hashmap contains: hash, (name, path, url)
     let mut version_libs: HashMap<&str, (String, String, &str)> = HashMap::new();
@@ -174,13 +140,13 @@ async fn extract_manifest_libs<'a>(
     }
 
     println!("{:#?}", version_libs);
-    match download_missing_libs(version_libs, paths, ws).await {
+    match download_missing_libs(version_libs, paths, ws_status).await {
         Ok(paths) => Ok(paths),
         Err(e) => Err(e),
     }
 }
 
-#[derive(Eq, Hash, PartialEq, Debug)]
+#[derive(Eq, Hash, PartialEq, Debug, Clone)]
 struct LibInfo {
     hash: String,
     name: String,
@@ -189,19 +155,19 @@ struct LibInfo {
 
 async fn download_missing_libs<'a>(
     version_libs: HashMap<&str, (String, String, &str)>,
-    paths: &'a Paths<'a>,
-    ws: &WebSocketConnection,
+    paths: &InstancePaths,
+    ws_status: OperationWsMessageLocked<'a>,
 ) -> Result<Vec<String>, String> {
     let metacache_file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open(&paths.metacache_file)
+        .open(paths.metacache_file())
         .unwrap();
 
     let metacache: serde_json::Value = match serde_json::from_reader(&metacache_file) {
         Ok(value) => value,
-        Err(_) => match metacache::recreate(&paths.metacache_file.display().to_string()) {
+        Err(_) => match metacache::recreate(paths.metacache_file()) {
             Ok((_file, value)) => value,
             Err(e) => {
                 println!("Failed to recreate metacache file: {}", e);
@@ -223,19 +189,26 @@ async fn download_missing_libs<'a>(
             let lib_url = v.2.to_string();
 
             if libs_paths.is_empty() {
-                libs_paths.push(format!("{}/{}", paths.libs.display(), lib_path));
+                libs_paths.push(format!("{}/{}", paths.libs().display(), lib_path));
             } else {
-                libs_paths.push(format!(":{}/{}", paths.libs.display(), lib_path));
+                libs_paths.push(format!(":{}/{}", paths.libs().display(), lib_path));
             }
 
             if !libraries
                 .iter()
                 .any(|lib| lib["hash"].as_str() == Some(&lib_hash))
             {
-                let libs_path = paths.libs.clone();
+                let libs_path = paths.libs().clone();
 
                 futures.push(task::spawn(async move {
-                    match download_libs(&lib_name, &lib_path, &lib_url, &lib_hash, &libs_path.to_str().unwrap()).await
+                    match download_libs(
+                        &lib_name,
+                        &lib_path,
+                        &lib_url,
+                        &lib_hash,
+                        &libs_path.to_str().unwrap(),
+                    )
+                    .await
                     {
                         Ok(lib_info) => Some(lib_info),
                         Err(e) => {
@@ -246,47 +219,51 @@ async fn download_missing_libs<'a>(
                 }));
 
                 if futures.len() >= 100 {
-                    process_futures(&mut futures, &mut downloaded_libs, version_libs.len(), ws)
-                        .await;
+                    process_futures(
+                        &mut futures,
+                        &mut downloaded_libs,
+                        version_libs.len(),
+                        Arc::clone(&ws_status),
+                    )
+                    .await;
                 }
             }
         }
 
-        process_futures(&mut futures, &mut downloaded_libs, version_libs.len(), ws).await;
+        process_futures(
+            &mut futures,
+            &mut downloaded_libs,
+            version_libs.len(),
+            ws_status,
+        )
+        .await;
     }
 
     register_libs(downloaded_libs, metacache, paths).await;
     Ok(libs_paths)
 }
 
-async fn process_futures(
+async fn process_futures<'a>(
     futures: &mut FuturesUnordered<async_std::task::JoinHandle<std::option::Option<LibInfo>>>,
     downloaded_libraries: &mut HashSet<LibInfo>,
     max: usize,
-    ws: &WebSocketConnection,
+    ws_status: OperationWsMessageLocked<'a>,
 ) {
+    let mut ws_status = ws_status;
+
     while let Some(result) = futures.next().await {
         if let Some(asset_info) = result {
-            let msg: WsMessage = OperationMessage {
-                base: BaseMessage {
-                    message_id: "todo",
-                    operation_id: Some("todo"),
-                    request_id: Some("todo"),
-                    timestamp: Utc::now(),
-                    correlation_id: None,
-                },
-                data: OperationUpdate::Determinable {
-                    stage: STAGE_TYPE,
-                    status: ProcessStatus::InProgress,
-                    target: Some(ProcessTarget::file(&asset_info.name, FileStatus::Downloaded)),
-                    current: downloaded_libraries.len(),
-                    total: max,
-                }
-                .into(),
-            }
-            .into();
-
-            msg.send(&ws).await.unwrap();
+                ws_status = ws_status
+                    .update_determinable(
+                    STAGE_TYPE,
+                    Some(ProcessTarget::file(
+                        asset_info.name.clone(),
+                        FileStatus::Downloaded,
+                    )),
+                    downloaded_libraries.len(),
+                    max,
+                )
+                .await;
 
             downloaded_libraries.insert(asset_info);
         }
@@ -340,7 +317,7 @@ async fn download_libs(
 async fn register_libs<'a>(
     downloaded_libs: HashSet<LibInfo>,
     mut metacache: serde_json::Value,
-    paths: &Paths<'a>,
+    paths: &InstancePaths,
 ) {
     if let Some(libs) = metacache["libraries"].as_array_mut() {
         for item in downloaded_libs.iter() {
@@ -352,7 +329,7 @@ async fn register_libs<'a>(
         }
     }
 
-    let mut metacache_file = File::create(&paths.metacache_file).await.unwrap();
+    let mut metacache_file = File::create(paths.metacache_file()).await.unwrap();
     metacache_file
         .write_all(serde_json::to_string_pretty(&metacache).unwrap().as_bytes())
         .await
