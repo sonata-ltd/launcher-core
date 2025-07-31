@@ -5,7 +5,7 @@ use crate::websocket::messages::scan::{ScanInfo, ScanIntegrity};
 
 use super::progress::ProgressUnit;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
 #[ts(export)]
@@ -16,14 +16,14 @@ pub enum ProcessStatus {
     Failed,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[derive(TS)]
 #[ts(export)]
-pub enum ProcessTarget<'a> {
+pub enum ProcessTarget {
     File {
         status: TargetStatus,
-        name: &'a str,
+        name: String,
 
         #[serde(skip_serializing_if = "Option::is_none")]
         unit: Option<ProgressUnit>,
@@ -38,12 +38,12 @@ pub enum ProcessTarget<'a> {
         // TODO
     },
     Instance {
-        integrity: ScanIntegrity<'a>,
+        integrity: ScanIntegrity,
         info: Option<ScanInfo>,
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
 #[ts(export)]
@@ -52,7 +52,7 @@ pub enum TargetStatus {
     Dir(DirStatus),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
 #[ts(export)]
@@ -68,7 +68,7 @@ impl From<FileStatus> for TargetStatus {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
 #[ts(export)]
@@ -77,8 +77,8 @@ pub enum DirStatus {
     FailedToCreate,
 }
 
-impl<'a> ProcessTarget<'a> {
-    pub fn file(name: &'a str, status: FileStatus) -> Self {
+impl ProcessTarget {
+    pub fn file(name: String, status: FileStatus) -> Self {
         ProcessTarget::File {
             status: status.into(),
             name,
@@ -90,7 +90,7 @@ impl<'a> ProcessTarget<'a> {
 
     #[allow(dead_code)]
     pub fn file_with_details(
-        name: &'a str,
+        name: String,
         status: FileStatus,
         unit: Option<ProgressUnit>,
         current: Option<usize>,
@@ -106,9 +106,9 @@ impl<'a> ProcessTarget<'a> {
     }
 
     pub fn instance(
-        manifest_path: &'a str,
+        manifest_path: String,
         manifest_exist: bool,
-        instance_path: &'a str,
+        instance_path: String,
         instance_exist: bool,
         scan_info: Option<ScanInfo>,
     ) -> Self {

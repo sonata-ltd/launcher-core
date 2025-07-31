@@ -1,9 +1,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::Path;
 use serde_json::{json, Value};
 
 
-pub fn recreate(file_path: &String) -> Result<(File, Value), String> {
+pub fn recreate<P: AsRef<Path>>(file_path: P) -> Result<(File, Value), String> {
     let metacache_default_struct: serde_json::Value = json!({
         "javas": [],
         "libraries": [],
