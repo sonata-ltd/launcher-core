@@ -1,7 +1,6 @@
 use async_std::fs::create_dir_all;
-use getset::Getters;
 use core::str;
-use download::manifest;
+use getset::Getters;
 use launch::ClientOptions;
 use launch::LaunchInfo;
 use paths::InstancePaths;
@@ -9,8 +8,6 @@ use serde::Deserialize;
 use thiserror::Error;
 
 pub mod download;
-use download::assets;
-use download::libs;
 use tide_websockets::WebSocketConnection;
 
 pub mod init;
@@ -19,13 +16,28 @@ pub mod list;
 pub mod paths;
 mod websocket;
 
-use crate::utils::instance_manifest::gen_manifest;
+use crate::manifest::instance::gen_manifest;
+use crate::manifest::instance::uuid::UuidData;
 use crate::utils::instances_list::add_to_registry;
 use crate::websocket::messages::task::Task;
 use crate::websocket::messages::task::TaskProgress;
 use crate::websocket::messages::task::TaskStatus;
 use crate::EndpointRequest;
 
+#[derive(Deserialize)]
+pub struct InitData {
+    pub name: String,
+    pub url: String,
+    pub request_id: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct RunData {
+    name: String,
+    url: String,
+    request_id: String,
+    launch_options: Option<ClientOptions>,
+}
 
 #[derive(Debug, Deserialize, Clone, Getters)]
 pub struct Instance {
@@ -34,9 +46,9 @@ pub struct Instance {
     pub request_id: String,
 
     #[get = "pub"]
-    version: Option<String>,
-    manifest: serde_json::Value,
-    paths: Option<InstancePaths>,
+    version_id: String,
+    version_manifest: serde_json::Value,
+    paths: InstancePaths,
 }
 
 #[derive(Error, Debug)]
@@ -63,55 +75,52 @@ pub enum InstanceError {
     PathsNotInitialized,
 
     #[error("Failed to retrieve instance version")]
-    VersionNotAvailable
+    VersionNotAvailable,
 }
 
 pub type Result<T> = std::result::Result<T, InstanceError>;
 
 impl<'a> Instance {
-    pub fn new(name: String, url: String, request_id: String) -> Self {
-        // Allocate and init launch_info struct if game_args is passed
-        Instance {
-            name,
-            url,
-            version: None,
-            manifest: serde_json::Value::Null,
-            request_id,
-            paths: None,
-        }
-    }
-
     pub async fn run(
-        self,
-        launch_options: Option<ClientOptions>,
+        run_data: RunData,
         req: &EndpointRequest<'a>,
         ws: &WebSocketConnection,
     ) -> Result<()> {
-        let (instance, launch_info) = match Self::init(self, launch_options, req, ws).await {
-            Ok(result) => result,
-            Err(e) => {
-                println!("{e}");
-                return Err(e);
-            }
+        let init_data = InitData {
+            name: run_data.name,
+            url: run_data.url,
+            request_id: run_data.request_id,
         };
 
-        launch::execute::launch_instance(instance.manifest, launch_info).await;
+        let (instance, launch_info) =
+            match Self::init(init_data, run_data.launch_options, req, ws).await {
+                Ok(result) => result,
+                Err(e) => {
+                    println!("{e}");
+                    return Err(e);
+                }
+            };
+
+        launch::execute::launch_instance(instance.version_manifest, launch_info).await;
         Ok(())
     }
 
     async fn register_instance(instance: &Instance) -> Result<()> {
-        let paths = instance.paths.as_ref().unwrap();
+        let paths = &instance.paths;
+
+        let uuid = UuidData::new()
+            .add_name(&instance.name)
+            .add_version(instance.version_id())
+            .gen();
 
         match create_dir_all(paths.instance()).await {
             Ok(_) => {
-                println!("Initialized instance dir");
-
-                match add_to_registry(&instance, &paths) {
+                match add_to_registry(&instance, &paths, &uuid) {
                     Ok(_) => {}
                     Err(e) => return Err(InstanceError::RegistrationFailed(e)),
                 };
 
-                match gen_manifest(&instance, &paths) {
+                match gen_manifest(&instance, &paths, &uuid).await {
                     Ok(_) => {}
                     Err(e) => return Err(InstanceError::ManifestGenerationFailed(e)),
                 };

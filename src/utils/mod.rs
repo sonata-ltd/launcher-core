@@ -7,12 +7,11 @@ use home::home_dir;
 use crate::data::definitions::EnvVars;
 
 pub mod download;
-pub mod instance_manifest;
 pub mod instances_list;
 pub mod metacache;
 
 
-pub fn extract_filename(path: &str) -> Option<&str> {
+pub fn _extract_filename(path: &str) -> Option<&str> {
     let last_slash = path.rfind('/')?;
     let last_dot = path.rfind('.')?;
 

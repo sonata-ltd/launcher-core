@@ -3,7 +3,13 @@ use std::sync::Arc;
 use launch::{ClientOptions, LaunchInfoBuilder};
 
 use crate::{
-    instance::websocket::{OperationWsExt, OperationWsMessage},
+    instance::{
+        download::{
+            assets::AssetsData, libs::LibsData, manifest::{download_manifest, get_assets_manifest}
+        },
+        launch::args::ArgType,
+        websocket::{OperationWsExt, OperationWsMessage},
+    },
     websocket::messages::operation::stage::{OperationStage, StageStatus},
 };
 
@@ -11,13 +17,13 @@ use super::*;
 
 impl<'a> Instance {
     pub async fn init<'b>(
-        mut self,
+        client_data: InitData,
         _launch_options: Option<ClientOptions>,
         req: &'b EndpointRequest<'a>,
         ws: &WebSocketConnection,
     ) -> Result<(Self, LaunchInfo)> {
         // Init WebSocket sync task
-        let ws_status = OperationWsMessage::create_init_task(&ws, &self.request_id).await;
+        let ws_status = OperationWsMessage::create_init_task(&ws, &client_data.request_id).await;
 
         // Init internal task
         let global_app_state = req.state();
@@ -37,12 +43,14 @@ impl<'a> Instance {
 
         // Get default paths
         let mut paths = paths::InstancePaths::get_required_paths(
-            &self.name,
+            &client_data.name,
             &global_app_state.static_data.launcher_root_path,
         );
 
-        // Init launch_info struct builder
+        // Init launch_info struct builder and set some data available
         let mut launch_builder = LaunchInfoBuilder::new();
+        launch_builder.set_arg_value(ArgType::GameDir, &paths.instance());
+        launch_builder.set_arg_value(ArgType::AssetsDir, &paths.assets());
 
         // Sync WebSocket task and internal task
         ws_status
@@ -61,16 +69,9 @@ impl<'a> Instance {
         // Get Minecraft version manifest - Stage 1
         // TODO: Find already downloaded manifest and redownload
         // it if outdated
-        match manifest::download_manifest(&self.url, Some(paths.meta())).await {
+        let version_manifest = match download_manifest(&client_data.url, Some(paths.meta())).await {
             Ok((data, path_to_manifest)) => {
-                if let Some(version) = data["id"].as_str() {
-                    self.version = Some(version.to_string());
-                } else {
-                    return Err(InstanceError::VersionNotAvailable);
-                }
-
-                self.manifest = data;
-
+                // Append path
                 if let Some(path) = path_to_manifest {
                     paths.set_version_manifest_file(path);
                 }
@@ -84,6 +85,8 @@ impl<'a> Instance {
                         None,
                     )
                     .await;
+
+                data
             }
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
@@ -91,6 +94,14 @@ impl<'a> Instance {
                     e
                 )))
             }
+        };
+
+        let version_id = match version_manifest["id"].as_str() {
+            Some(ver) => {
+                launch_builder.set_arg_value(ArgType::Version, ver);
+                ver
+            }
+            None => return Err(InstanceError::VersionNotAvailable),
         };
 
         global_app_state
@@ -102,10 +113,8 @@ impl<'a> Instance {
             .unwrap();
 
         // Sync & download all libs needed by this version - Stage 2
-        match libs::sync_libs(&self.manifest, &paths, Arc::clone(&ws_status)).await {
-            Ok(classpaths) => {
-                launch_builder.add_cps(classpaths);
-            }
+        match LibsData::sync_libs(&version_manifest, &paths, Arc::clone(&ws_status)).await {
+            Ok(classpaths) => launch_builder.add_cps(classpaths),
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
                     "Failed to download and register libs: {e}"
@@ -115,15 +124,15 @@ impl<'a> Instance {
 
         // Get version assets manifest
         let assets_manifest_location = paths.assets().join("indexes");
-        let assets_manifest = match manifest::get_assets_manifest(
-            &self.manifest,
+        let assets_manifest = match get_assets_manifest(
+            &version_manifest,
             &assets_manifest_location.to_str().unwrap(),
         )
         .await
         {
-            Ok((data, id)) => {
-                launch_builder.add_arg("${assets_index_name}", id);
-                data
+            Ok((asset_manifest, asset_index)) => {
+                launch_builder.set_arg_value(ArgType::AssetIndex, asset_index);
+                asset_manifest
             }
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
@@ -143,7 +152,7 @@ impl<'a> Instance {
 
         // Sync & download all assets needed by this version - Stage 3
         let assets_objects_dir = paths.assets().join("objects");
-        assets::sync_assets(
+        AssetsData::sync_assets(
             &assets_manifest,
             &assets_objects_dir,
             &paths.metacache_file(),
@@ -151,9 +160,18 @@ impl<'a> Instance {
         )
         .await;
 
+        let instance = Instance {
+            name: client_data.name,
+            url: client_data.url,
+            request_id: client_data.request_id,
+
+            version_id: version_id.to_string(),
+            version_manifest,
+            paths,
+        };
+
         // Initialize instance directory
-        self.paths = Some(paths);
-        match Self::register_instance(&self).await {
+        match Self::register_instance(&instance).await {
             Ok(_) => {}
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
@@ -171,6 +189,6 @@ impl<'a> Instance {
             .await
             .unwrap();
 
-        return Ok((self, launch_builder.build()));
+        return Ok((instance, launch_builder.build()));
     }
 }

@@ -20,10 +20,6 @@ pub async fn launch_instance<'a>(manifest: serde_json::Value, launch_info: Launc
 fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -> Vec<String> {
     let mut tmp_args: Vec<String> = Vec::new();
 
-    println!("{:#?}", info);
-
-    /*     let natives_dir = "/home/quartix/.sonata/instances/natives"; */
-
     let mut jvm_args = vec![
         "-XX:+UnlockExperimentalVMOptions".to_string(),
         "-XX:+UseG1GC".to_string(),
@@ -42,7 +38,6 @@ fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -> Vec<
         "-Dfml.ignorePatchDiscrepancies=true".to_string(),
         "-Djava.net.useSystemProxies=true".to_string(),
     ];
-
     tmp_args.append(&mut jvm_args);
 
     tmp_args.push("-XstartOnFirstThread".to_string());
@@ -61,36 +56,44 @@ fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -> Vec<
         tmp_args.push(main_class.to_string());
     }
 
-    if let Some(arguments) = manifest["arguments"].as_object() {
-        if let Some(game_args) = arguments["game"].as_array() {
-            for arg in game_args {
-                if let Some(simple_arg) = arg.as_str() {
-                    if simple_arg[..2] == *"${" {
-                        let default = " ".to_string();
-                        let value = info.game_args.get(simple_arg).unwrap_or(&default);
-                        tmp_args.push(value.to_owned());
-                    } else {
-                        tmp_args.push(simple_arg.to_string());
-                    }
-                } else if let Some(_complex_arg) = arg.as_object() {
-                    // println!("Complex arg: {:#?}", complex_arg);
-                }
-            }
-        }
-    } else if let Some(arguments) = manifest["minecraftArguments"].as_str() {
-        println!("Using legacy manifest extraction pattern...");
-        let arguments = arguments.split_whitespace();
-
-        for arg in arguments {
-            if &arg[..2] == "${" {
-                let default = " ".to_string();
-                let value = info.game_args.get(arg).unwrap_or(&default);
-                tmp_args.push(value.to_owned());
-            } else {
-                tmp_args.push(arg.to_string());
-            }
-        }
+    for arg in info.game_args {
+        tmp_args.push(arg.0);
+        tmp_args.push(arg.1);
     }
+
+    tmp_args.push("--accessToken".to_string());
+    tmp_args.push("".to_string());
+
+    // if let Some(arguments) = manifest["arguments"].as_object() {
+    //     if let Some(game_args) = arguments["game"].as_array() {
+    //         for arg in game_args {
+    //             if let Some(simple_arg) = arg.as_str() {
+    //                 if simple_arg[..2] == *"${" {
+    //                     let default = " ".to_string();
+    //                     let value = info.game_args.get(simple_arg).unwrap_or(&default);
+    //                     tmp_args.push(value.to_owned());
+    //                 } else {
+    //                     tmp_args.push(simple_arg.to_string());
+    //                 }
+    //             } else if let Some(_complex_arg) = arg.as_object() {
+    //                 // println!("Complex arg: {:#?}", complex_arg);
+    //             }
+    //         }
+    //     }
+    // } else if let Some(arguments) = manifest["minecraftArguments"].as_str() {
+    //     println!("Using legacy manifest extraction pattern...");
+    //     let arguments = arguments.split_whitespace();
+
+    //     for arg in arguments {
+    //         if &arg[..2] == "${" {
+    //             let default = " ".to_string();
+    //             let value = info.game_args.get(arg).unwrap_or(&default);
+    //             tmp_args.push(value.to_owned());
+    //         } else {
+    //             tmp_args.push(arg.to_string());
+    //         }
+    //     }
+    // }
 
     return tmp_args;
 }
