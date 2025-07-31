@@ -35,28 +35,41 @@ impl List {
             .write(false)
             .create(false)
             .open(config)
-            .ok()?;
+            .unwrap();
 
         let instance_manifest: serde_json::Value =
             match serde_json::from_reader(&instance_manifest_file) {
                 Ok(value) => value,
                 Err(_) => {
+                    println!("can't read manifest");
                     return None;
                 }
             };
 
         if let Some(general) = instance_manifest.get("general").and_then(|v| v.as_object()) {
-            // Safely retrieve name, version, and loader
-            let name = general.get("name").and_then(|v| v.as_str())?;
             let version = general.get("version").and_then(|v| v.as_str())?;
+            println!("ver: {}", version);
             let loader = general.get("loader").and_then(|v| v.as_str())?;
+            println!("loa: {}", loader);
 
-            Some(ScanInfo {
-                name: name.to_string(),
-                version: version.to_string(),
-                loader: loader.to_string(),
-            })
+            if let Some(overview) = instance_manifest
+                .get("overview")
+                .and_then(|v| v.as_object())
+            {
+                let name = overview.get("name").and_then(|v| v.as_str())?;
+                println!("{}", name);
+
+                Some(ScanInfo {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    loader: loader.to_string(),
+                })
+            } else {
+                println!("Overview name is not found");
+                None
+            }
         } else {
+            println!("general not found");
             None
         }
     }
@@ -92,19 +105,21 @@ impl List {
 
             let msg: WsMessage = OperationMessage {
                 base: BaseMessage {
-                    message_id: "asd",
-                    operation_id: Some("asd"),
-                    request_id: Some("asd"),
+                    message_id: "asd".to_string(),
+                    operation_id: Some("asd".to_string()),
+                    request_id: Some("asd".to_string()),
                     timestamp: Utc::now(),
                     correlation_id: None,
                 },
                 data: OperationStart {
-                    stages: vec![STAGE_TYPE]
-                }.into(),
-            }.into();
+                    stages: vec![STAGE_TYPE],
+                }
+                .into(),
+            }
+            .into();
 
             msg.send(&ws).await.unwrap();
-
+            println!("send");
 
             for (i, item) in instances.iter().enumerate() {
                 if let (Some(manifest_path), Some(instance_path)) =
@@ -115,12 +130,13 @@ impl List {
 
                     // Get ScanInfo data if the instance manifest exists and is not corrupted
                     let scan_info = Self::extract_instance_data(&manifest_path);
+                    println!("{:#?}", scan_info);
 
                     let msg: WsMessage = OperationMessage {
                         base: BaseMessage {
-                            message_id: "asd",
-                            operation_id: Some("asd"),
-                            request_id: Some("asd"),
+                            message_id: "asd".to_string(),
+                            operation_id: Some("asd".to_string()),
+                            request_id: Some("asd".to_string()),
                             timestamp: Utc::now(),
                             correlation_id: None,
                         },
@@ -128,9 +144,9 @@ impl List {
                             stage: STAGE_TYPE,
                             status: ProcessStatus::InProgress,
                             target: Some(ProcessTarget::instance(
-                                manifest_path,
+                                manifest_path.to_string(),
                                 manifest_exist,
-                                instance_path,
+                                instance_path.to_string(),
                                 instance_exist,
                                 scan_info,
                             )),
@@ -181,16 +197,18 @@ impl List {
 
             let msg: WsMessage = OperationMessage {
                 base: BaseMessage {
-                    message_id: "asd",
-                    operation_id: Some("asd"),
-                    request_id: Some("asd"),
+                    message_id: "asd".to_string(),
+                    operation_id: Some("asd".to_string()),
+                    request_id: Some("asd".to_string()),
                     timestamp: Utc::now(),
                     correlation_id: None,
                 },
                 data: OperationFinish {
-                    status: OperationStatus::Completed
-                }.into()
-            }.into();
+                    status: OperationStatus::Completed,
+                }
+                .into(),
+            }
+            .into();
 
             msg.send(&ws).await.unwrap();
 

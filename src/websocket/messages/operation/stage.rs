@@ -16,7 +16,7 @@ pub enum OperationStage {
     ScanInstances
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
 #[ts(export)]
 pub struct StageResult {
@@ -28,7 +28,7 @@ pub struct StageResult {
     pub error: Option<StageError>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
 #[ts(export)]
@@ -39,7 +39,7 @@ pub enum StageStatus {
 	Failed,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
 #[ts(export)]
 pub struct StageError {
