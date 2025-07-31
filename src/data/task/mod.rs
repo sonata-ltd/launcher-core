@@ -11,6 +11,7 @@ pub mod operations;
 
 pub type SharedTask<'a> = Arc<Mutex<Task<'a>>>;
 
+#[derive(Debug)]
 pub struct TaskHandle<'a> {
     pub id: usize,
     pub task: SharedTask<'a>,

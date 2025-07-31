@@ -1,7 +1,10 @@
 use std::{collections::HashMap, path::Path};
 use serde::Deserialize;
 
+use crate::instance::launch::args::ArgType;
+
 pub mod execute;
+pub mod args;
 
 
 #[derive(Deserialize, Debug)]
@@ -67,6 +70,16 @@ impl LaunchInfoBuilder {
 
     pub fn rm_arg<K: AsRef<str>>(&mut self, key: K) -> Option<String> {
         self.game_args.remove(key.as_ref())
+    }
+
+    pub fn set_arg_value<P>(&mut self, key: ArgType, path: P) -> &mut Self
+    where
+        P: AsRef<Path>
+    {
+        let manifest_key = ArgType::get_manifest_key(key);
+
+        self.game_args.insert(manifest_key, path.as_ref().display().to_string());
+        self
     }
 
     pub fn build(self) -> LaunchInfo {

@@ -35,25 +35,29 @@ impl List {
             .write(false)
             .create(false)
             .open(config)
-            .ok()?;
+            .unwrap();
 
         let instance_manifest: serde_json::Value =
             match serde_json::from_reader(&instance_manifest_file) {
                 Ok(value) => value,
                 Err(_) => {
+                    println!("can't read manifest");
                     return None;
                 }
             };
 
         if let Some(general) = instance_manifest.get("general").and_then(|v| v.as_object()) {
             let version = general.get("version").and_then(|v| v.as_str())?;
+            println!("ver: {}", version);
             let loader = general.get("loader").and_then(|v| v.as_str())?;
+            println!("loa: {}", loader);
 
             if let Some(overview) = instance_manifest
                 .get("overview")
                 .and_then(|v| v.as_object())
             {
                 let name = overview.get("name").and_then(|v| v.as_str())?;
+                println!("{}", name);
 
                 Some(ScanInfo {
                     name: name.to_string(),
@@ -61,9 +65,11 @@ impl List {
                     loader: loader.to_string(),
                 })
             } else {
+                println!("Overview name is not found");
                 None
             }
         } else {
+            println!("general not found");
             None
         }
     }
@@ -113,6 +119,7 @@ impl List {
             .into();
 
             msg.send(&ws).await.unwrap();
+            println!("send");
 
             for (i, item) in instances.iter().enumerate() {
                 if let (Some(manifest_path), Some(instance_path)) =
@@ -123,6 +130,7 @@ impl List {
 
                     // Get ScanInfo data if the instance manifest exists and is not corrupted
                     let scan_info = Self::extract_instance_data(&manifest_path);
+                    println!("{:#?}", scan_info);
 
                     let msg: WsMessage = OperationMessage {
                         base: BaseMessage {
