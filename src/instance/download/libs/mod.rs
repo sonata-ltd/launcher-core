@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{env::consts::OS, sync::Arc};
 
 use crate::{
     instance::{
@@ -40,11 +40,18 @@ impl<'a> LibsData<'a> {
             .start_stage_determinable(STAGE_TYPE, None, 0, 0)
             .await;
 
+        let current_os_supported = match OS {
+            "linux" => "linux",
+            "macos" => "osx",
+            "windows" => "windows",
+            _ => return Err("Unsupported OS".into())
+        };
+
         let libs_data = LibsData {
             manifest,
             paths,
             ws_status: ws_status.clone(),
-            current_os: "osx",
+            current_os: current_os_supported,
         };
 
         let done_paths = match Self::extract_manifest_libs(libs_data).await {
