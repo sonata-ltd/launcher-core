@@ -9,8 +9,7 @@ use crate::{
         },
         launch::args::ArgType,
         websocket::{OperationWsExt, OperationWsMessage},
-    },
-    websocket::messages::operation::stage::{OperationStage, StageStatus},
+    }, utils::download::download_in_json, websocket::messages::operation::stage::{OperationStage, StageStatus}
 };
 
 use super::*;
@@ -113,8 +112,15 @@ impl<'a> Instance {
             .unwrap();
 
         // Sync & download all libs needed by this version - Stage 2
-        match LibsData::sync_libs(&version_manifest, &paths, Arc::clone(&ws_status)).await {
-            Ok(classpaths) => launch_builder.add_cps(classpaths),
+        let tmp_version_manifest = match download_in_json("https://meta.prismlauncher.org/v1/net.minecraft/1.7.4.json").await {
+            Ok(manifest) => manifest,
+            Err(_) => return Err(InstanceError::VersionNotAvailable)
+        };
+        match LibsData::sync_libs(&tmp_version_manifest, &paths, Arc::clone(&ws_status), download::libs::ManifestType::Prism).await {
+            Ok(mut result) => {
+                launch_builder.add_cps(LibsData::get_classpaths_mut(&mut result));
+                launch_builder.add_natives(LibsData::take_natives_paths(result));
+            },
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
                     "Failed to download and register libs: {e}"
@@ -189,6 +195,6 @@ impl<'a> Instance {
             .await
             .unwrap();
 
-        return Ok((instance, launch_builder.build()));
+        return Ok((instance, launch_builder.fill_defauls().build()));
     }
 }

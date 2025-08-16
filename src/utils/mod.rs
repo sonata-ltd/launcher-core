@@ -9,6 +9,7 @@ use crate::data::definitions::EnvVars;
 pub mod download;
 pub mod instances_list;
 pub mod metacache;
+pub mod maven;
 
 
 pub fn _extract_filename(path: &str) -> Option<&str> {
@@ -52,4 +53,11 @@ pub async fn get_home_dir() -> Option<PathBuf> {
             return None;
         }
     };
+}
+
+pub fn str_nth_occurrence(s: &str, pat: char, n: usize) -> Option<usize> {
+    s.char_indices()
+     .filter(|(_, c)| *c == pat)
+     .nth(n - 1)
+     .map(|(idx, _)| idx)
 }

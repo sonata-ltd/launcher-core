@@ -1,11 +1,15 @@
-use std::{collections::HashMap, path::Path};
 use serde::Deserialize;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+use strum::IntoEnumIterator;
 
 use crate::instance::launch::args::ArgType;
 
-pub mod execute;
 pub mod args;
-
+pub mod execute;
+pub mod natives;
 
 #[derive(Deserialize, Debug)]
 pub struct ClientOptions {
@@ -17,6 +21,7 @@ pub struct ClientOptions {
 #[derive(Debug, Deserialize, Clone)]
 pub struct LaunchInfo {
     classpath: String,
+    native_libs: Vec<PathBuf>,
     main_class: Option<String>,
     game_args: HashMap<String, String>,
 }
@@ -24,6 +29,7 @@ pub struct LaunchInfo {
 #[derive(Debug, Default)]
 pub struct LaunchInfoBuilder {
     classpath: Vec<String>,
+    native_libs: Vec<PathBuf>,
     main_class: Option<String>,
     game_args: HashMap<String, String>,
 }
@@ -74,14 +80,34 @@ impl LaunchInfoBuilder {
 
     pub fn set_arg_value<P>(&mut self, key: ArgType, path: P) -> &mut Self
     where
-        P: AsRef<Path>
+        P: AsRef<Path>,
     {
-        let manifest_key = ArgType::get_manifest_key(key);
+        let placeholder = ArgType::get_value_placeholder(key);
 
-        self.game_args.insert(manifest_key, path.as_ref().display().to_string());
+        self.game_args
+            .insert(placeholder, path.as_ref().display().to_string());
         self
     }
 
+    pub fn add_natives(&mut self, natives_paths: Vec<PathBuf>) -> &mut Self {
+        self.native_libs = natives_paths;
+        self
+    }
+
+    /// Fills the `game_args` map
+    /// with default values. Useful for old versions
+    /// that requires some values to launch
+    pub fn fill_defauls(mut self) -> Self {
+        for arg_type in ArgType::iter() {
+            self.game_args
+                .entry(ArgType::get_value_placeholder(arg_type.clone()))
+                .or_insert(ArgType::get_default_value(arg_type));
+        }
+
+        self
+    }
+
+    /// Build the LaunchInfo structure
     pub fn build(self) -> LaunchInfo {
         let mut classpath = String::new();
         for path in self.classpath {
@@ -90,12 +116,12 @@ impl LaunchInfoBuilder {
 
         LaunchInfo {
             classpath,
+            native_libs: self.native_libs,
             main_class: self.main_class,
             game_args: self.game_args,
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -104,8 +130,14 @@ mod tests {
     #[test]
     fn builder_default_empty() {
         let lib = LaunchInfoBuilder::new().build();
-        assert!(lib.classpath.is_empty(), "classpath should be empty by default");
-        assert!(lib.game_args.is_empty(), "game_args should be empty by default");
+        assert!(
+            lib.classpath.is_empty(),
+            "classpath should be empty by default"
+        );
+        assert!(
+            lib.game_args.is_empty(),
+            "game_args should be empty by default"
+        );
         assert_eq!(lib.main_class, None, "classpath should be None by default");
     }
 }

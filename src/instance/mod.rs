@@ -48,7 +48,7 @@ pub struct Instance {
     #[get = "pub"]
     version_id: String,
     version_manifest: serde_json::Value,
-    paths: InstancePaths,
+    paths: InstancePaths
 }
 
 #[derive(Error, Debug)]

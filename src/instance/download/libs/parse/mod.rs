@@ -1,13 +1,11 @@
-use std::collections::HashMap;
+use crate::instance::download::libs::{LibInfo, LibsData, SyncResult};
 
-use crate::instance::download::libs::LibsData;
+mod prism;
 
-impl<'a> LibsData<'a> {
-    pub async fn extract_manifest_libs(
-        self
-    ) -> Result<Vec<String>, String> {
+impl<'a, 'b> LibsData<'a, 'b> {
+    pub async fn parse_manifest_official(self) -> Result<SyncResult, String> {
         // Hashmap contains: hash, (name, path, url)
-        let mut version_libs: HashMap<&str, (String, String, &str)> = HashMap::new();
+        let mut downloadable_libs: Vec<LibInfo> = Vec::new();
 
         println!("Extraction libraries...");
 
@@ -20,7 +18,8 @@ impl<'a> LibsData<'a> {
                         if let Some(action) = rule["action"].as_str() {
                             if action == "allow" {
                                 if let Some(os) = rule["os"].as_object() {
-                                    if os.get("name").and_then(|name| name.as_str()) == Some(self.current_os)
+                                    if os.get("name").and_then(|name| name.as_str())
+                                        == Some(self.current_os)
                                     {
                                         return true;
                                     }
@@ -44,10 +43,14 @@ impl<'a> LibsData<'a> {
                     if let (Some(lib_name), Some(lib_path), Some(lib_url), Some(lib_hash)) =
                         (lib_name, lib_path, lib_url, lib_hash)
                     {
-                        version_libs.insert(
-                            lib_hash,
-                            (lib_name.to_string(), lib_path.to_string(), lib_url),
-                        );
+                        downloadable_libs.push(LibInfo {
+                            hash: lib_hash.to_string(),
+                            name: lib_name.to_string(),
+                            path: lib_path.to_string(),
+                            url: lib_url.to_string(),
+                            native: false,
+                            save_path: None,
+                        });
                     }
                 }
 
@@ -70,12 +73,14 @@ impl<'a> LibsData<'a> {
                                         ) = (lib_name, lib_path, lib_url, lib_hash)
                                         {
                                             println!("Found: {}", lib_name);
-                                            if let Some(updated) = version_libs.insert(
-                                                lib_hash,
-                                                (lib_name.to_string(), lib_path.to_string(), lib_url),
-                                            ) {
-                                                println!("REWRITED: {:#?}", updated);
-                                            }
+                                            downloadable_libs.push(LibInfo {
+                                                hash: lib_hash.to_string(),
+                                                name: lib_name.to_string(),
+                                                path: lib_path.to_string(),
+                                                url: lib_url.to_string(),
+                                                native: true,
+                                                save_path: None,
+                                            });
                                         }
                                     }
                                 }
@@ -91,14 +96,22 @@ impl<'a> LibsData<'a> {
             let name = self.manifest["id"].as_str().unwrap();
             let name = name.to_owned() + "-client.jar";
             let path = "com/mojang/minecraft/".to_owned() + &name;
-            let hash = self.manifest["downloads"]["client"]["sha1"].as_str().unwrap();
+            let hash = self.manifest["downloads"]["client"]["sha1"]
+                .as_str()
+                .unwrap();
 
-            version_libs.insert(hash, (name, path, client_url));
+            downloadable_libs.push(LibInfo {
+                hash: hash.to_string(),
+                name,
+                path,
+                url: client_url.to_string(),
+                native: false,
+                save_path: None,
+            });
         }
 
-        println!("{:#?}", version_libs);
-        match Self::download_missing_libs(version_libs, self.paths, self.ws_status).await {
-            Ok(paths) => Ok(paths),
+        match Self::download_missing_libs(downloadable_libs, self.paths, self.ws_status).await {
+            Ok(result) => Ok(result),
             Err(e) => Err(e),
         }
     }
