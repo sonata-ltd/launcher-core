@@ -1,4 +1,7 @@
-use std::{env::consts::OS, sync::Arc};
+use std::path::PathBuf;
+
+use serde::Deserialize;
+use thiserror::Error;
 
 use crate::{
     instance::{
@@ -12,57 +15,153 @@ mod download;
 mod parse;
 mod register;
 
-pub struct LibsData<'a> {
-    manifest: &'a serde_json::Value,
+#[derive(Clone, Copy, PartialEq)]
+pub enum ManifestType {
+    Official,
+    Prism,
+}
+
+#[derive(Error, Debug)]
+pub enum LibsSyncError {
+    #[error("OS is not supported")]
+    OsNotAvailable,
+
+    #[error("CPU architecture is not supported")]
+    ArchNotAvailable,
+}
+
+pub struct SyncResult {
+    classpaths: Vec<String>,
+    natives: Vec<PathBuf>
+}
+
+pub struct LibsData<'a, 'b> {
+    manifest: &'b serde_json::Value,
     paths: &'a InstancePaths,
     ws_status: OperationWsMessageLocked<'a>,
     current_os: &'a str,
 }
 
-#[derive(Eq, Hash, PartialEq, Debug, Clone)]
+#[derive(Eq, Hash, PartialEq, Debug, Clone, Deserialize)]
 pub struct LibInfo {
     hash: String,
     name: String,
     path: String,
+    url: String,
+    native: bool,
+    save_path: Option<PathBuf>
 }
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadLibs;
 
-impl<'a> LibsData<'a> {
+impl<'a, 'b> LibsData<'a, 'b> {
     pub async fn sync_libs(
-        manifest: &'a serde_json::Value,
+        manifest: &'b serde_json::Value,
         paths: &'a InstancePaths,
         ws_status: OperationWsMessageLocked<'a>,
-    ) -> Result<Vec<String>, String> {
+        manifest_type: ManifestType,
+    ) -> Result<SyncResult, String> {
         // Sync status through WebSocket
         ws_status
             .clone()
             .start_stage_determinable(STAGE_TYPE, None, 0, 0)
             .await;
 
-        let current_os_supported = match OS {
-            "linux" => "linux",
-            "macos" => "osx",
-            "windows" => "windows",
-            _ => return Err("Unsupported OS".into())
+        let current_os = match construct_os_name() {
+            Ok(name) => name,
+            Err(e) => return Err(e.to_string())
         };
 
         let libs_data = LibsData {
             manifest,
             paths,
             ws_status: ws_status.clone(),
-            current_os: current_os_supported,
+            current_os
         };
 
-        let done_paths = match Self::extract_manifest_libs(libs_data).await {
-            Ok(paths) => paths,
-            Err(e) => return Err(e),
+        let result = match manifest_type {
+            ManifestType::Official => {
+                Self::parse_manifest_official(libs_data).await
+            },
+            ManifestType::Prism => {
+                Self::parse_manifest_prism(libs_data).await
+            }
+        };
+
+        let sync_data = match result {
+            Ok(data) => {
+                data
+            },
+            Err(e) => return Err(e)
         };
 
         ws_status
             .complete_stage(StageStatus::Completed, STAGE_TYPE, 0.0, None)
             .await;
 
-        Ok(done_paths)
+        Ok(sync_data)
+    }
+
+    pub fn get_classpaths_mut(result: &mut SyncResult) -> &mut Vec<String> {
+        &mut result.classpaths
+    }
+
+    pub fn take_natives_paths(result: SyncResult) -> Vec<PathBuf> {
+        result.natives
+    }
+}
+
+fn construct_os_name() -> Result<&'static str, LibsSyncError> {
+    // Linux
+    #[cfg(all(target_os = "linux", target_arch = "x86"))]
+    return Ok("linux");
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return Ok("linux");
+
+    #[cfg(all(target_os = "linux", target_arch = "arm"))]
+    return Ok("linux-arm32");
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return Ok("linux-arm64");
+
+    // macOS
+    #[cfg(all(target_os = "macos", target_arch = "x86"))]
+    return Ok("osx");
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return Ok("osx");
+
+    #[cfg(all(target_os = "macos", target_arch = "arm"))]
+    return Ok("osx");
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return Ok("osx");
+
+    // Windows
+    #[cfg(all(target_os = "windows", target_arch = "x86"))]
+    return Ok("windows");
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return Ok("windows");
+
+    #[cfg(all(target_os = "windows", target_arch = "arm"))]
+    return Ok("windows-arm32");
+
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    return Ok("windows-arm64");
+
+    // If OS/arch combination is not supported
+    #[allow(unreachable_code)]
+    Err(LibsSyncError::OsNotAvailable)
+}
+
+impl LibInfo {
+    pub fn is_native(&self) -> bool {
+        if self.native == true {
+            true
+        } else {
+            false
+        }
     }
 }

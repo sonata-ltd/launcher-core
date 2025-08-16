@@ -1,5 +1,9 @@
 use surf::{self, Error};
 
+pub mod buffer;
+
+pub const MAX_REDIRECT_COUNT: usize = 10;
+
 pub async fn download_in_json<'a>(url: &'a str) -> Result<serde_json::Value, Error> {
     match surf::get(url).await {
         Ok(mut response) => {

@@ -1,3 +1,6 @@
+use strum::EnumIter;
+
+#[derive(EnumIter, Clone)]
 pub enum ArgType {
     Username,
     Version,
@@ -8,14 +11,15 @@ pub enum ArgType {
     AccessToken,
     ClientId,
     XUid,
+    UserProperties,
     UserType,
     VersionType,
 }
 
 impl<'a> ArgType {
-    // Retrieve a key of the value in terms of manifest
-    // e.g. "--username" - key | "${auth_player_name}" - placeholder value
-    // so retrieves "${auth_player_name}" by ArgType::Username
+    /// Retrieve a placeholder value in terms of manifest
+    /// e.g. "--username" - key | "${auth_player_name}" - placeholder value.
+    /// So it retrieves `${auth_player_name}` by `ArgType::Username`
     pub fn get_value_placeholder(self) -> String {
         Self::format_placeholder_value(match self {
             ArgType::Username => "auth_player_name",
@@ -27,6 +31,7 @@ impl<'a> ArgType {
             ArgType::AccessToken => "auth_access_token",
             ArgType::ClientId => "clientid",
             ArgType::XUid => "auth_xuid",
+            ArgType::UserProperties => "user_properties",
             ArgType::UserType => "user_type",
             ArgType::VersionType => "version_type",
         })
@@ -36,9 +41,9 @@ impl<'a> ArgType {
         String::from("${".to_owned() + val + "}")
     }
 
-    // Retrieve a key of the value in terms of manifest
-    // e.g. "--username" - key | "${auth_player_name}" - placeholder value
-    // so retrieves "--username" by ArgType::Username
+    /// Retrieve a key of the value in terms of manifest
+    /// e.g. "--username" - key | "${auth_player_name}" - placeholder value.
+    /// So it retrieves `--username` by `ArgType::Username`
     pub fn get_manifest_key(self) -> String {
         Self::format_key(match self {
             ArgType::Username => "username",
@@ -50,6 +55,7 @@ impl<'a> ArgType {
             ArgType::AccessToken => "accessToken",
             ArgType::ClientId => "clientId",
             ArgType::XUid => "xuid",
+            ArgType::UserProperties => "userProperties",
             ArgType::UserType => "userType",
             ArgType::VersionType => "versionType",
         })
@@ -57,5 +63,24 @@ impl<'a> ArgType {
 
     fn format_key(key: &'a str) -> String {
         String::from("--".to_owned() + key)
+    }
+
+    pub fn get_default_value(self) -> String {
+        let value = match self {
+            ArgType::Username => "Player",
+            ArgType::Version => " ",
+            ArgType::GameDir => ".",
+            ArgType::AssetsDir => ".",
+            ArgType::AssetIndex => " ",
+            ArgType::AuthUuid => " ",
+            ArgType::AccessToken => " ",
+            ArgType::ClientId => " ",
+            ArgType::XUid => " ",
+            ArgType::UserProperties => "{}",
+            ArgType::UserType => "legacy",
+            ArgType::VersionType => " ",
+        };
+
+        value.to_string()
     }
 }

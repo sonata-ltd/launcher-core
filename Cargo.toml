@@ -1,5 +1,5 @@
 [package]
-name = "sonata_action_handler"
+name = "sonata_launcher_core"
 version = "0.1.0"
 edition = "2021"
 
@@ -22,8 +22,13 @@ sys-info = "0.9.1"
 lzma-rs = "0.3.0"
 uuid = { version = "1.11.0", features = ["v5"] }
 sha1_smol = "1.0.1"
+sha1 = "0.10.6"
 strum = { version = "0.27", features = ["derive"] }
 ts-rs = { version = "10.1", features = ["chrono-impl", "serde-json-impl", "no-serde-warnings"] }
 http-types = "2.12.0"
 thiserror = "2.0.12"
 getset = "0.1.6"
+os_info = "3.12.0"
+regex = "1.11.1"
+zip-extensions = "0.8.3"
+async-channel = "2.5.0"
