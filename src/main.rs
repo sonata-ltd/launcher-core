@@ -71,7 +71,7 @@ async fn debug_tasks(
     ws: WebSocketConnection,
 ) -> tide::Result<()> {
     let all_tasks = req.state().get_all_tasks_json().await;
-    if ws.send(Message::Text(json!({"all_tasks": all_tasks}).to_string())).await.is_err() {
+    if ws.send(Message::text(json!({"all_tasks": all_tasks}).to_string())).await.is_err() {
         println!("Failed to send all tasks");
     }
 
@@ -81,7 +81,7 @@ async fn debug_tasks(
         match rx.recv().await {
             Ok(notif) => {
                 println!("notification sent");
-                if ws.send(Message::Text(notif.to_string())).await.is_err() {
+                if ws.send(Message::text(notif.to_string())).await.is_err() {
                     break;
                 }
             }
