@@ -5,7 +5,7 @@ use async_std::path::Path;
 use tide_websockets::WebSocketConnection;
 
 use crate::{
-    utils::instances_list,
+    utils::instance,
     websocket::messages::{
         operation::{
             event::{OperationFinish, OperationStart, OperationStatus, OperationUpdate},
@@ -84,7 +84,7 @@ impl List {
 
         let main_manifest = match serde_json::from_reader(&main_manifest_file) {
             Ok(value) => value,
-            Err(_) => match instances_list::recreate(&self.manifest_location) {
+            Err(_) => match instance::recreate_list(&self.manifest_location) {
                 Ok((_file, value)) => {
                     println!("File not found, recreated");
                     value

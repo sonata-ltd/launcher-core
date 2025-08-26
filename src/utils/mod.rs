@@ -7,7 +7,7 @@ use home::home_dir;
 use crate::data::definitions::EnvVars;
 
 pub mod download;
-pub mod instances_list;
+pub mod instance;
 pub mod metacache;
 pub mod maven;
 pub mod unify;
