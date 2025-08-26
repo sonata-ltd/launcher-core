@@ -30,8 +30,8 @@ impl<'a> From<(OperationMessage, &'a WebSocketConnection)> for OperationWsMessag
     }
 }
 
-impl<'a> From<OperationWsMessage<'a>> for WsMessage {
-    fn from(wrapper: OperationWsMessage<'a>) -> WsMessage {
+impl<'a> From<OperationWsMessage<'a>> for WsMessage<'a> {
+    fn from(wrapper: OperationWsMessage<'a>) -> WsMessage<'a> {
         WsMessage::Operation(wrapper.msg)
     }
 }

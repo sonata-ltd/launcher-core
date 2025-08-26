@@ -3,9 +3,9 @@ use serde_json::json;
 use tide::StatusCode;
 use tide_websockets::WebSocketConnection;
 use tide_websockets::Message;
-use uuid::Uuid;
 
 use crate::instance::list::List;
+use crate::instance::options::pages::Page;
 use crate::instance::InitData;
 use crate::instance::Instance;
 use crate::instance::RunData;
@@ -105,14 +105,29 @@ pub async fn list_instances_ws(mut ws: WebSocketConnection) -> tide::Result<()> 
 pub async fn instance_options_dispatcher<'a>(req: EndpointRequest<'a>) -> tide::Result {
     let id_param = req.param("id")
         .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Missing ID"))?;
-    let _instance_id = Uuid::parse_str(id_param)
-        .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Invalid ID"))?;
-
-    let _tab = req.param("tab")
+    let page_param = req.param("page")
         .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Missing Tab"))?;
+    let page: Page = page_param.parse().map_err(|_| {
+        tide::Error::from_str(400, format!("Unknown page: {}", &page_param))
+    })?;
 
-    Ok(tide::Response::builder(200)
-        .body("ok")
-        .content_type(tide::http::mime::PLAIN)
-        .build())
+    let global_app_state = req.state();
+    let path_to_manifest = &global_app_state.static_data.launcher_root_path
+        .join("headers")
+        .join(id_param.to_owned() + ".json");
+
+    match Instance::get_page(page, path_to_manifest).await {
+        Ok(page_data) => {
+            return Ok(tide::Response::builder(200)
+                .body(page_data)
+                .content_type(tide::http::mime::JSON)
+                .build())
+        },
+        Err(e) => {
+            return Ok(tide::Response::builder(500)
+                .body(e.to_string())
+                .content_type(tide::http::mime::PLAIN)
+                .build())
+        }
+    }
 }

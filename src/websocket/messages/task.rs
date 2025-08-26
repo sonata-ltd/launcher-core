@@ -5,7 +5,6 @@ use super::operation::stage::OperationStage;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[derive(TS)]
-#[ts(export)]
 pub struct Task<'a> {
     pub name: &'a str,
     pub status: TaskStatus,
@@ -21,7 +20,6 @@ pub struct Task<'a> {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", content = "details")]
 #[derive(TS)]
-#[ts(export)]
 pub enum TaskProgress {
     Determinable {
         current: Option<usize>,
@@ -32,7 +30,6 @@ pub enum TaskProgress {
 
 #[derive(Serialize, Deserialize, Debug)]
 #[derive(TS)]
-#[ts(export)]
 pub enum TaskStatus {
     Pending,
     Running,

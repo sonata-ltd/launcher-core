@@ -7,6 +7,8 @@ use thiserror::Error;
 use tide_websockets::WebSocketConnection;
 use ts_rs::TS;
 
+use crate::websocket::messages::task::Task;
+
 pub mod operation;
 pub mod scan;
 pub mod task;
@@ -17,10 +19,8 @@ pub enum WsMessageError {
     SendFailed(String),
 }
 
-type Result<T> = std::result::Result<T, WsMessageError>;
-
 pub trait WsMessageType: Serialize {
-    async fn send(&self, ws: &WebSocketConnection) -> Result<()> {
+    async fn send(&self, ws: &WebSocketConnection) -> Result<(), WsMessageError> {
         ws.send_json(&json!(&self))
             .await
             .map_err(|e| {
@@ -33,20 +33,19 @@ pub trait WsMessageType: Serialize {
     }
 }
 
-impl WsMessageType for WsMessage {}
+impl<'a> WsMessageType for WsMessage<'a> {}
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
-pub enum WsMessage {
+pub enum WsMessage<'a> {
     Operation(OperationMessage),
     Scan(ScanMessage),
-    Task,
+    #[serde(borrow)]
+    Task(Task<'a>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, TS)]
-#[ts(export)]
 pub struct BaseMessage {
     /// Unique ID of message
     pub message_id: String,
@@ -65,4 +64,20 @@ pub struct BaseMessage {
     /// ID of related operation (for chains)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn export_bindings() -> Result<(), Box<dyn std::error::Error>> {
+        let out = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings/websocket");
+        fs::create_dir_all(out)?;
+        WsMessage::export_all_to(out)?;
+        Ok(())
+    }
 }

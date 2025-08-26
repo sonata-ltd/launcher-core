@@ -8,7 +8,6 @@ use super::progress::ProgressUnit;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum ProcessStatus {
     Started,
     InProgress,
@@ -19,7 +18,6 @@ pub enum ProcessStatus {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type")]
 #[derive(TS)]
-#[ts(export)]
 pub enum ProcessTarget {
     File {
         status: TargetStatus,
@@ -46,7 +44,6 @@ pub enum ProcessTarget {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum TargetStatus {
     File(FileStatus),
     Dir(DirStatus),
@@ -55,7 +52,6 @@ pub enum TargetStatus {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum FileStatus {
     Downloading,
     Downloaded,
@@ -71,7 +67,6 @@ impl From<FileStatus> for TargetStatus {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum DirStatus {
     Created,
     FailedToCreate,

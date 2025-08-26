@@ -5,11 +5,14 @@ use launch::{ClientOptions, LaunchInfoBuilder};
 use crate::{
     instance::{
         download::{
-            assets::AssetsData, libs::LibsData, manifest::{download_manifest, get_assets_manifest}
+            assets::AssetsData,
+            libs::LibsData,
+            manifest::{download_manifest, get_assets_manifest},
         },
         launch::args::ArgType,
         websocket::{OperationWsExt, OperationWsMessage},
-    }, utils::download::download_in_json, websocket::messages::operation::stage::{OperationStage, StageStatus}
+    },
+    websocket::messages::operation::stage::{OperationStage, StageStatus},
 };
 
 use super::*;
@@ -97,10 +100,18 @@ impl<'a> Instance {
 
         let version_id = match version_manifest["id"].as_str() {
             Some(ver) => {
-                launch_builder.set_arg_value(ArgType::Version, ver);
+                launch_builder.add_version(&ver);
                 ver
             }
-            None => return Err(InstanceError::VersionNotAvailable),
+            None => match version_manifest["version"].as_str() {
+                Some(ver) => {
+                    launch_builder.set_arg_value(ArgType::Version, ver);
+                    ver
+                }
+                None => {
+                    return Err(InstanceError::VersionNotAvailable);
+                }
+            },
         };
 
         global_app_state
@@ -112,15 +123,18 @@ impl<'a> Instance {
             .unwrap();
 
         // Sync & download all libs needed by this version - Stage 2
-        let tmp_version_manifest = match download_in_json("https://meta.prismlauncher.org/v1/net.minecraft/1.7.4.json").await {
-            Ok(manifest) => manifest,
-            Err(_) => return Err(InstanceError::VersionNotAvailable)
-        };
-        match LibsData::sync_libs(&tmp_version_manifest, &paths, Arc::clone(&ws_status), download::libs::ManifestType::Prism).await {
+        match LibsData::sync_libs(
+            &version_manifest,
+            &paths,
+            Arc::clone(&ws_status),
+            download::libs::ManifestType::Prism,
+        )
+        .await
+        {
             Ok(mut result) => {
                 launch_builder.add_cps(LibsData::get_classpaths_mut(&mut result));
                 launch_builder.add_natives(LibsData::take_natives_paths(result));
-            },
+            }
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
                     "Failed to download and register libs: {e}"
