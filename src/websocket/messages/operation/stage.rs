@@ -6,7 +6,6 @@ use ts_rs::TS;
 #[derive(Serialize, Deserialize, Debug, Clone, Display)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum OperationStage {
     FetchManifest,
     DownloadLibs,
@@ -18,7 +17,6 @@ pub enum OperationStage {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct StageResult {
 	pub status: StageStatus,
 	pub stage: OperationStage,
@@ -31,7 +29,6 @@ pub struct StageResult {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum StageStatus {
 	Started,
 	InProgress,
@@ -41,7 +38,6 @@ pub enum StageStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct StageError {
 	// pub code: ErrorCode,
 

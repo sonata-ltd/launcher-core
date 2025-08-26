@@ -5,6 +5,8 @@ use launch::ClientOptions;
 use launch::LaunchInfo;
 use paths::InstancePaths;
 use serde::Deserialize;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod download;
@@ -13,9 +15,12 @@ use tide_websockets::WebSocketConnection;
 pub mod init;
 pub mod launch;
 pub mod list;
+pub mod options;
 pub mod paths;
 mod websocket;
 
+use crate::instance::options::pages::Page;
+use crate::instance::options::Options;
 use crate::manifest::instance::gen_manifest;
 use crate::manifest::instance::uuid::UuidData;
 use crate::utils::instances_list::add_to_registry;
@@ -48,7 +53,7 @@ pub struct Instance {
     #[get = "pub"]
     version_id: String,
     version_manifest: serde_json::Value,
-    paths: InstancePaths
+    paths: InstancePaths,
 }
 
 #[derive(Error, Debug)]
@@ -76,6 +81,12 @@ pub enum InstanceError {
 
     #[error("Failed to retrieve instance version")]
     VersionNotAvailable,
+
+    #[error("Failed to read instance options: {0}")]
+    OptionsNotAvailable(String),
+
+    #[error("Failed to parse instance options")]
+    OptionsCorrupted,
 }
 
 pub type Result<T> = std::result::Result<T, InstanceError>;
@@ -103,6 +114,34 @@ impl<'a> Instance {
 
         launch::execute::launch_instance(instance.version_manifest, launch_info).await;
         Ok(())
+    }
+
+    pub async fn get_page(page: Page, manifest_path: &PathBuf) -> Result<String> {
+        let manifest_file = match OpenOptions::new()
+            .read(true)
+            .write(false)
+            .create(false)
+            .open(manifest_path)
+        {
+            Ok(data) => data,
+            Err(e) => return Err(InstanceError::OptionsNotAvailable(e.to_string())),
+        };
+
+        let manifest_value = match serde_json::from_reader(&manifest_file) {
+            Ok(value) => value,
+            Err(e) => {
+                println!("Failed to get instance manifest: {}", e.to_string());
+                return Err(InstanceError::OptionsNotAvailable(e.to_string()));
+            }
+        };
+
+        match Options::retrieve(page, manifest_value) {
+            Ok(page_data) => match serde_json::to_string(&page_data) {
+                Ok(json) => return Ok(json),
+                Err(_) => return Err(InstanceError::OptionsCorrupted),
+            },
+            Err(e) => return Err(InstanceError::OptionsNotAvailable(e.to_string())),
+        }
     }
 
     async fn register_instance(instance: &Instance) -> Result<()> {

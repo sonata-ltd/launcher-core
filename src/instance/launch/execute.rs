@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use async_std::process::Command;
 
-use crate::instance::launch::natives::Natives;
+use crate::instance::launch::{natives::Natives, traits::StartupTraits};
 
 use super::LaunchInfo;
 
@@ -12,7 +12,7 @@ pub async fn launch_instance<'a>(manifest: serde_json::Value, launch_info: Launc
 
     // Command execution
     let output =
-        Command::new("/Library/Internet Plug-Ins/JavaAppletPlugin.plugin/Contents/Home/bin/java")
+        Command::new("java")
             .args(args)
             .output()
             .await
@@ -26,14 +26,25 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
 
     let mut jvm_args = vec![
         // "-Xdock:icon=icon.png".to_string(),
-        // r#"-Xdock:name="Sonata Launcher: 1.7.4""#.to_string(),
+        format!(r#"-Xdock:name="Sonata Launcher: {}""#, info.name),
         "-Xms512M".to_string(),
-        "-Xmx1024M".to_string(),
+        "-Xmx4096M".to_string(),
     ];
     tmp_args.append(&mut jvm_args);
 
-    #[cfg(target_os = "macos")]
-    // tmp_args.push("-XstartOnFirstThread".to_string());
+   match StartupTraits::extract(&manifest) {
+        Ok(traits) => {
+            for current_trait in traits {
+                match current_trait {
+                    StartupTraits::FirstThreadOnMacOS => {
+                        tmp_args.push("-XstartOnFirstThread".to_string());
+                    }
+                }
+            }
+        },
+        Err(e) => println!("{e}")
+    };
+
 
     // TODO: Determine windows version and add that argument only on windows 10
     #[cfg(target_os = "windows")]
@@ -41,7 +52,7 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
 
     // Handle natives
     if !info.native_libs.is_empty() {
-        let native_dir = PathBuf::from("/Users/quartix/.sonata/instances/1.7.4/natives");
+        let native_dir = PathBuf::from("/Users/quartix/.sonata/instances/1.5.2/natives");
 
         match Natives::extract(info.native_libs, &native_dir).await {
             Ok(_) => {
@@ -65,6 +76,8 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
         tmp_args.push(main_class);
     } else if let Some(main_class) = manifest["mainClass"].as_str() {
         tmp_args.push(main_class.to_string());
+    } else {
+        tmp_args.push(String::from("net.minecraft.launchwrapper.Launch"));
     }
 
     // for arg in info.game_args {
@@ -85,7 +98,6 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
     // tmp_args.push("legacy".to_string());
 
     // Check for modern manifest pattern
-    println!("{:#?}", info.game_args);
     if let Some(arguments) = manifest["arguments"].as_object() {
         if let Some(game_args) = arguments["game"].as_array() {
             for arg in game_args {
@@ -94,9 +106,9 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
                 // Iterate other `keys`
                 if let Some(simple_arg) = arg.as_str() {
                     handle_simple_arg(simple_arg, &info.game_args, &mut tmp_args);
-                } else if let Some(complex_arg) = arg.as_object() {
-                    println!("Complex arg: {:#?}", complex_arg);
-                    println!("Complex args is not implemented yet");
+                } else if let Some(_complex_arg) = arg.as_object() {
+                    // println!("Complex arg: {:#?}", complex_arg);
+                    // println!("Complex args is not implemented yet");
                 }
             }
         }
@@ -132,7 +144,6 @@ fn handle_simple_arg(
         let default = " ".to_string();
 
         // Extract the value from predefined game args or leave it empty
-        println!("{}", arg);
         let value = defined_map.get(arg).unwrap_or(&default);
         output_array.push(value.to_owned());
     } else {

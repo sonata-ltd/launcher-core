@@ -3,21 +3,59 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
-use tide_websockets::WebSocketConnection;
 use tide_websockets::Message;
+use tide_websockets::WebSocketConnection;
 
 use crate::manifest::get_version_manifest;
+use crate::utils::unify::UnifiedVersionsData;
 use crate::EndpointRequest;
-
 
 #[derive(Debug, Deserialize)]
 struct Version<'a> {
     id: &'a str,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ManifestTypes {
+    MojangVersionManifest,
+    PrismVersionManifest,
+}
 
-pub async fn get_versions<'a>(_req: EndpointRequest<'a>) -> tide::Result {
-    let url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+#[derive(Deserialize)]
+struct ManifestRequest {
+    manifest_type: ManifestTypes,
+}
+
+pub async fn get_versions_unified<'a>(mut _req: EndpointRequest<'a>) -> tide::Result {
+    let unified_versions =
+        match UnifiedVersionsData::new(crate::utils::unify::MetaProviders::Prism).await {
+            Ok(manifest) => manifest,
+            Err(e) => return Ok(tide::Response::builder(e).build()),
+        };
+
+    match unified_versions.build() {
+        Ok(data) => Ok(tide::Response::builder(200)
+            .body(data)
+            .content_type(tide::http::mime::JSON)
+            .build()),
+        Err(e) => Ok(tide::Response::builder(422)
+            .body(e)
+            .content_type(tide::http::mime::PLAIN)
+            .build()),
+    }
+}
+
+pub async fn get_versions<'a>(mut req: EndpointRequest<'a>) -> tide::Result {
+    let ManifestRequest { manifest_type } = req.body_json().await?;
+    let url = match manifest_type {
+        ManifestTypes::MojangVersionManifest => {
+            "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+        }
+        ManifestTypes::PrismVersionManifest => {
+            "https://meta.prismlauncher.org/v1/net.minecraft/index.json"
+        }
+    };
 
     let result;
     let code;

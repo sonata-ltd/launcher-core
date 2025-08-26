@@ -12,13 +12,12 @@ pub mod progress;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct OperationMessage {
     pub base: BaseMessage,
     pub data: OperationEvent
 }
 
-impl From<OperationMessage> for WsMessage {
+impl<'a> From<OperationMessage> for WsMessage<'a> {
     fn from(msg: OperationMessage) -> Self {
         WsMessage::Operation(msg)
     }
@@ -28,7 +27,6 @@ impl From<OperationMessage> for WsMessage {
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum RequestedTask {
     InitInstance {
         instance_id: String,

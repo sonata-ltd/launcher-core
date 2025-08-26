@@ -20,25 +20,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 // Parse the name at the first
                 if let Some(name) = lib.get("name").and_then(|v| v.as_str()) {
                     if let Some(downloads_val) = lib.get("downloads") {
-                        // try artifact first (but don't index with ["artifact"] directly)
-                        if let Some(artifact) = downloads_val.get("artifact") {
-                            if let (Some(url), Some(sha1)) = (
-                                artifact.get("url").and_then(|v| v.as_str()),
-                                artifact.get("sha1").and_then(|v| v.as_str()),
-                            ) {
-                                if let Some(path) = get_path_from_url(url) {
-                                    downloadable_libs.push(LibInfo {
-                                        hash: sha1.to_string(),
-                                        name: name.to_string(),
-                                        path: path.to_string(),
-                                        url: url.to_string(),
-                                        native: false,
-                                        save_path: None
-                                    });
-                                }
-                            }
-                        }
-
 
                         // If artifact not present or incomplete, check rules & downloads.classifiers under lib
                         let natives_key = format!("natives-{}", self.current_os);
@@ -63,6 +44,25 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             });
                                         }
                                     }
+                                } else {
+                                    // No classifiers. It might be modern manifest
+                                    if let Some(artifact) = downloads_val.get("artifact") {
+                                        if let (Some(url), Some(sha1)) = (
+                                            artifact.get("url").and_then(|v| v.as_str()),
+                                            artifact.get("sha1").and_then(|v| v.as_str()),
+                                        ) {
+                                            if let Some(path) = get_path_from_url(url) {
+                                                downloadable_libs.push(LibInfo {
+                                                    hash: sha1.to_string(),
+                                                    name: name.to_string(),
+                                                    path: path.to_string(),
+                                                    url: url.to_string(),
+                                                    native: false,
+                                                    save_path: None
+                                                });
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -85,7 +85,26 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                         }
                                     }
                                 } // else: classifiers exist but not this native_key -> ignore
-                            } // else: no classifiers -> nothing to do
+                            } else {
+                                // try artifact first (but don't index with ["artifact"] directly)
+                                if let Some(artifact) = downloads_val.get("artifact") {
+                                    if let (Some(url), Some(sha1)) = (
+                                        artifact.get("url").and_then(|v| v.as_str()),
+                                        artifact.get("sha1").and_then(|v| v.as_str()),
+                                    ) {
+                                        if let Some(path) = get_path_from_url(url) {
+                                            downloadable_libs.push(LibInfo {
+                                                hash: sha1.to_string(),
+                                                name: name.to_string(),
+                                                path: path.to_string(),
+                                                url: url.to_string(),
+                                                native: false,
+                                                save_path: None
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                         }
                     } // else no downloads field -> ignore this lib
                 } // else no name -> ignore this lib

@@ -6,13 +6,12 @@ use super::{BaseMessage, WsMessage};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct ScanMessage {
     pub base: BaseMessage,
     pub data: ScanData
 }
 
-impl From<ScanMessage> for WsMessage {
+impl<'a> From<ScanMessage> for WsMessage<'a> {
     fn from(value: ScanMessage) -> Self {
         WsMessage::Scan(value)
     }
@@ -20,7 +19,6 @@ impl From<ScanMessage> for WsMessage {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct ScanData {
     pub integrity: ScanIntegrity,
     pub info: Option<ScanInfo>,
@@ -28,7 +26,6 @@ pub struct ScanData {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct ScanIntegrity {
     pub manifest_path: String,
     pub manifest_exist: bool,
@@ -38,7 +35,6 @@ pub struct ScanIntegrity {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct ScanInfo {
     pub name: String,
     pub version: String,

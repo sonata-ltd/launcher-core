@@ -7,7 +7,6 @@ use super::{process::{ProcessStatus, ProcessTarget}, stage::{OperationStage, Sta
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum OperationEvent {
     Start(OperationStart),
     Update(OperationUpdate),
@@ -17,7 +16,6 @@ pub enum OperationEvent {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct OperationStart {
     pub stages: Vec<OperationStage>,
 }
@@ -32,7 +30,6 @@ impl<'a> From<OperationStart> for OperationEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "details")]
 #[derive(TS)]
-#[ts(export)]
 pub enum OperationUpdate {
 	SingleDeterminable {
 		stage: OperationStage,
@@ -62,7 +59,6 @@ impl<'a> From<OperationUpdate> for OperationEvent {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
-#[ts(export)]
 pub struct OperationFinish {
     pub status: OperationStatus,
 	// pub error: // TODO: Error
@@ -78,7 +74,6 @@ impl<'a> From<OperationFinish> for OperationEvent {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 #[derive(TS)]
-#[ts(export)]
 pub enum OperationStatus {
     Completed,
     Failed,

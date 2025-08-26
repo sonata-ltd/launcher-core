@@ -136,7 +136,7 @@ fn construct_os_name() -> Result<&'static str, LibsSyncError> {
     return Ok("osx");
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return Ok("osx");
+    return Ok("osx-arm64");
 
     // Windows
     #[cfg(all(target_os = "windows", target_arch = "x86"))]

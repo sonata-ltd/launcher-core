@@ -10,6 +10,7 @@ use crate::instance::launch::args::ArgType;
 pub mod args;
 pub mod execute;
 pub mod natives;
+pub mod traits;
 
 #[derive(Deserialize, Debug)]
 pub struct ClientOptions {
@@ -24,6 +25,7 @@ pub struct LaunchInfo {
     native_libs: Vec<PathBuf>,
     main_class: Option<String>,
     game_args: HashMap<String, String>,
+    name: String,
 }
 
 #[derive(Debug, Default)]
@@ -32,6 +34,7 @@ pub struct LaunchInfoBuilder {
     native_libs: Vec<PathBuf>,
     main_class: Option<String>,
     game_args: HashMap<String, String>,
+    name: Option<String>,
 }
 
 impl LaunchInfoBuilder {
@@ -94,6 +97,17 @@ impl LaunchInfoBuilder {
         self
     }
 
+    /// Adds the version to `game_args` and assigns
+    /// a value to an additional parameter for launching the game
+    pub fn add_version<P>(&mut self, version: P) -> &mut Self
+    where
+        P: AsRef<Path>,
+    {
+        Self::set_arg_value(self, ArgType::Version, &version);
+        self.name = Some(version.as_ref().display().to_string());
+        self
+    }
+
     /// Fills the `game_args` map
     /// with default values. Useful for old versions
     /// that requires some values to launch
@@ -104,6 +118,7 @@ impl LaunchInfoBuilder {
                 .or_insert(ArgType::get_default_value(arg_type));
         }
 
+        println!("{:#?}", self.game_args);
         self
     }
 
@@ -114,11 +129,17 @@ impl LaunchInfoBuilder {
             classpath.push_str(&path);
         }
 
+        let name = match self.name {
+            Some(name) => name,
+            None => String::from("Version is not retrieved"),
+        };
+
         LaunchInfo {
             classpath,
             native_libs: self.native_libs,
             main_class: self.main_class,
             game_args: self.game_args,
+            name,
         }
     }
 }
