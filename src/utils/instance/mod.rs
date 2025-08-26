@@ -7,7 +7,7 @@ use std::{fs::File, io::ErrorKind};
 use crate::instance::paths::InstancePaths;
 use crate::instance::Instance;
 
-pub fn recreate<P>(file: &P) -> Result<(File, Value), String>
+pub fn recreate_list<P>(file: &P) -> Result<(File, Value), String>
 where
     P: AsRef<Path>,
 {
@@ -43,7 +43,7 @@ pub fn add_to_registry(instance: &Instance, paths: &InstancePaths, uuid: &String
 
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
-                match recreate(paths.instances_list_file()) {
+                match recreate_list(paths.instances_list_file()) {
                     Ok(_) => {
                         match OpenOptions::new()
                             .read(true)

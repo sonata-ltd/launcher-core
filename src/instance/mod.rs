@@ -23,7 +23,7 @@ use crate::instance::options::pages::Page;
 use crate::instance::options::Options;
 use crate::manifest::instance::gen_manifest;
 use crate::manifest::instance::uuid::UuidData;
-use crate::utils::instances_list::add_to_registry;
+use crate::utils::instance::add_to_registry;
 use crate::websocket::messages::task::Task;
 use crate::websocket::messages::task::TaskProgress;
 use crate::websocket::messages::task::TaskStatus;
