@@ -6,6 +6,7 @@ use ts_rs::TS;
 
 
 #[derive(Debug, Deserialize, Default, TS)]
+#[allow(dead_code)]
 pub struct General {
     id: String,
     version: String,

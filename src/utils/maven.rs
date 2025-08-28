@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use regex::Regex;
 
 /// Converts a coordinate like `group:artifact:...` into a path:
@@ -21,7 +23,8 @@ pub fn coord_to_path(coord: &str) -> String {
     // - may contain dot-separated numbers like 1.2.3
     // - allows suffixes via '-', '+', '_' or '.' and additional sections (RC, beta, SNAPSHOT, build, etc.)
     // Examples matched: "1", "1.2", "1.2.3", "1.0.0-SNAPSHOT", "1.0.0-beta+build.1"
-    let ver_re = Regex::new(r"^\d+(?:\.\d+)*(?:[-+_\.][A-Za-z0-9]+(?:[.\-+_][A-Za-z0-9]+)*)?$").unwrap();
+    let ver_re =
+        Regex::new(r"^\d+(?:\.\d+)*(?:[-+_\.][A-Za-z0-9]+(?:[.\-+_][A-Za-z0-9]+)*)?$").unwrap();
 
     // Find the first segment after group that looks like a version
     let mut version_idx: Option<usize> = None;
@@ -60,9 +63,51 @@ pub fn coord_to_path(coord: &str) -> String {
     out
 }
 
+pub fn build_file_path<S, P>(libs_dir: &P, maven_path: S) -> String
+where
+    S: Into<String>,
+    P: AsRef<Path>
+{
+    let maven_path = maven_path.into();
+
+    if maven_path.chars().nth(0) == Some('/') {
+        return format!("{}{}", libs_dir.as_ref().display(), maven_path);
+    } else {
+        return format!("{}/{}", libs_dir.as_ref().display(), maven_path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use crate::utils::maven::build_file_path;
+
     use super::coord_to_path;
+
+    #[test]
+    fn no_first_slash() {
+        let maven_path = "com/google/guava/guava/15.0/guava-15.0.jar";
+        let libs_dir = PathBuf::from("/Users/quartix/.sonata/libraries");
+        assert_eq!(
+            build_file_path(&libs_dir, maven_path),
+            String::from(
+                "/Users/quartix/.sonata/libraries/com/google/guava/guava/15.0/guava-15.0.jar"
+            )
+        )
+    }
+
+    #[test]
+    fn with_first_slash() {
+        let maven_path = "/com/google/guava/guava/15.0/guava-15.0.jar";
+        let libs_dir = PathBuf::from("/Users/quartix/.sonata/libraries");
+        assert_eq!(
+            build_file_path(&libs_dir, maven_path),
+            String::from(
+                "/Users/quartix/.sonata/libraries/com/google/guava/guava/15.0/guava-15.0.jar"
+            )
+        )
+    }
 
     #[test]
     fn simple_three_parts() {

@@ -1,73 +1,110 @@
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
+
+use async_std::task;
+
+use crate::utils::download::{buffer::BufferPool, Download};
+
 use super::*;
 
+const ASSETS_BASE_URL: &'static str = "https://resources.download.minecraft.net";
+const CONCURRENT_TASKS_COUNT: usize = 100;
+const CONCURRENT_BUFFERS_SIZE: usize = 16 * 1024; // 16 KiB each
 
 impl<'a> AssetsData<'a> {
-    pub async fn extract_manifest_assets(&self) {
-        let base_url = "https://resources.download.minecraft.net/";
-        let metacache_file = std::fs::File::open(&self.metacache_file_path).unwrap();
-        let mut metacache: serde_json::Value = serde_json::from_reader(&metacache_file).unwrap();
+    pub async fn extract_manifest_assets(&self) -> Result<(), String> {
         let mut downloaded_assets: HashSet<AssetInfo> = HashSet::new();
+        let download_buffer_pool = Arc::new(BufferPool::new(
+            CONCURRENT_TASKS_COUNT,
+            CONCURRENT_BUFFERS_SIZE
+        ));
 
-        if !is_array_exists(&metacache, "assets") {
-            if let Some(metacache_object) = metacache.as_object_mut() {
-                metacache_object.insert("assets".to_string(), json!([]));
-                let mut metacache_file = std::fs::File::create(&self.metacache_file_path).unwrap();
-                metacache_file
-                    .write_all(serde_json::to_string_pretty(&metacache).unwrap().as_bytes())
-                    .unwrap();
-            }
-        }
+        let assets_dir_pathbuf = PathBuf::from(&self.assets_path);
+        let assets_dir = Arc::new(&assets_dir_pathbuf);
+
+        // Retrieve downloaded assets from db
+        let cached = match sqlx::query_as!(
+            AssetInfo,
+            r#"SELECT name, hash, url
+            FROM assets
+            "#
+        )
+        .fetch_all(&self.db.pool)
+        .await
+        {
+            Ok(cached) => cached,
+            Err(e) => return Err(e.to_string()),
+        };
 
         if let Some(objects) = self.manifest["objects"].as_object() {
-            if let Some(assets) = metacache["assets"].as_array() {
-                let mut futures = FuturesUnordered::new();
+            let mut futures = FuturesUnordered::new();
+            println!("Checking for assets...");
 
-                println!("Checking for assets...");
+            for (name, v) in objects {
+                let hash = match v["hash"].as_str() {
+                    Some(h) => h,
+                    None => continue,
+                };
 
-                for (k, v) in objects {
-                    if !assets.iter().any(|asset| {
-                        asset["name"].as_str() == Some(k)
-                            && asset["hash"].as_str() == v["hash"].as_str()
-                    }) {
-                        let base_url = base_url.to_string();
-                        let hash = v["hash"].as_str().unwrap().to_string();
-                        let name = k.to_string();
-                        let assets_path = self.assets_path.to_string();
-
-                        futures.push(task::spawn(async move {
-                            println!("Downloading asset '{}'", name);
-                            match Self::download_asset(&base_url, &hash, &name, &assets_path).await
-                            {
-                                Ok(asset_info) => Some(asset_info),
-                                Err(e) => {
-                                    println!("{e}");
-                                    None
-                                }
-                            }
-                        }));
-
-                        if futures.len() >= 100 {
-                            Self::process_futures(
-                                &mut futures,
-                                &mut downloaded_assets,
-                                objects.len(),
-                                Arc::clone(&self.ws_status),
-                            )
-                            .await;
-                        }
-                    }
+                if cached.contains(&AssetInfo::with_hash(hash)) {
+                    continue;
                 }
 
-                Self::process_futures(
-                    &mut futures,
-                    &mut downloaded_assets,
-                    objects.len(),
-                    Arc::clone(&self.ws_status),
-                )
-                .await;
+                let name = name.to_string();
+                let (url, relative_save_path) = Self::construct_asset_url(hash);
+                let save_path = assets_dir.join(relative_save_path);
+
+                let asset_info = AssetInfo {
+                    name,
+                    hash: hash.to_string(),
+                    url
+                };
+
+                let dl = Download::new(save_path, asset_info, Arc::clone(&download_buffer_pool));
+
+                futures.push(task::spawn(async move {
+                    match dl.download_with_checksum().await {
+                        Ok(asset_info) => Some(asset_info),
+                        Err(e) => {
+                            println!("{e}");
+                            None
+                        }
+                    }
+                }));
+
+                if futures.len() >= 100 {
+                    Self::process_futures(
+                        &mut futures,
+                        &mut downloaded_assets,
+                        objects.len(),
+                        Arc::clone(&self.ws_status),
+                    )
+                    .await;
+                }
             }
+
+            Self::process_futures(
+                &mut futures,
+                &mut downloaded_assets,
+                objects.len(),
+                Arc::clone(&self.ws_status),
+            )
+            .await;
         }
 
-        Self::register_assets(&self, metacache, &mut downloaded_assets).await;
+        match Self::register_assets(&self, &mut downloaded_assets).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string())
+        }
+    }
+
+    /// Construct the url by hash and domain
+    /// Retrieves url to download and relative path for a file saving
+    fn construct_asset_url(hash: &str) -> (String, String) {
+        let short_hash = &hash[..2];
+
+        (
+            format!("{}/{}/{}", ASSETS_BASE_URL, short_hash, hash),
+            format!("{}/{}", short_hash, hash)
+        )
     }
 }
