@@ -1,13 +1,16 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
+use getset::Getters;
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::{
+    data::db,
     instance::{
         paths::InstancePaths,
         websocket::{OperationWsExt, OperationWsMessageLocked},
     },
+    utils::{download::Downloadable, maven},
     websocket::messages::operation::stage::{OperationStage, StageStatus},
 };
 
@@ -30,27 +33,46 @@ pub enum LibsSyncError {
     ArchNotAvailable,
 }
 
+#[derive(Debug)]
 pub struct SyncResult {
     classpaths: Vec<String>,
-    natives: Vec<PathBuf>
+    natives_paths: Vec<PathBuf>,
 }
 
 pub struct LibsData<'a, 'b> {
     manifest: &'b serde_json::Value,
-    paths: &'a InstancePaths,
+    paths: Arc<&'a InstancePaths>,
     ws_status: OperationWsMessageLocked<'a>,
+    db: &'a db::Database,
     current_os: &'a str,
 }
 
-#[derive(Eq, Hash, PartialEq, Debug, Clone, Deserialize)]
+#[derive(Eq, Hash, PartialEq, Debug, Clone, Deserialize, sqlx::FromRow, Getters)]
 pub struct LibInfo {
+    #[get = "pub"]
     hash: String,
+    #[get = "pub"]
     name: String,
     path: String,
+    #[get = "pub"]
     url: String,
     native: bool,
-    save_path: Option<PathBuf>
 }
+
+impl Downloadable for LibInfo {
+    fn get_name(&self) -> &String {
+        self.name()
+    }
+
+    fn get_hash(&self) -> &String {
+        self.hash()
+    }
+
+    fn get_url(&self) -> &String {
+        self.url()
+    }
+}
+
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadLibs;
 
@@ -59,6 +81,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
         manifest: &'b serde_json::Value,
         paths: &'a InstancePaths,
         ws_status: OperationWsMessageLocked<'a>,
+        db: &'a db::Database,
         manifest_type: ManifestType,
     ) -> Result<SyncResult, String> {
         // Sync status through WebSocket
@@ -69,30 +92,26 @@ impl<'a, 'b> LibsData<'a, 'b> {
 
         let current_os = match construct_os_name() {
             Ok(name) => name,
-            Err(e) => return Err(e.to_string())
+            Err(e) => return Err(e.to_string()),
         };
 
+        let paths = Arc::new(paths);
         let libs_data = LibsData {
             manifest,
             paths,
             ws_status: ws_status.clone(),
-            current_os
+            db,
+            current_os,
         };
 
         let result = match manifest_type {
-            ManifestType::Official => {
-                Self::parse_manifest_official(libs_data).await
-            },
-            ManifestType::Prism => {
-                Self::parse_manifest_prism(libs_data).await
-            }
+            ManifestType::Official => Self::parse_manifest_official(&libs_data).await,
+            ManifestType::Prism => Self::parse_manifest_prism(&libs_data).await,
         };
 
         let sync_data = match result {
-            Ok(data) => {
-                data
-            },
-            Err(e) => return Err(e)
+            Ok(data) => data,
+            Err(e) => return Err(e),
         };
 
         ws_status
@@ -107,7 +126,11 @@ impl<'a, 'b> LibsData<'a, 'b> {
     }
 
     pub fn take_natives_paths(result: SyncResult) -> Vec<PathBuf> {
-        result.natives
+        result.natives_paths
+    }
+
+    pub fn build_maven_file_path(&self, maven_path: &str) -> String {
+        maven::build_file_path(self.paths.libs(), maven_path)
     }
 }
 
@@ -162,6 +185,18 @@ impl LibInfo {
             true
         } else {
             false
+        }
+    }
+
+    pub fn get_dir_path_and_file_name(&self) -> Option<(PathBuf, PathBuf)> {
+        match self.path.rfind("/") {
+            Some(pos) => {
+                return Some((
+                    PathBuf::from(self.path[..pos].to_string()),
+                    PathBuf::from(self.path[pos..].to_string()),
+                ))
+            }
+            None => None,
         }
     }
 }

@@ -10,8 +10,10 @@ use async_broadcast::{broadcast, Receiver, Sender};
 use async_std::sync::{Mutex, MutexGuard};
 use thiserror::Error;
 
-use crate::{utils::get_home_dir, websocket::messages::task::Task};
+use crate::{data::{config::Config, db::Database}, websocket::messages::task::Task};
 
+mod config;
+pub mod db;
 pub mod definitions;
 pub mod task;
 
@@ -26,6 +28,7 @@ pub struct GlobalAppData<'a> {
 #[derive(Debug, Clone)]
 pub struct StaticData {
     pub launcher_root_path: PathBuf,
+    pub db: Database,
 }
 
 #[derive(Debug, Clone)]
@@ -61,14 +64,31 @@ impl<'a> GlobalDataState<'a> {
             tasks_map: HashMap::new(),
         }));
 
-        let launcher_root_path = match get_home_dir().await {
-            Some(path) => path.join(".sonata"),
-            None => exit(1),
+        let config = match Config::init().await {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("An unrecoverable error occured: {}", e.to_string());
+                exit(1);
+            }
+        };
+
+        let db = match Database::init(&config.get_db_path()).await {
+            Ok(pool) => {
+                println!("DB initialized");
+                pool
+            },
+            Err(e) => {
+                println!("Error occured on DB init: {e}");
+                exit(1);
+            }
         };
 
         Self {
             data,
-            static_data: StaticData { launcher_root_path },
+            static_data: StaticData {
+                launcher_root_path: config.take_launcher_root_path(),
+                db,
+            },
             notifier: tx,
             _receiver: Arc::new(Mutex::new(rx)),
         }

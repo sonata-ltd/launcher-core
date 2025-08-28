@@ -1,9 +1,12 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use serde_json::Value;
 
 use crate::{
-    instance::download::{libs::{LibInfo, SyncResult}, manifest::download_manifest},
+    instance::download::{
+        libs::{LibInfo, SyncResult},
+        manifest::download_manifest,
+    },
     utils::str_nth_occurrence,
 };
 
@@ -12,7 +15,7 @@ use super::*;
 const META_BASE_URL: &'static str = "https://meta.prismlauncher.org/v1/";
 
 impl<'a, 'b> LibsData<'a, 'b> {
-    pub async fn parse_manifest_prism(self) -> Result<SyncResult, String> {
+    pub async fn parse_manifest_prism(&self) -> Result<SyncResult, String> {
         let mut downloadable_libs: Vec<LibInfo> = Vec::new();
 
         if let Some(libs) = self.manifest.get("libraries").and_then(|v| v.as_array()) {
@@ -20,7 +23,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 // Parse the name at the first
                 if let Some(name) = lib.get("name").and_then(|v| v.as_str()) {
                     if let Some(downloads_val) = lib.get("downloads") {
-
                         // If artifact not present or incomplete, check rules & downloads.classifiers under lib
                         let natives_key = format!("natives-{}", self.current_os);
                         if let Some(rules) = lib.get("rules").and_then(|v| v.as_array()) {
@@ -37,10 +39,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: sha1.to_string(),
                                                 name: name.to_string(),
-                                                path: path.to_string(),
+                                                path: self.build_maven_file_path(path),
                                                 url: url.to_string(),
                                                 native: true,
-                                                save_path: None
                                             });
                                         }
                                     }
@@ -55,10 +56,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                                 downloadable_libs.push(LibInfo {
                                                     hash: sha1.to_string(),
                                                     name: name.to_string(),
-                                                    path: path.to_string(),
+                                                    path: self.build_maven_file_path(path),
                                                     url: url.to_string(),
                                                     native: false,
-                                                    save_path: None
                                                 });
                                             }
                                         }
@@ -77,10 +77,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: sha1.to_string(),
                                                 name: name.to_string(),
-                                                path: path.to_string(),
+                                                path: self.build_maven_file_path(path),
                                                 url: url.to_string(),
                                                 native: true,
-                                                save_path: None
                                             });
                                         }
                                     }
@@ -96,10 +95,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: sha1.to_string(),
                                                 name: name.to_string(),
-                                                path: path.to_string(),
+                                                path: self.build_maven_file_path(path),
                                                 url: url.to_string(),
                                                 native: false,
-                                                save_path: None
                                             });
                                         }
                                     }
@@ -129,12 +127,13 @@ impl<'a, 'b> LibsData<'a, 'b> {
 
                     let libs_data = LibsData {
                         manifest: &manifest,
-                        paths: self.paths,
+                        paths: self.paths.clone(),
                         ws_status: self.ws_status.clone(),
+                        db: self.db,
                         current_os: self.current_os,
                     };
 
-                    match Box::pin(LibsData::parse_manifest_prism(libs_data)).await {
+                    match Box::pin(LibsData::parse_manifest_prism(&libs_data)).await {
                         Ok(mut result) => {
                             // Insert delimiter
                             if !result.classpaths.is_empty() {
@@ -142,8 +141,8 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                 additional_classpaths.append(&mut result.classpaths);
                             }
 
-                            if !result.natives.is_empty() {
-                                additional_natives_paths.append(&mut result.natives);
+                            if !result.natives_paths.is_empty() {
+                                additional_natives_paths.append(&mut result.natives_paths);
                             }
                         }
                         Err(e) => return Err(e),
@@ -177,15 +176,20 @@ impl<'a, 'b> LibsData<'a, 'b> {
                     path,
                     url: url.to_string(),
                     native: false,
-                    save_path: None
                 });
             }
         }
 
-        match Self::download_missing_libs(downloadable_libs, self.paths, self.ws_status).await {
+        match Self::download_missing_libs(
+            downloadable_libs,
+            Arc::clone(&self.ws_status),
+            self.db,
+        )
+        .await
+        {
             Ok(mut result) => {
                 result.classpaths.append(&mut additional_classpaths);
-                result.natives.append(&mut additional_natives_paths);
+                result.natives_paths.append(&mut additional_natives_paths);
                 Ok(result)
             }
             Err(e) => Err(e.to_string()),

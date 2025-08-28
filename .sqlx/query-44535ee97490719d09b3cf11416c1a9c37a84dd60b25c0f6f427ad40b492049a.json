@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT name, hash, path, url, native, save_path\n            FROM libraries\n            ORDER BY name\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "hash",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "path",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "url",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "native",
+        "ordinal": 4,
+        "type_info": "Bool"
+      },
+      {
+        "name": "save_path",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "44535ee97490719d09b3cf11416c1a9c37a84dd60b25c0f6f427ad40b492049a"
+}

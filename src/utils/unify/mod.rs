@@ -14,6 +14,7 @@ pub struct UnifiedVersionsData {
     manifest_type: MetaProviders,
 }
 
+#[allow(dead_code)]
 pub enum MetaProviders {
     Mojang,
     Prism,
@@ -22,9 +23,7 @@ pub enum MetaProviders {
 impl<'a> UnifiedVersionsData {
     pub async fn new(manifest_type: MetaProviders) -> Result<Self, StatusCode> {
         let manifest_url = match manifest_type {
-            MetaProviders::Mojang => {
-                "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-            }
+            MetaProviders::Mojang => "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
             MetaProviders::Prism => "https://meta.prismlauncher.org/v1/net.minecraft/index.json",
         };
 

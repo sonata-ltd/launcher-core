@@ -127,11 +127,13 @@ impl<'a> Instance {
             &version_manifest,
             &paths,
             Arc::clone(&ws_status),
+            &global_app_state.static_data.db,
             download::libs::ManifestType::Prism,
         )
         .await
         {
             Ok(mut result) => {
+                println!("{:#?}", result);
                 launch_builder.add_cps(LibsData::get_classpaths_mut(&mut result));
                 launch_builder.add_natives(LibsData::take_natives_paths(result));
             }
@@ -175,8 +177,8 @@ impl<'a> Instance {
         AssetsData::sync_assets(
             &assets_manifest,
             &assets_objects_dir,
-            &paths.metacache_file(),
             Arc::clone(&ws_status),
+            &global_app_state.static_data.db
         )
         .await;
 

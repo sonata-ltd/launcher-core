@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use crate::instance::download::libs::{LibInfo, LibsData, SyncResult};
 
 mod prism;
 
 impl<'a, 'b> LibsData<'a, 'b> {
-    pub async fn parse_manifest_official(self) -> Result<SyncResult, String> {
+    pub async fn parse_manifest_official(&self) -> Result<SyncResult, String> {
         // Hashmap contains: hash, (name, path, url)
         let mut downloadable_libs: Vec<LibInfo> = Vec::new();
 
@@ -28,7 +30,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                 }
                             }
                         }
-
                         false
                     })
                 } else {
@@ -46,10 +47,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                         downloadable_libs.push(LibInfo {
                             hash: lib_hash.to_string(),
                             name: lib_name.to_string(),
-                            path: lib_path.to_string(),
+                            path: self.build_maven_file_path(lib_path),
                             url: lib_url.to_string(),
                             native: false,
-                            save_path: None,
                         });
                     }
                 }
@@ -76,10 +76,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: lib_hash.to_string(),
                                                 name: lib_name.to_string(),
-                                                path: lib_path.to_string(),
+                                                path: self.build_maven_file_path(lib_path),
                                                 url: lib_url.to_string(),
                                                 native: true,
-                                                save_path: None,
                                             });
                                         }
                                     }
@@ -87,7 +86,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
                             }
                         }
                     }
-                } else {
                 }
             }
         }
@@ -103,16 +101,17 @@ impl<'a, 'b> LibsData<'a, 'b> {
             downloadable_libs.push(LibInfo {
                 hash: hash.to_string(),
                 name,
-                path,
+                path: self.build_maven_file_path(&path),
                 url: client_url.to_string(),
                 native: false,
-                save_path: None,
             });
         }
 
-        match Self::download_missing_libs(downloadable_libs, self.paths, self.ws_status).await {
-            Ok(result) => Ok(result),
-            Err(e) => Err(e),
-        }
+        Self::download_missing_libs(
+            downloadable_libs,
+            Arc::clone(&self.ws_status),
+            &self.db,
+        )
+        .await
     }
 }

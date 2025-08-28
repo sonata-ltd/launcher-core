@@ -10,6 +10,7 @@ pub mod pages;
 
 #[derive(Debug, Deserialize, Default, TS)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct Options {
     general: General,
     overview: Overview,
