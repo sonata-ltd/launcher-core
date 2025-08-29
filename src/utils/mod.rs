@@ -11,6 +11,7 @@ pub mod instance;
 pub mod metacache;
 pub mod maven;
 pub mod unify;
+pub mod db;
 
 
 pub fn _extract_filename(path: &str) -> Option<&str> {

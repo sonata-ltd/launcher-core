@@ -1,10 +1,9 @@
-use serde::{ser::Error, Deserialize};
+use serde::Deserialize;
 use ts_rs::TS;
 
-use crate::instance::options::pages::{
-    General, Logs, Mods, Overview, Page, PageResult, ReadPage, Resourcepacks, Settings,
-    Shaderpacks, Worlds,
-};
+use crate::{data::db::Database, instance::{options::pages::{
+    General, Overview, Page, PageResult, ReadPage,
+}, InstanceError}};
 
 pub mod pages;
 
@@ -27,41 +26,16 @@ impl Options {
         Ok(root)
     }
 
-    pub fn retrieve(page: Page, json: serde_json::Value) -> Result<PageResult, serde_json::Error> {
+    pub async fn retrieve(db: &Database, id: i64, page: Page) -> Result<PageResult, InstanceError> {
         match page {
             Page::Overview => {
-                if let Some(overview) = json.get("overview").and_then(|v| v.as_object()) {
-                    let v = Overview::from_json_ref(overview)?;
-                    return Ok(PageResult::Overview(v));
-                }
+                let page = Overview::from_db(id, &db).await?;
+                Ok(PageResult::Overview(page))
             }
-            Page::Mods => {
-                let v = Mods::from_json_value(json)?;
-                return Ok(PageResult::Mods(v));
-            }
-            Page::Worlds => {
-                let v = Worlds::from_json_value(json)?;
-                return Ok(PageResult::Worlds(v));
-            }
-            Page::Resourcepacks => {
-                let v = Resourcepacks::from_json_value(json)?;
-                return Ok(PageResult::Resourcepacks(v));
-            }
-            Page::Shaderpacks => {
-                let v = Shaderpacks::from_json_value(json)?;
-                return Ok(PageResult::Shaderpacks(v));
-            }
-            Page::Logs => {
-                let v = Logs::from_json_value(json)?;
-                return Ok(PageResult::Logs(v));
-            }
-            Page::Settings => {
-                let v = Settings::from_json_value(json)?;
-                return Ok(PageResult::Settings(v));
+            _ => {
+                Err(InstanceError::NotImplemented)
             }
         }
-
-        Err(serde_json::Error::custom("Page not found in the manifest"))
     }
 }
 

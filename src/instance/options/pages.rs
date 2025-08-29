@@ -1,8 +1,10 @@
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use tide::utils::async_trait;
 use ts_rs::TS;
+
+use crate::data::db::{DBError, Database};
 
 
 #[derive(Debug, Deserialize, Default, TS)]
@@ -17,8 +19,8 @@ pub struct General {
 pub struct Overview {
     name: String,
     tags: String,
-    selected_export_type: Option<ExportTypes>,
-    playtime: usize
+    // selected_export_type: Option<ExportTypes>,
+    // playtime: usize
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -88,27 +90,26 @@ pub enum PageResult {
     Settings(Settings)
 }
 
-pub trait ReadPage: for<'de> Deserialize<'de> + Sized {
-    /// Parse from &str
-    fn from_json_str(s: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(s)
-    }
-
-    /// Parse from JSON
-    fn from_json_value(v: serde_json::Value) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(v)
-    }
-
-    /// Parse from Map
-    fn from_json_ref(r: &Map<String, serde_json::Value>) -> Result<Self, serde_json::Error> {
-        serde_json::from_value(Value::Object(r.to_owned()))
-    }
+#[async_trait]
+pub trait ReadPage: Sized + Send  {
+    async fn from_db(instance_id: i64, db: &Database) -> Result<Self, DBError>;
 }
 
-impl ReadPage for Overview {}
-impl ReadPage for Mods {}
-impl ReadPage for Worlds {}
-impl ReadPage for Resourcepacks {}
-impl ReadPage for Shaderpacks {}
-impl ReadPage for Logs {}
-impl ReadPage for Settings {}
+#[async_trait]
+impl ReadPage for Overview {
+    async fn from_db(instance_id: i64, db: &Database) -> Result<Self, DBError> {
+        let rec = sqlx::query_as!(
+            Overview,
+            r#"
+            SELECT name, tags
+            FROM instances_overview
+            WHERE instance_id = ?
+            "#,
+            instance_id
+        ).fetch_optional(&db.pool)
+        .await?;
+
+        let page = rec.ok_or_else(|| DBError::NotFound(format!("Overview page not found")))?;
+        Ok(page)
+    }
+}

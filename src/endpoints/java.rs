@@ -19,7 +19,6 @@ pub async fn download_java_ws(mut ws: WebSocketConnection) -> tide::Result<()> {
         })?;
 
         let DownloadRequest { java_ver } = download_request;
-        // let available_java_url = "https://launchermeta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json";
 
         match home_dir() {
             Some(path) => {
