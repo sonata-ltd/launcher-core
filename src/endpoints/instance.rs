@@ -105,18 +105,23 @@ pub async fn list_instances_ws(mut ws: WebSocketConnection) -> tide::Result<()> 
 pub async fn instance_options_dispatcher<'a>(req: EndpointRequest<'a>) -> tide::Result {
     let id_param = req.param("id")
         .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Missing ID"))?;
+    let id = match id_param.parse::<i64>() {
+        Ok(id) => id,
+        Err(e) => {
+            return Ok(tide::Response::builder(400)
+                .body(e.to_string())
+                .content_type(tide::http::mime::PLAIN)
+                .build())
+        }
+    };
+
     let page_param = req.param("page")
         .map_err(|_| tide::Error::from_str(StatusCode::BadRequest, "Missing Tab"))?;
     let page: Page = page_param.parse().map_err(|_| {
         tide::Error::from_str(400, format!("Unknown page: {}", &page_param))
     })?;
 
-    let global_app_state = req.state();
-    let path_to_manifest = &global_app_state.static_data.launcher_root_path
-        .join("headers")
-        .join(id_param.to_owned() + ".json");
-
-    match Instance::get_page(page, path_to_manifest).await {
+    match Instance::get_page(&req, id, page).await {
         Ok(page_data) => {
             return Ok(tide::Response::builder(200)
                 .body(page_data)

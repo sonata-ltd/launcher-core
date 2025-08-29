@@ -5,8 +5,6 @@ use launch::ClientOptions;
 use launch::LaunchInfo;
 use paths::InstancePaths;
 use serde::Deserialize;
-use std::fs::OpenOptions;
-use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod download;
@@ -19,6 +17,7 @@ pub mod options;
 pub mod paths;
 mod websocket;
 
+use crate::data::db::DBError;
 use crate::instance::options::pages::Page;
 use crate::instance::options::Options;
 use crate::manifest::instance::gen_manifest;
@@ -61,6 +60,9 @@ pub enum InstanceError {
     #[error("Failed to create new instance: {0}")]
     CreationFailed(String),
 
+    #[error("Instance not found: {0}")]
+    InstanceNotFound(String),
+
     #[error("Failed to run instance: {0}")]
     RunFailed(String),
 
@@ -82,11 +84,17 @@ pub enum InstanceError {
     #[error("Failed to retrieve instance version")]
     VersionNotAvailable,
 
-    #[error("Failed to read instance options: {0}")]
-    OptionsNotAvailable(String),
+    #[error("Failed to read option: {0}")]
+    OptionNotAvailable(String),
 
-    #[error("Failed to parse instance options")]
-    OptionsCorrupted,
+    #[error("Failed to convert into JSON: {0}")]
+    JSONConstructionFailed(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    DB(#[from] DBError),
+
+    #[error("Function is not implemented yet")]
+    NotImplemented
 }
 
 pub type Result<T> = std::result::Result<T, InstanceError>;
@@ -116,31 +124,13 @@ impl<'a> Instance {
         Ok(())
     }
 
-    pub async fn get_page(page: Page, manifest_path: &PathBuf) -> Result<String> {
-        let manifest_file = match OpenOptions::new()
-            .read(true)
-            .write(false)
-            .create(false)
-            .open(manifest_path)
-        {
-            Ok(data) => data,
-            Err(e) => return Err(InstanceError::OptionsNotAvailable(e.to_string())),
-        };
+    pub async fn get_page(req: &EndpointRequest<'a>, id: i64, page: Page) -> Result<serde_json::Value> {
+        let db = &req.state().static_data.db;
 
-        let manifest_value = match serde_json::from_reader(&manifest_file) {
-            Ok(value) => value,
-            Err(e) => {
-                println!("Failed to get instance manifest: {}", e.to_string());
-                return Err(InstanceError::OptionsNotAvailable(e.to_string()));
-            }
-        };
-
-        match Options::retrieve(page, manifest_value) {
-            Ok(page_data) => match serde_json::to_string(&page_data) {
-                Ok(json) => return Ok(json),
-                Err(_) => return Err(InstanceError::OptionsCorrupted),
-            },
-            Err(e) => return Err(InstanceError::OptionsNotAvailable(e.to_string())),
+        let page_data = Options::retrieve(&db, id, page).await?;
+        match serde_json::to_value(page_data) {
+            Ok(value) => Ok(value),
+            Err(e) => Err(InstanceError::JSONConstructionFailed(e))
         }
     }
 
