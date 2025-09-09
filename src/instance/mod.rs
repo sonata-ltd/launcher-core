@@ -18,11 +18,11 @@ pub mod paths;
 mod websocket;
 
 use crate::data::db::DBError;
+use crate::data::db::Database;
 use crate::instance::options::pages::Page;
+use crate::instance::options::ChangeRequestBuilder;
 use crate::instance::options::Options;
-use crate::manifest::instance::gen_manifest;
-use crate::manifest::instance::uuid::UuidData;
-use crate::utils::instance::add_to_registry;
+use crate::utils::db::register_instance;
 use crate::websocket::messages::task::Task;
 use crate::websocket::messages::task::TaskProgress;
 use crate::websocket::messages::task::TaskStatus;
@@ -52,6 +52,7 @@ pub struct Instance {
     #[get = "pub"]
     version_id: String,
     version_manifest: serde_json::Value,
+    #[get = "pub"]
     paths: InstancePaths,
 }
 
@@ -65,6 +66,9 @@ pub enum InstanceError {
 
     #[error("Failed to run instance: {0}")]
     RunFailed(String),
+
+    #[error("Instance id is wrong: {0}")]
+    WrongId(String),
 
     #[error("Failed to register instance: {0}")]
     RegistrationFailed(String),
@@ -86,6 +90,9 @@ pub enum InstanceError {
 
     #[error("Failed to read option: {0}")]
     OptionNotAvailable(String),
+
+    #[error("Wrong options page is present: {0}")]
+    OptionsPageWrong(String),
 
     #[error("Failed to convert into JSON: {0}")]
     JSONConstructionFailed(#[from] serde_json::Error),
@@ -134,27 +141,22 @@ impl<'a> Instance {
         }
     }
 
-    async fn register_instance(instance: &Instance) -> Result<()> {
-        let paths = &instance.paths;
+    pub async fn change_field(req: &EndpointRequest<'a>, request: ChangeRequestBuilder) -> Result<()> {
+        let db = &req.state().static_data.db;
+        let builded_request = request.build()?;
 
-        let uuid = UuidData::new()
-            .add_name(&instance.name)
-            .add_version(instance.version_id())
-            .gen();
+        Options::change(&db, builded_request).await?;
+
+        Ok(())
+    }
+
+    async fn register(db: &Database, instance: &Instance) -> Result<i64> {
+        let paths = &instance.paths;
 
         match create_dir_all(paths.instance()).await {
             Ok(_) => {
-                match add_to_registry(&instance, &paths, &uuid) {
-                    Ok(_) => {}
-                    Err(e) => return Err(InstanceError::RegistrationFailed(e)),
-                };
-
-                match gen_manifest(&instance, &paths, &uuid).await {
-                    Ok(_) => {}
-                    Err(e) => return Err(InstanceError::ManifestGenerationFailed(e)),
-                };
-
-                Ok(())
+                let result = register_instance(db, instance).await?;
+                Ok(result)
             }
             Err(e) => {
                 return Err(InstanceError::DirCreationFailed(e.to_string()));

@@ -24,8 +24,8 @@ impl Config {
             None => return Err(ConfigError::HomeNotAvailable)
         };
 
-        let db_path = root_path.join(DEFAULT_DB_NAME);
         let launcher_root_path = root_path.join(".sonata");
+        let db_path = launcher_root_path.join(DEFAULT_DB_NAME);
 
         Ok(Config { db_path, launcher_root_path })
     }

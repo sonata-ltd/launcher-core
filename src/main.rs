@@ -1,7 +1,7 @@
 use data::GlobalDataState;
 use endpoints::{
     debug_ws, handle_init_root,
-    instance::{init_instance_ws, instance_options_dispatcher, list_instances_ws, run_instance_ws},
+    instance::{init_instance_ws, instance_options_dispatcher, run_instance_ws},
     java::download_java_ws,
     versions::{get_version_ws, get_versions},
 };
@@ -12,7 +12,10 @@ use tide::security::CorsMiddleware;
 use tide::{security::Origin, Request};
 use tide_websockets::{Message, WebSocket, WebSocketConnection};
 
-use crate::endpoints::versions::get_versions_unified;
+use crate::endpoints::{
+    instance::{instance_option_change, instance_options_sync, list_instances_ws},
+    versions::get_versions_unified,
+};
 
 pub mod instance;
 pub mod java;
@@ -57,9 +60,13 @@ async fn main() -> tide::Result<()> {
     app.at("/ws/instance/run")
         .get(WebSocket::new(|req, ws| run_instance_ws(req, ws)));
     app.at("/ws/instance/list")
-        .get(WebSocket::new(|_req, ws| list_instances_ws(ws)));
+        .get(WebSocket::new(|req, ws| list_instances_ws(req, ws)));
     app.at("/instance/:id/:page")
         .get(instance_options_dispatcher);
+    app.at("/instance/options/sync")
+        .get(WebSocket::new(|_req, ws| instance_options_sync(ws)));
+    app.at("/instance/options/change")
+        .post(instance_option_change);
     // app.at("/instance/options").get(instance_options_dispatcher);
 
     app.at("/debug/ws")

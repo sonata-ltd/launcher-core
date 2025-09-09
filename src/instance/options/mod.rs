@@ -1,18 +1,33 @@
 use serde::Deserialize;
-use ts_rs::TS;
+use serde_json::value::RawValue;
 
-use crate::{data::db::Database, instance::{options::pages::{
-    General, Overview, Page, PageResult, ReadPage,
-}, InstanceError}};
+use crate::{
+    data::db::Database,
+    instance::{
+        options::pages::{
+            overview::{Overview, OverviewFields},
+            settings::{Settings, SettingsFields},
+            Page, PageResult, ReadPage,
+        },
+        InstanceError,
+    },
+};
 
 pub mod pages;
+#[cfg(test)]
+mod tests;
 
-#[derive(Debug, Deserialize, Default, TS)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
 pub struct Options {
-    general: General,
     overview: Overview,
+}
+
+#[derive(Debug)]
+pub enum ChangableOptions {
+    Overview(OverviewFields),
+    Settings(SettingsFields)
 }
 
 impl Options {
@@ -32,25 +47,70 @@ impl Options {
                 let page = Overview::from_db(id, &db).await?;
                 Ok(PageResult::Overview(page))
             }
-            _ => {
-                Err(InstanceError::NotImplemented)
+            Page::Settings => {
+                let page = Settings::from_db(id, &db).await?;
+                Ok(PageResult::Settings(page))
+            }
+            _ => Err(InstanceError::NotImplemented),
+        }
+    }
+
+    pub async fn change(db: &Database, request: ChangeRequest) -> Result<(), InstanceError> {
+        match request.change {
+            ChangableOptions::Overview(f) => {
+                Overview::update(f, db, request.id).await?;
+            },
+            ChangableOptions::Settings(f) => {
+                Settings::update(f, db, request.id).await?
             }
         }
+
+        Ok(())
     }
 }
 
+#[derive(Deserialize, Debug)]
+pub struct ChangeRequestBuilder {
+    id: String,
+    page: String,
+    options: Box<RawValue>,
+}
 
-#[cfg(test)]
-mod tests {
-    use std::fs;
+#[derive(Debug)]
+pub struct ChangeRequest {
+    id: i64,
+    change: ChangableOptions,
+}
 
-    use super::*;
+impl ChangeRequestBuilder {
+    pub fn build(self) -> Result<ChangeRequest, InstanceError> {
+        let id: i64 = self.id.parse().map_err(|_| {
+            InstanceError::WrongId(format!("must be integer (i64), got \"{}\"", self.id))
+        })?;
+        let page: Page = self.page.parse().map_err(|_| {
+            InstanceError::OptionsPageWrong(self.page)
+        })?;
 
-    #[test]
-    fn export_bindings() -> Result<(), Box<dyn std::error::Error>> {
-        let out = concat!(env!("CARGO_MANIFEST_DIR"), "/bindings/instance/options");
-        fs::create_dir_all(out)?;
-        Options::export_all_to(out)?;
-        Ok(())
+        match page {
+            Page::Overview => {
+                let fields: OverviewFields = serde_json::from_str(&self.options.get()).map_err(|e| {
+                    InstanceError::OptionNotAvailable(
+                        format!("Failed to parse Overview page option: {}", e),
+                    )
+                })?;
+
+                Ok(ChangeRequest { id, change: ChangableOptions::Overview(fields) })
+            },
+            Page::Settings => {
+                let fields: SettingsFields = serde_json::from_str(&self.options.get()).map_err(|e| {
+                    InstanceError::OptionNotAvailable(
+                        format!("Failed to parse Settings page option: {}", e),
+                    )
+                })?;
+
+                Ok(ChangeRequest { id, change: ChangableOptions::Settings(fields) })
+            }
+            _ => Err(InstanceError::NotImplemented)
+        }
     }
 }

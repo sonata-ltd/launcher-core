@@ -22,6 +22,9 @@ pub enum DBError {
     #[error("Not found: {0}")]
     NotFound(String),
 
+    #[error("Data corrupted")]
+    ResultCorrupted,
+
     #[error("Migration error: {0}")]
     MigrateError(#[source] MigrateError)
 }
@@ -31,14 +34,15 @@ pub type Result<T> = std::result::Result<T, DBError>;
 impl Database {
     pub async fn init(path: &Path) -> Result<Self> {
         let db_url = format!("sqlite://{}", path.display());
+        println!("{}", db_url);
 
         if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
             Sqlite::create_database(&db_url).await?;
         }
 
         let pool = SqlitePool::connect(&db_url).await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
         sqlx::query("PRAGMA foreign_keys = ON;").execute(&pool).await?;
+        sqlx::migrate!("./migrations").run(&pool).await?;
 
         Ok(Self { pool })
     }
