@@ -7,11 +7,12 @@ use thiserror::Error;
 use tide_websockets::WebSocketConnection;
 use ts_rs::TS;
 
-use crate::websocket::messages::task::Task;
+use crate::websocket::messages::{option::OptionUpdateMessage, task::Task};
 
 pub mod operation;
 pub mod scan;
 pub mod task;
+pub mod option;
 
 #[derive(Error, Debug)]
 pub enum WsMessageError {
@@ -43,6 +44,8 @@ pub enum WsMessage<'a> {
     Scan(ScanMessage),
     #[serde(borrow)]
     Task(Task<'a>),
+
+    Option(OptionUpdateMessage)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, TS)]

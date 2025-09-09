@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use tide::utils::async_trait;
 use ts_rs::TS;
 
-use crate::data::db::{DBError, Database};
+use crate::{data::db::{DBError, Database}, instance::options::pages::{overview::Overview, settings::Settings}};
+
+pub mod overview;
+pub mod settings;
 
 
 #[derive(Debug, Deserialize, Default, TS)]
@@ -13,14 +16,6 @@ pub struct General {
     id: String,
     version: String,
     loader: String
-}
-
-#[derive(Debug, Deserialize, Serialize, Default, TS)]
-pub struct Overview {
-    name: String,
-    tags: String,
-    // selected_export_type: Option<ExportTypes>,
-    // playtime: usize
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -38,17 +33,7 @@ pub struct Shaderpacks {}
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Logs {}
 
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct Settings {}
-
-#[derive(Debug, Deserialize, Serialize, Default, TS)]
-pub enum ExportTypes {
-    #[default]
-    Sonata,
-    Prism
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 pub enum Page {
     Overview,
     Mods,
@@ -80,6 +65,7 @@ impl FromStr for Page {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PageResult {
     Overview(Overview),
     Mods(Mods),
@@ -87,29 +73,10 @@ pub enum PageResult {
     Resourcepacks(Resourcepacks),
     Shaderpacks(Shaderpacks),
     Logs(Logs),
-    Settings(Settings)
+    Settings(Settings),
 }
 
 #[async_trait]
 pub trait ReadPage: Sized + Send  {
     async fn from_db(instance_id: i64, db: &Database) -> Result<Self, DBError>;
-}
-
-#[async_trait]
-impl ReadPage for Overview {
-    async fn from_db(instance_id: i64, db: &Database) -> Result<Self, DBError> {
-        let rec = sqlx::query_as!(
-            Overview,
-            r#"
-            SELECT name, tags
-            FROM instances_overview
-            WHERE instance_id = ?
-            "#,
-            instance_id
-        ).fetch_optional(&db.pool)
-        .await?;
-
-        let page = rec.ok_or_else(|| DBError::NotFound(format!("Overview page not found")))?;
-        Ok(page)
-    }
 }

@@ -193,7 +193,8 @@ impl<'a> Instance {
         };
 
         // Initialize instance directory
-        match Self::register_instance(&instance).await {
+        let db = &global_app_state.static_data.db;
+        match Self::register(&db, &instance).await {
             Ok(_) => {}
             Err(e) => {
                 return Err(InstanceError::CreationFailed(format!(
