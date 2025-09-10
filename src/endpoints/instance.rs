@@ -32,7 +32,7 @@ pub async fn init_instance_ws<'a>(
         })?;
 
         let response: serde_json::Value;
-        match Instance::init(data, None, &req, &ws).await {
+        match Instance::init(data, true, None, &req, &ws).await {
             Ok(_) => {
                 response = json!({
                     "message": "instance initialized"
