@@ -33,6 +33,7 @@ pub struct InitData {
     pub name: String,
     pub url: String,
     pub request_id: String,
+    pub register: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -116,6 +117,7 @@ impl<'a> Instance {
             name: run_data.name,
             url: run_data.url,
             request_id: run_data.request_id,
+            register: false
         };
 
         let (instance, launch_info) =
