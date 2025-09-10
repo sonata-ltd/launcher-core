@@ -192,17 +192,19 @@ impl<'a> Instance {
             paths,
         };
 
-        // Initialize instance directory
-        let db = &global_app_state.static_data.db;
-        match Self::register(&db, &instance).await {
-            Ok(_) => {}
-            Err(e) => {
-                return Err(InstanceError::CreationFailed(format!(
-                    "Failed to initialize instance directory: {}",
-                    e
-                )))
-            }
-        };
+        if client_data.register {
+            // Initialize instance directory
+            let db = &global_app_state.static_data.db;
+            match Self::register(&db, &instance).await {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(InstanceError::CreationFailed(format!(
+                        "Failed to initialize instance directory: {}",
+                        e
+                    )))
+                }
+            };
+        }
 
         global_app_state
             .update_task(task_handle.id, |t| {
