@@ -33,7 +33,6 @@ pub struct InitData {
     pub name: String,
     pub url: String,
     pub request_id: String,
-    pub register: bool,
 }
 
 #[derive(Deserialize, Debug)]
@@ -117,11 +116,10 @@ impl<'a> Instance {
             name: run_data.name,
             url: run_data.url,
             request_id: run_data.request_id,
-            register: false
         };
 
         let (instance, launch_info) =
-            match Self::init(init_data, run_data.launch_options, req, ws).await {
+            match Self::init(init_data, false, run_data.launch_options, req, ws).await {
                 Ok(result) => result,
                 Err(e) => {
                     println!("{e}");

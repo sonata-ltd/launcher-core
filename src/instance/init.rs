@@ -20,6 +20,7 @@ use super::*;
 impl<'a> Instance {
     pub async fn init<'b>(
         client_data: InitData,
+        register: bool,
         _launch_options: Option<ClientOptions>,
         req: &'b EndpointRequest<'a>,
         ws: &WebSocketConnection,
@@ -192,7 +193,7 @@ impl<'a> Instance {
             paths,
         };
 
-        if client_data.register {
+        if register {
             // Initialize instance directory
             let db = &global_app_state.static_data.db;
             match Self::register(&db, &instance).await {
