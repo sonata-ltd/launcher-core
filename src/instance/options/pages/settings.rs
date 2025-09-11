@@ -22,6 +22,12 @@ pub struct SettingsFields {
     pub dir: Option<PathBuf>,
 }
 
+impl From<Settings> for SettingsFields {
+    fn from(s: Settings) -> Self {
+        SettingsFields { dir: Some(s.dir) }
+    }
+}
+
 impl Settings {
     pub async fn update(change: SettingsFields, db: &Database, instance_id: i64) -> Result<()> {
         let dir = match change.dir {

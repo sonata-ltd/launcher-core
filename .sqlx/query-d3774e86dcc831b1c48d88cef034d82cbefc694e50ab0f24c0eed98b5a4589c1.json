@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT changed_name, tags, export_type, playtime\n            FROM instances_overview\n            WHERE instance_id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "changed_name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "tags",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "export_type",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "playtime",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d3774e86dcc831b1c48d88cef034d82cbefc694e50ab0f24c0eed98b5a4589c1"
+}

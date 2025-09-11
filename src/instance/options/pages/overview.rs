@@ -23,7 +23,8 @@ pub struct Overview {
 pub enum ExportTypes {
     #[default]
     Sonata,
-    Prism,
+    MultiMC,
+    Modrinth
 }
 
 #[serde_with::skip_serializing_none]
@@ -37,6 +38,16 @@ pub struct OverviewFields {
     pub playtime: Option<i64>,
 }
 
+impl From<Overview> for OverviewFields {
+    fn from(s: Overview) -> Self {
+        OverviewFields {
+            name: Some(s.name),
+            tags: Some(s.tags),
+            export_type: Some(s.export_type),
+            playtime: Some(s.playtime),
+        }
+    }
+}
 
 impl Overview {
     pub fn new(name: String, tags: String, export_type: ExportTypes, playtime: i64) -> Self {
@@ -51,7 +62,7 @@ impl Overview {
     pub async fn update(change: OverviewFields, db: &Database, instance_id: i64) -> Result<()> {
         let export_type = match change.export_type {
             Some(export) => Some(export.to_string()),
-            None => None
+            None => None,
         };
 
         sqlx::query!(
@@ -69,7 +80,9 @@ impl Overview {
             export_type,
             change.playtime,
             instance_id
-        ).execute(&db.pool).await?;
+        )
+        .execute(&db.pool)
+        .await?;
 
         Ok(())
     }
@@ -127,7 +140,8 @@ impl FromStr for ExportTypes {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         let res = match s {
             "Sonata" => ExportTypes::Sonata,
-            "Prism" => ExportTypes::Prism,
+            "MultiMC" => ExportTypes::MultiMC,
+            "Modrinth" => ExportTypes::Modrinth,
             _ => return Err(DBError::ResultCorrupted),
         };
 

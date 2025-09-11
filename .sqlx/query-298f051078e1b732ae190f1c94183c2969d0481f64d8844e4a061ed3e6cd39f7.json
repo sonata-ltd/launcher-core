@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO instances (name, version, loader)\n        VALUES (?1, ?2, ?3)\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "298f051078e1b732ae190f1c94183c2969d0481f64d8844e4a061ed3e6cd39f7"
+}

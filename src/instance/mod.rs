@@ -1,4 +1,5 @@
 use async_std::fs::create_dir_all;
+use chrono::Utc;
 use core::str;
 use getset::Getters;
 use launch::ClientOptions;
@@ -23,9 +24,12 @@ use crate::instance::options::pages::Page;
 use crate::instance::options::ChangeRequestBuilder;
 use crate::instance::options::Options;
 use crate::utils::db::register_instance;
+use crate::websocket::messages::option::OptionUpdateMessage;
 use crate::websocket::messages::task::Task;
 use crate::websocket::messages::task::TaskProgress;
 use crate::websocket::messages::task::TaskStatus;
+use crate::websocket::messages::BaseMessage;
+use crate::websocket::messages::WsMessage;
 use crate::EndpointRequest;
 
 #[derive(Deserialize)]
@@ -135,7 +139,18 @@ impl<'a> Instance {
         let db = &req.state().static_data.db;
 
         let page_data = Options::retrieve(&db, id, page).await?;
-        match serde_json::to_value(page_data) {
+        let msg: WsMessage = WsMessage::Option(OptionUpdateMessage {
+            base: BaseMessage {
+                message_id: "asdasd".into(),
+                operation_id: Some("".into()),
+                request_id: Some("".into()),
+                timestamp: Utc::now(),
+                correlation_id: None
+            },
+            option: page_data.into()
+        });
+
+        match serde_json::to_value(msg) {
             Ok(value) => Ok(value),
             Err(e) => Err(InstanceError::JSONConstructionFailed(e))
         }

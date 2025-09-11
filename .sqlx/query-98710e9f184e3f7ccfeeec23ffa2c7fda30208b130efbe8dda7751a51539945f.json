@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE instances_settings\n            SET\n                dir = COALESCE($1, dir)\n            WHERE instance_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "98710e9f184e3f7ccfeeec23ffa2c7fda30208b130efbe8dda7751a51539945f"
+}
