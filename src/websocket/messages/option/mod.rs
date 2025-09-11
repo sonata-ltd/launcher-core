@@ -13,50 +13,50 @@ pub struct OptionUpdateMessage {
     pub option: InstanceFields,
 }
 
-#[derive(Debug, TS)]
+#[derive(Serialize, Debug, TS)]
 pub enum InstanceFields {
     Overview(OverviewFields),
     Settings(SettingsFields)
 }
 
 
-impl Serialize for InstanceFields {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer
-    {
-        use serde::ser::SerializeMap;
+// impl Serialize for InstanceFields {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: serde::Serializer
+//     {
+//         use serde::ser::SerializeMap;
 
-        let mut map = serializer.serialize_map(None)?;
+//         let mut map = serializer.serialize_map(None)?;
 
-        match self {
-            InstanceFields::Overview(fields) => {
-                map.serialize_entry("page", "overview")?;
+//         match self {
+//             InstanceFields::Overview(fields) => {
+//                 map.serialize_entry("page", "overview")?;
 
-                let v = serde_json::to_value(fields).map_err(serde::ser::Error::custom)?;
-                if let Value::Object(obj) = v {
-                    for (k, v) in obj {
-                        // Skip fields not present
-                        map.serialize_entry(&k, &v)?;
-                    }
-                }
-            },
-            InstanceFields::Settings(fields) => {
-                map.serialize_entry("page", "settings")?;
+//                 let v = serde_json::to_value(fields).map_err(serde::ser::Error::custom)?;
+//                 if let Value::Object(obj) = v {
+//                     for (k, v) in obj {
+//                         // Skip fields not present
+//                         map.serialize_entry(&k, &v)?;
+//                     }
+//                 }
+//             },
+//             InstanceFields::Settings(fields) => {
+//                 map.serialize_entry("page", "settings")?;
 
-                let v = serde_json::to_value(fields).map_err(serde::ser::Error::custom)?;
-                if let Value::Object(obj) = v {
-                    for (k, v) in obj {
-                        // Skip fields not present
-                        map.serialize_entry(&k, &v)?;
-                    }
-                }
-            }
-        }
+//                 let v = serde_json::to_value(fields).map_err(serde::ser::Error::custom)?;
+//                 if let Value::Object(obj) = v {
+//                     for (k, v) in obj {
+//                         // Skip fields not present
+//                         map.serialize_entry(&k, &v)?;
+//                     }
+//                 }
+//             }
+//         }
 
-        map.end()
-    }
-}
+//         map.end()
+//     }
+// }
 
 impl<'de> Deserialize<'de> for InstanceFields {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

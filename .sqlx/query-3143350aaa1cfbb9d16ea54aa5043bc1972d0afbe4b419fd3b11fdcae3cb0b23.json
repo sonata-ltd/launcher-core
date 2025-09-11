@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT dir\n                FROM instances_settings\n                WHERE instance_id = ?\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "dir",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3143350aaa1cfbb9d16ea54aa5043bc1972d0afbe4b419fd3b11fdcae3cb0b23"
+}

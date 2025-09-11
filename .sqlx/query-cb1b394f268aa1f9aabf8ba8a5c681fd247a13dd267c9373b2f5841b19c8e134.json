@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT COALESCE(o.changed_name, i.name) AS \"name!\", i.version, i.loader\n        FROM instances i\n        LEFT JOIN instances_overview o ON o.instance_id = i.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "name!",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "version",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "loader",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cb1b394f268aa1f9aabf8ba8a5c681fd247a13dd267c9373b2f5841b19c8e134"
+}

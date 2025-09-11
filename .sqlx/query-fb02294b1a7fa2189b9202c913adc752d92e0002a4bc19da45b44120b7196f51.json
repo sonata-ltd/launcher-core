@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO instances_settings (instance_id, dir)\n            VALUES (?1, ?2)\n            ON CONFLICT(instance_id) DO UPDATE SET\n                dir = excluded.dir\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "fb02294b1a7fa2189b9202c913adc752d92e0002a4bc19da45b44120b7196f51"
+}

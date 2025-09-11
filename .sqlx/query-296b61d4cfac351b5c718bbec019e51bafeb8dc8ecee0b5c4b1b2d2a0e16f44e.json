@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                INSERT INTO assets (name, hash, url)\n                VALUES (?1, ?2, ?3)\n                RETURNING id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "296b61d4cfac351b5c718bbec019e51bafeb8dc8ecee0b5c4b1b2d2a0e16f44e"
+}

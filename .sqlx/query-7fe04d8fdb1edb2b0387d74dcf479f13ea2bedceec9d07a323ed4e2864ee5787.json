@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                INSERT INTO libraries (name, hash, path, native, url)\n                VALUES (?1, ?2, ?3, ?4, ?5)\n                RETURNING id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7fe04d8fdb1edb2b0387d74dcf479f13ea2bedceec9d07a323ed4e2864ee5787"
+}

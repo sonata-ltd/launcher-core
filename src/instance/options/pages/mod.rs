@@ -4,18 +4,21 @@ use serde::{Deserialize, Serialize};
 use tide::utils::async_trait;
 use ts_rs::TS;
 
-use crate::{data::db::{DBError, Database}, instance::options::pages::{overview::Overview, settings::Settings}};
+use crate::{
+    data::db::{DBError, Database},
+    instance::options::pages::{overview::Overview, settings::Settings},
+    websocket::messages::option::InstanceFields,
+};
 
 pub mod overview;
 pub mod settings;
-
 
 #[derive(Debug, Deserialize, Default, TS)]
 #[allow(dead_code)]
 pub struct General {
     id: String,
     version: String,
-    loader: String
+    loader: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -41,7 +44,7 @@ pub enum Page {
     Resourcepacks,
     Shaderpacks,
     Logs,
-    Settings
+    Settings,
 }
 
 #[derive(Debug)]
@@ -59,7 +62,7 @@ impl FromStr for Page {
             "shaderpacks" => Ok(Page::Shaderpacks),
             "logs" => Ok(Page::Logs),
             "settings" => Ok(Page::Settings),
-            _ => Err(ParsePageError)
+            _ => Err(ParsePageError),
         }
     }
 }
@@ -68,15 +71,24 @@ impl FromStr for Page {
 #[serde(rename_all = "camelCase")]
 pub enum PageResult {
     Overview(Overview),
-    Mods(Mods),
-    Worlds(Worlds),
-    Resourcepacks(Resourcepacks),
-    Shaderpacks(Shaderpacks),
-    Logs(Logs),
+    // Mods(Mods),
+    // Worlds(Worlds),
+    // Resourcepacks(Resourcepacks),
+    // Shaderpacks(Shaderpacks),
+    // Logs(Logs),
     Settings(Settings),
 }
 
 #[async_trait]
-pub trait ReadPage: Sized + Send  {
+pub trait ReadPage: Sized + Send {
     async fn from_db(instance_id: i64, db: &Database) -> Result<Self, DBError>;
+}
+
+impl Into<InstanceFields> for PageResult {
+    fn into(self) -> InstanceFields {
+        match self {
+            PageResult::Overview(f) => InstanceFields::Overview(f.into()),
+            PageResult::Settings(f) => InstanceFields::Settings(f.into()),
+        }
+    }
 }
