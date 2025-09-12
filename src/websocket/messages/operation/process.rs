@@ -101,18 +101,12 @@ impl ProcessTarget {
     }
 
     pub fn instance(
-        manifest_path: String,
-        manifest_exist: bool,
-        instance_path: String,
-        instance_exist: bool,
+        instance_path: Option<String>,
         scan_info: Option<ScanInfo>,
     ) -> Self {
         ProcessTarget::Instance {
             integrity: ScanIntegrity {
-                manifest_path,
-                manifest_exist,
                 instance_path,
-                instance_exist,
             },
             info: scan_info,
         }

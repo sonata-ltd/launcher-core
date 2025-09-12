@@ -92,8 +92,6 @@ pub async fn list_instances_ws<'a>(
 
         let db = &req.state().static_data.db;
         get_instances(&db, &ws).await.unwrap();
-
-        ws.send_string(format!("done")).await?;
     }
 
     Ok(())

@@ -168,8 +168,9 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 self.manifest.get("version").and_then(|v| v.as_str()),
             ) {
                 let file_name = version_name.to_owned() + "-client.jar";
-                let path = "/com/mojang/minecraft/".to_owned() + &file_name;
+                let path = format!("{}/com/mojang/minecraft/{}", self.paths.libs().display(), file_name);
 
+                println!("{}", jar_name);
                 downloadable_libs.push(LibInfo {
                     hash: hash.to_string(),
                     name: jar_name.to_string(),

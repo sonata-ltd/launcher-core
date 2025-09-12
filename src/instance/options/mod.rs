@@ -71,7 +71,7 @@ impl Options {
 
 #[derive(Deserialize, Debug)]
 pub struct ChangeRequestBuilder {
-    id: String,
+    id: i64,
     page: String,
     options: Box<RawValue>,
 }
@@ -84,9 +84,7 @@ pub struct ChangeRequest {
 
 impl ChangeRequestBuilder {
     pub fn build(self) -> Result<ChangeRequest, InstanceError> {
-        let id: i64 = self.id.parse().map_err(|_| {
-            InstanceError::WrongId(format!("must be integer (i64), got \"{}\"", self.id))
-        })?;
+        let id: i64 = self.id;
         let page: Page = self.page.parse().map_err(|_| {
             InstanceError::OptionsPageWrong(self.page)
         })?;

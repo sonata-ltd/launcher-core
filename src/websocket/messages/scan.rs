@@ -27,15 +27,13 @@ pub struct ScanData {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
 pub struct ScanIntegrity {
-    pub manifest_path: String,
-    pub manifest_exist: bool,
-    pub instance_path: String,
-    pub instance_exist: bool,
+    pub instance_path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(TS)]
 pub struct ScanInfo {
+    pub id: i64,
     pub name: String,
     pub version: String,
     pub loader: String

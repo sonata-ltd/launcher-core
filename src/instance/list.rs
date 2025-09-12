@@ -5,21 +5,16 @@ use tide_websockets::WebSocketConnection;
 use crate::{
     data::db::{Database, Result},
     websocket::messages::{
-        operation::{
-            event::OperationUpdate,
-            process::{ProcessStatus, ProcessTarget},
-            stage::OperationStage,
-            OperationMessage,
-        },
-        scan::ScanInfo,
+        operation::stage::OperationStage,
+        scan::{ScanData, ScanInfo, ScanIntegrity, ScanMessage},
         BaseMessage, WsMessage, WsMessageType,
     },
 };
 
-const STAGE_TYPE: OperationStage = OperationStage::ScanInstances;
 
 #[derive(Debug)]
 struct Row {
+    pub id: i64,
     pub name: String,
     pub version: String,
     pub loader: String,
@@ -29,7 +24,7 @@ pub async fn get_instances(db: &Database, ws: &WebSocketConnection) -> Result<()
     let mut stream = sqlx::query_as!(
         Row,
         r#"
-        SELECT COALESCE(o.changed_name, i.name) AS "name!", i.version, i.loader
+        SELECT i.id, COALESCE(o.changed_name, i.name) AS "name!", i.version, i.loader
         FROM instances i
         LEFT JOIN instances_overview o ON o.instance_id = i.id
         "#
@@ -39,7 +34,7 @@ pub async fn get_instances(db: &Database, ws: &WebSocketConnection) -> Result<()
     while let Some(row_res) = stream.next().await {
         let row = row_res?;
 
-        let msg: WsMessage = <WsMessage<'_>>::from(OperationMessage {
+        let msg: WsMessage = <WsMessage<'_>>::from(ScanMessage {
             base: BaseMessage {
                 message_id: "asd".to_string(),
                 operation_id: Some("asd".to_string()),
@@ -47,22 +42,16 @@ pub async fn get_instances(db: &Database, ws: &WebSocketConnection) -> Result<()
                 timestamp: Utc::now(),
                 correlation_id: None,
             },
-            data: OperationUpdate::Determinable {
-                stage: STAGE_TYPE,
-                status: ProcessStatus::InProgress,
-                target: Some(ProcessTarget::instance(
-                    "".to_string(),
-                    false,
-                    "".to_string(),
-                    false,
-                    Some(ScanInfo {
-                        name: row.name,
-                        version: row.version,
-                        loader: row.loader,
-                    }),
-                )),
-                current: 0,
-                total: 0,
+            data: ScanData {
+                integrity: ScanIntegrity {
+                    instance_path: Some("".into()),
+                },
+                info: Some(ScanInfo {
+                    id: row.id,
+                    name: row.name,
+                    version: row.version,
+                    loader: row.loader,
+                }),
             }
             .into(),
         });
