@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use async_std::task;
 use futures::{stream::FuturesUnordered, StreamExt};
 
-use crate::{utils::download::{buffer::BufferPool, Download}, websocket::messages::operation::process::{FileStatus, ProcessTarget}};
+use crate::{
+    utils::download::{buffer::BufferPool, Download},
+    websocket::messages::operation::process::{FileStatus, ProcessTarget},
+};
 
 use super::*;
 
@@ -19,6 +22,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
         let downloadable_libs_count = downloadable_libs.len();
         let mut downloaded_libs: HashSet<LibInfo> = HashSet::new();
         let mut classpaths = Vec::new();
+        let mut natives_paths: Vec<PathBuf> = Vec::new();
 
         let mut futures = FuturesUnordered::new();
         let download_buffers_pool = Arc::new(BufferPool::new(
@@ -41,7 +45,12 @@ impl<'a, 'b> LibsData<'a, 'b> {
             Err(e) => return Err(e.to_string()),
         };
 
-        let missing = Self::get_missing_by_hash(cached, downloadable_libs, &mut classpaths);
+        let missing = Self::get_missing_by_hash(
+            cached,
+            downloadable_libs,
+            &mut classpaths,
+            &mut natives_paths,
+        );
         for missing_lib in missing.into_iter() {
             let current_buffer = Arc::clone(&download_buffers_pool);
 
@@ -81,10 +90,15 @@ impl<'a, 'b> LibsData<'a, 'b> {
         .await;
 
         match Self::register_libs(&mut downloaded_libs, &db).await {
-            Ok((classpaths, natives_paths)) => Ok(SyncResult {
-                classpaths,
-                natives_paths,
-            }),
+            Ok((mut downloaded_classpaths, mut downloaded_natives_paths)) => {
+                classpaths.append(&mut downloaded_classpaths);
+                natives_paths.append(&mut downloaded_natives_paths);
+
+                Ok(SyncResult {
+                    classpaths,
+                    natives_paths,
+                })
+            }
             Err(e) => Err(e.to_string()),
         }
     }
@@ -103,6 +117,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
         downloaded: Vec<LibInfo>,
         needed: Vec<LibInfo>,
         classpaths: &mut Vec<String>,
+        natives_paths: &mut Vec<PathBuf>,
     ) -> Vec<LibInfo> {
         let have: HashSet<&str> = downloaded.iter().map(|l| l.hash.as_str()).collect();
         let mut missing: Vec<LibInfo> = Vec::new();
@@ -111,7 +126,10 @@ impl<'a, 'b> LibsData<'a, 'b> {
             if !have.contains(lib.hash.as_str()) {
                 missing.push(lib);
             } else {
-                Self::add_to_classpaths(classpaths, lib.path);
+                Self::add_to_classpaths(classpaths, lib.path.clone());
+                if lib.is_native() {
+                    natives_paths.push(PathBuf::from(lib.path));
+                }
             }
         }
 
