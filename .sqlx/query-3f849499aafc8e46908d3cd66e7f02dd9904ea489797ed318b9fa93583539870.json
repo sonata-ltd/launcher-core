@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE instances_overview\n            SET\n                name = COALESCE($1, name),\n                tags = COALESCE($2, tags),\n                export_type = COALESCE($3, export_type),\n                playtime = COALESCE($4, playtime)\n            WHERE instance_id = $5\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "3f849499aafc8e46908d3cd66e7f02dd9904ea489797ed318b9fa93583539870"
+}

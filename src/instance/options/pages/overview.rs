@@ -69,7 +69,7 @@ impl Overview {
             r#"
             UPDATE instances_overview
             SET
-                changed_name = COALESCE($1, changed_name),
+                name = COALESCE($1, name),
                 tags = COALESCE($2, tags),
                 export_type = COALESCE($3, export_type),
                 playtime = COALESCE($4, playtime)
@@ -92,7 +92,7 @@ impl Overview {
 
         sqlx::query!(
             r#"
-            INSERT INTO instances_overview (instance_id, changed_name, tags, export_type, playtime)
+            INSERT INTO instances_overview (instance_id, name, tags, export_type, playtime)
             VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
             instance_id,
@@ -113,7 +113,7 @@ impl super::ReadPage for Overview {
     async fn from_db(instance_id: i64, db: &Database) -> Result<Self> {
         let rec = sqlx::query!(
             r#"
-            SELECT changed_name, tags, export_type, playtime
+            SELECT name, tags, export_type, playtime
             FROM instances_overview
             WHERE instance_id = ?
             "#,
@@ -124,7 +124,7 @@ impl super::ReadPage for Overview {
 
         let export_type: ExportTypes = rec.export_type.parse()?;
         let page = Overview {
-            name: rec.changed_name,
+            name: rec.name,
             tags: rec.tags,
             export_type,
             playtime: rec.playtime,
