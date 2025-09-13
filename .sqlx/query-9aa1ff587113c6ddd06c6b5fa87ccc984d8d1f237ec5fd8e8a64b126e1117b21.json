@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n        INSERT INTO instances (name, version, loader)\n        VALUES (?1, ?2, ?3)\n        RETURNING id\n        ",
+  "query": "\n        INSERT INTO instances (version, loader)\n        VALUES (?1, ?2)\n        RETURNING id\n        ",
   "describe": {
     "columns": [
       {
@@ -10,11 +10,11 @@
       }
     ],
     "parameters": {
-      "Right": 3
+      "Right": 2
     },
     "nullable": [
       false
     ]
   },
-  "hash": "298f051078e1b732ae190f1c94183c2969d0481f64d8844e4a061ed3e6cd39f7"
+  "hash": "9aa1ff587113c6ddd06c6b5fa87ccc984d8d1f237ec5fd8e8a64b126e1117b21"
 }

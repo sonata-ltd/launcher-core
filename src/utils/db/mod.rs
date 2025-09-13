@@ -14,11 +14,10 @@ pub async fn register_instance(db: &Database, instance: &Instance) -> Result<i64
 
     let rec = sqlx::query!(
         r#"
-        INSERT INTO instances (name, version, loader)
-        VALUES (?1, ?2, ?3)
+        INSERT INTO instances (version, loader)
+        VALUES (?1, ?2)
         RETURNING id
         "#,
-        instance_name,
         version,
         "vanilla"
     )

@@ -1,10 +1,10 @@
 {
   "db_name": "SQLite",
-  "query": "\n            SELECT changed_name, tags, export_type, playtime\n            FROM instances_overview\n            WHERE instance_id = ?\n            ",
+  "query": "\n            SELECT name, tags, export_type, playtime\n            FROM instances_overview\n            WHERE instance_id = ?\n            ",
   "describe": {
     "columns": [
       {
-        "name": "changed_name",
+        "name": "name",
         "ordinal": 0,
         "type_info": "Text"
       },
@@ -34,5 +34,5 @@
       false
     ]
   },
-  "hash": "d3774e86dcc831b1c48d88cef034d82cbefc694e50ab0f24c0eed98b5a4589c1"
+  "hash": "c1eb0760a894eb43f64ec26fe8d3da567d66cb51ef32b62edbf29aed98d6dfca"
 }

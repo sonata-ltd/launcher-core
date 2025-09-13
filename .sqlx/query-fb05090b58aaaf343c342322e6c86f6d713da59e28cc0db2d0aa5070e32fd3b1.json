@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO instances_overview (instance_id, name, tags, export_type, playtime)\n            VALUES (?1, ?2, ?3, ?4, ?5)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "fb05090b58aaaf343c342322e6c86f6d713da59e28cc0db2d0aa5070e32fd3b1"
+}
