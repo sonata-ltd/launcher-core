@@ -9,6 +9,7 @@ use ts_rs::TS;
 use crate::data::db::DBError;
 use crate::data::db::Database;
 use crate::data::db::Result;
+use crate::EndpointRequest;
 
 #[derive(Debug, Deserialize, Serialize, Default)]
 pub struct Overview {
@@ -24,7 +25,7 @@ pub enum ExportTypes {
     #[default]
     Sonata,
     MultiMC,
-    Modrinth
+    Modrinth,
 }
 
 #[serde_with::skip_serializing_none]
@@ -59,11 +60,20 @@ impl Overview {
         }
     }
 
-    pub async fn update(change: OverviewFields, db: &Database, instance_id: i64) -> Result<()> {
+    pub async fn update<'a>(
+        change: OverviewFields,
+        req: &EndpointRequest<'a>,
+        instance_id: i64,
+    ) -> Result<()> {
         let export_type = match change.export_type {
             Some(export) => Some(export.to_string()),
             None => None,
         };
+
+        let db = &req.state().static_data.db;
+        let _ = &req.state()
+            .update_instance_name(instance_id as usize, change.name.clone())
+            .await;
 
         sqlx::query!(
             r#"

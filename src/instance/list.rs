@@ -1,27 +1,27 @@
 use async_std::stream::StreamExt;
-use chrono::Utc;
-use tide_websockets::WebSocketConnection;
+use serde::Serialize;
 
-use crate::{
-    data::db::{DBError, Database, Result},
-    websocket::messages::{
-        scan::{ScanData, ScanInfo, ScanIntegrity, ScanMessage},
-        BaseMessage, WsMessage, WsMessageType,
-    },
-};
+use crate::
+    data::{
+        db::{Database, Result},
+        GlobalDataState,
+    }
+;
 
-
-#[derive(Debug)]
-struct Row {
+#[derive(Debug, Serialize)]
+pub struct InstanceDataRow {
     pub id: i64,
     pub name: Option<String>,
     pub version: String,
     pub loader: String,
 }
 
-pub async fn get_instances(db: &Database, ws: &WebSocketConnection) -> Result<()> {
+pub async fn get_instances<'a>(
+    db: &Database,
+    global_data_state: &GlobalDataState<'a>
+) -> Result<()> {
     let mut stream = sqlx::query_as!(
-        Row,
+        InstanceDataRow,
         r#"
         SELECT i.id, o.name, i.version, i.loader
         FROM instances i
@@ -32,34 +32,16 @@ pub async fn get_instances(db: &Database, ws: &WebSocketConnection) -> Result<()
 
     while let Some(row_res) = stream.next().await {
         let row = row_res?;
-        let name = match row.name {
-            Some(name) => name,
-            None => return Err(DBError::NotFound("name of the instance is not found".into()))
-        };
+        println!("Added instance: {:#?}", row);
 
-        let msg: WsMessage = <WsMessage<'_>>::from(ScanMessage {
-            base: BaseMessage {
-                message_id: "asd".to_string(),
-                operation_id: Some("asd".to_string()),
-                request_id: Some("asd".to_string()),
-                timestamp: Utc::now(),
-                correlation_id: None,
-            },
-            data: ScanData {
-                integrity: ScanIntegrity {
-                    instance_path: Some("".into()),
-                },
-                info: Some(ScanInfo {
-                    id: row.id,
-                    name: name,
-                    version: row.version,
-                    loader: row.loader,
-                }),
-            }
-            .into(),
-        });
-
-        msg.send(&ws).await.unwrap();
+        global_data_state
+            .add_instance(InstanceDataRow::new_shared(
+                row.id,
+                row.name,
+                row.version,
+                row.loader,
+            ))
+            .await.unwrap();
     }
 
     Ok(())

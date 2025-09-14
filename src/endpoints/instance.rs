@@ -6,7 +6,6 @@ use tide::StatusCode;
 use tide_websockets::Message;
 use tide_websockets::WebSocketConnection;
 
-use crate::instance::list::get_instances;
 use crate::instance::options::pages::overview::OverviewFields;
 use crate::instance::options::pages::settings::SettingsFields;
 use crate::instance::options::pages::Page;
@@ -83,15 +82,29 @@ pub async fn run_instance_ws<'a>(
     Ok(())
 }
 
-pub async fn list_instances_ws<'a>(
-    req: EndpointRequest<'a>,
-    mut ws: WebSocketConnection,
-) -> tide::Result<()> {
-    while let Some(Ok(Message::Text(_input))) = ws.next().await {
-        println!("Updating instances list");
+pub async fn instance_dispather<'a>(req: EndpointRequest<'a>, ws: WebSocketConnection) -> tide::Result<()> {
+    let all_instances = req.state().get_all_instances_json().await;
 
-        let db = &req.state().static_data.db;
-        get_instances(&db, &ws).await.unwrap();
+    for instance_json in all_instances {
+        if ws.send(Message::text(json!(instance_json).to_string())).await.is_err() {
+            println!("Failed to send all instances");
+        }
+    }
+
+    let mut rx = req.state().data.instances.notifier.new_receiver();
+
+    loop {
+        match rx.recv().await {
+            Ok(notif) => {
+                if ws.send(Message::text(notif.to_string())).await.is_err() {
+                    break;
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to receive notification: {:?}", e);
+                break;
+            }
+        }
     }
 
     Ok(())

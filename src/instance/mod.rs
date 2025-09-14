@@ -20,6 +20,7 @@ mod websocket;
 
 use crate::data::db::DBError;
 use crate::data::db::Database;
+use crate::data::GlobalDataState;
 use crate::instance::options::pages::Page;
 use crate::instance::options::ChangeRequestBuilder;
 use crate::instance::options::Options;
@@ -157,20 +158,19 @@ impl<'a> Instance {
     }
 
     pub async fn change_field(req: &EndpointRequest<'a>, request: ChangeRequestBuilder) -> Result<()> {
-        let db = &req.state().static_data.db;
         let builded_request = request.build()?;
 
-        Options::change(&db, builded_request).await?;
+        Options::change(&req, builded_request).await?;
 
         Ok(())
     }
 
-    async fn register(db: &Database, instance: &Instance) -> Result<i64> {
+    async fn register(db: &Database, global_data_state: &GlobalDataState<'a>, instance: &Instance) -> Result<i64> {
         let paths = &instance.paths;
 
         match create_dir_all(paths.instance()).await {
             Ok(_) => {
-                let result = register_instance(db, instance).await?;
+                let result = register_instance(db, global_data_state, instance).await?;
                 Ok(result)
             }
             Err(e) => {

@@ -13,7 +13,7 @@ use tide::{security::Origin, Request};
 use tide_websockets::{Message, WebSocket, WebSocketConnection};
 
 use crate::endpoints::{
-    instance::{instance_option_change, instance_options_sync, list_instances_ws},
+    instance::{instance_dispather, instance_option_change, instance_options_sync},
     versions::get_versions_unified,
 };
 
@@ -33,6 +33,8 @@ pub type EndpointRequest<'a> = Request<GlobalDataState<'a>>;
 #[async_std::main]
 async fn main() -> tide::Result<()> {
     let state = GlobalDataState::new().await;
+    state.init_instances_list().await;
+
     let mut app = tide::with_state(state);
 
     app.with(
@@ -60,7 +62,7 @@ async fn main() -> tide::Result<()> {
     app.at("/ws/instance/run")
         .get(WebSocket::new(|req, ws| run_instance_ws(req, ws)));
     app.at("/ws/instance/list")
-        .get(WebSocket::new(|req, ws| list_instances_ws(req, ws)));
+        .get(WebSocket::new(|req, ws| instance_dispather(req, ws)));
     app.at("/instance/:id/:page")
         .get(instance_options_dispatcher);
     app.at("/instance/options/sync")
@@ -90,7 +92,7 @@ async fn debug_tasks(req: EndpointRequest<'_>, ws: WebSocketConnection) -> tide:
         println!("Failed to send all tasks");
     }
 
-    let mut rx = req.state().notifier.new_receiver();
+    let mut rx = req.state().create_task_reciever();
 
     loop {
         match rx.recv().await {

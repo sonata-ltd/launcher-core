@@ -10,7 +10,7 @@ use crate::{
             Page, PageResult, ReadPage,
         },
         InstanceError,
-    },
+    }, EndpointRequest,
 };
 
 pub mod pages;
@@ -55,13 +55,13 @@ impl Options {
         }
     }
 
-    pub async fn change(db: &Database, request: ChangeRequest) -> Result<(), InstanceError> {
+    pub async fn change<'a>(req: &EndpointRequest<'a>, request: ChangeRequest) -> Result<(), InstanceError> {
         match request.change {
             ChangableOptions::Overview(f) => {
-                Overview::update(f, db, request.id).await?;
+                Overview::update(f, req, request.id).await?;
             },
             ChangableOptions::Settings(f) => {
-                Settings::update(f, db, request.id).await?
+                Settings::update(f, req, request.id).await?
             }
         }
 
