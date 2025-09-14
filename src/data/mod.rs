@@ -1,28 +1,22 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    process::exit,
-    sync::{Arc, Weak},
-    usize,
-};
+use std::{collections::HashMap, path::PathBuf, process::exit, sync::Arc, usize};
 
-use async_broadcast::{broadcast, Receiver, Sender};
 use async_std::sync::{Mutex, MutexGuard};
 use thiserror::Error;
 
-use crate::{data::{config::Config, db::Database}, websocket::messages::task::Task};
+use crate::data::{config::Config, db::Database, instance::Instances, task::Tasks};
 
 mod config;
 pub mod db;
 pub mod definitions;
-pub mod task;
+mod instance;
+mod task;
 
 pub type _GlobalAppDataGuard<'a> = MutexGuard<'a, GlobalAppData<'a>>;
-pub type GlobalAppDataLocked<'a> = Arc<Mutex<GlobalAppData<'a>>>;
 
 #[derive(Debug, Clone)]
 pub struct GlobalAppData<'a> {
-    pub tasks_map: HashMap<usize, Weak<Mutex<Task<'a>>>>,
+    pub tasks: Tasks<'a>,
+    pub instances: Instances,
 }
 
 #[derive(Debug, Clone)]
@@ -33,12 +27,8 @@ pub struct StaticData {
 
 #[derive(Debug, Clone)]
 pub struct GlobalDataState<'a> {
-    data: GlobalAppDataLocked<'a>,
+    pub data: GlobalAppData<'a>,
     pub static_data: StaticData,
-    pub notifier: Sender<serde_json::Value>,
-
-    // Add receiver to structure to let websocket connection stay alive
-    _receiver: Arc<Mutex<Receiver<serde_json::Value>>>,
 }
 
 #[derive(Error, Debug)]
@@ -57,12 +47,21 @@ pub type GlobalDataStateResult<T> = std::result::Result<T, GlobalAppDataError>;
 
 impl<'a> GlobalDataState<'a> {
     pub async fn new() -> Self {
-        let (mut tx, rx) = broadcast(16);
-        tx.set_overflow(true);
+        let (task_tx, task_rx) = Self::create_task_broadcast();
+        let (instances_tx, instances_rx) = Self::create_instance_broadcast();
 
-        let data = Arc::new(Mutex::new(GlobalAppData {
-            tasks_map: HashMap::new(),
-        }));
+        let data = GlobalAppData {
+            tasks: Tasks {
+                tasks_map: Arc::new(Mutex::new(HashMap::new())),
+                notifier: task_tx,
+                _receiver: Arc::new(Mutex::new(task_rx)),
+            },
+            instances: Instances {
+                instances_map: Arc::new(Mutex::new(HashMap::new())),
+                notifier: instances_tx,
+                _reciever: Arc::new(Mutex::new(instances_rx)),
+            },
+        };
 
         let config = match Config::init().await {
             Ok(config) => config,
@@ -76,7 +75,7 @@ impl<'a> GlobalDataState<'a> {
             Ok(pool) => {
                 println!("DB initialized");
                 pool
-            },
+            }
             Err(e) => {
                 println!("Error occured on DB init: {e}");
                 exit(1);
@@ -89,8 +88,6 @@ impl<'a> GlobalDataState<'a> {
                 launcher_root_path: config.take_launcher_root_path(),
                 db,
             },
-            notifier: tx,
-            _receiver: Arc::new(Mutex::new(rx)),
         }
     }
 

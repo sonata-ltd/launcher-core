@@ -8,9 +8,7 @@ use crate::{
             assets::AssetsData,
             libs::LibsData,
             manifest::{download_manifest, get_assets_manifest},
-        },
-        launch::args::ArgType,
-        websocket::{OperationWsExt, OperationWsMessage},
+        }, launch::args::ArgType, websocket::{OperationWsExt, OperationWsMessage}
     },
     websocket::messages::operation::stage::{OperationStage, StageStatus},
 };
@@ -196,8 +194,8 @@ impl<'a> Instance {
         if register {
             // Initialize instance directory
             let db = &global_app_state.static_data.db;
-            match Self::register(&db, &instance).await {
-                Ok(_) => {}
+            match Self::register(&db, &global_app_state, &instance).await {
+                Ok(_) => (),
                 Err(e) => {
                     return Err(InstanceError::CreationFailed(format!(
                         "Failed to initialize instance directory: {}",

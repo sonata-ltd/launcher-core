@@ -6,7 +6,7 @@ use ts_rs::TS;
 
 use crate::{
     data::db::{DBError, Database, Result},
-    instance::options::pages::ReadPage,
+    instance::options::pages::ReadPage, EndpointRequest,
 };
 
 #[derive(Debug, Serialize)]
@@ -29,12 +29,13 @@ impl From<Settings> for SettingsFields {
 }
 
 impl Settings {
-    pub async fn update(change: SettingsFields, db: &Database, instance_id: i64) -> Result<()> {
+    pub async fn update<'a>(change: SettingsFields, req: &EndpointRequest<'a>, instance_id: i64) -> Result<()> {
         let dir = match change.dir {
             Some(dir) => Some(dir.display().to_string()),
             None => None
         };
 
+        let db = &req.state().static_data.db;
         sqlx::query!(
             r#"
             UPDATE instances_settings
