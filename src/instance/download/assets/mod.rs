@@ -1,113 +1,118 @@
-use std::{hash::{Hash, Hasher}, path::Path};
+use std::{sync::Arc, time::Instant};
 
-use futures::stream::FuturesUnordered;
 use getset::Getters;
 use thiserror::Error;
 
 use crate::{
-    data::db::Database, instance::
-        websocket::{OperationWsExt, OperationWsMessageLocked}, utils::download::Downloadable, websocket::messages::operation::
-        stage::{OperationStage, StageStatus}
-
+    data::{
+        db::{Database, DbError},
+        layout::LauncherPaths,
+        registry::operation::{
+            handle::OperationHandle,
+            message::{
+                stage::{OperationStage, StageResult},
+                status::Outcome,
+            },
+        },
+    },
+    instance::download::{
+        assets::storage::DbAssetStore,
+        sync::{SyncError, Syncer},
+    },
+    utils::download::Downloadable,
 };
 
 mod parse;
-mod download;
-mod register;
+mod storage;
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadAssets;
 
-pub struct AssetsData<'a> {
-    manifest: &'a serde_json::Value,
-    assets_path: String,
-    ws_status: OperationWsMessageLocked<'a>,
-    db: &'a Database
+#[derive(Debug, Error)]
+pub enum AssetSyncError {
+    #[error("assets manifest has no `objects` map")]
+    ManifestMalformed,
+
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+
+    #[error(transparent)]
+    Db(#[from] DbError),
 }
 
-#[derive(Debug, Getters, Default)]
+#[derive(Debug, Getters, Default, Clone)]
 pub struct AssetInfo {
     #[get = "pub"]
     name: String,
+    #[get = "pub"]
     hash: String,
     #[get = "pub"]
-    url: String
+    url: String,
+}
+
+impl AssetInfo {
+    pub fn new(name: String, hash: String, url: String) -> Self {
+        Self { name, hash, url }
+    }
 }
 
 impl Downloadable for AssetInfo {
     fn get_name(&self) -> &String {
-        self.name()
+        &self.name
     }
 
     fn get_hash(&self) -> &String {
-        self.get_hash()
+        &self.hash
     }
 
     fn get_url(&self) -> &String {
-        self.url()
+        &self.url
     }
 }
 
-#[derive(Debug, Error)]
-pub enum AssetSyncError {
-    #[error("Failed to register a new asset to DB: {0}")]
-    RegisterFailed(String)
+pub struct AssetsOutcome {
+    pub total: usize,
+    pub downloaded: usize,
 }
 
+pub struct AssetsData;
 
-impl<'a> AssetsData<'a> {
-    pub async fn sync_assets<T>(
-        manifest: &'a serde_json::Value,
-        assets_path: T,
-        ws_status: OperationWsMessageLocked<'a>,
-        db: &'a Database
-    ) where
-        T: AsRef<Path>,
-    {
-        ws_status
-            .clone()
-            .start_stage_determinable(STAGE_TYPE, None, 0, 0)
-            .await;
+impl AssetsData {
+    pub async fn sync(
+        manifest: &serde_json::Value,
+        paths: &LauncherPaths,
+        db: Arc<Database>,
+        op: &OperationHandle,
+    ) -> Result<AssetsOutcome, AssetSyncError> {
+        op.start_stage(STAGE_TYPE);
+        let started = Instant::now();
 
-        let assets_data = AssetsData {
-            manifest,
-            assets_path: assets_path.as_ref().display().to_string(),
-            ws_status: ws_status.clone(),
-            db
-        };
+        let objects_dir = paths.assets().join("objects");
+        let wanted = parse::extract_assets(manifest)?;
 
-        match Self::extract_manifest_assets(&assets_data).await {
-            Ok(_) => (),
-            Err(e) => println!("{e}")
-        }
+        let store = DbAssetStore::new(db);
+        let outcome = Syncer::default()
+            .run(
+                wanted,
+                |asset| {
+                    let hash = asset.hash();
+                    objects_dir.join(&hash[..2]).join(hash)
+                },
+                &store,
+                op,
+                STAGE_TYPE,
+            )
+            .await?;
 
-        ws_status
-            .complete_stage(StageStatus::Completed, STAGE_TYPE, 0.0, None)
-            .await;
-    }
-}
+        op.complete_stage(StageResult {
+            status: Outcome::Completed,
+            stage: STAGE_TYPE,
+            duration_secs: started.elapsed().as_secs_f64(),
+            error: None,
+        });
 
-impl PartialEq for AssetInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.hash == other.hash
-    }
-}
-
-impl Eq for AssetInfo {}
-
-impl Hash for AssetInfo {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.hash.hash(state);
-    }
-}
-
-impl AssetInfo {
-    pub fn with_hash(hash: &str) -> Self {
-        let mut asset = AssetInfo::default();
-        asset.hash = hash.to_string();
-        asset
-    }
-
-    pub fn get_hash(&self) -> &String {
-        &self.hash
+        Ok(AssetsOutcome {
+            total: outcome.cached.len() + outcome.downloaded.len(),
+            downloaded: outcome.downloaded.len(),
+        })
     }
 }

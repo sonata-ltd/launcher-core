@@ -1,40 +1,34 @@
-use strum::Display;
-use thiserror::Error;
-
+#[derive(Debug, Clone, Copy)]
 pub enum StartupTraits {
-    FirstThreadOnMacOS
-}
-
-#[derive(Debug, Display, Error)]
-pub enum StartupTraitsError {
-    TraitsNotFound
+    FirstThreadOnMacOS,
 }
 
 impl StartupTraits {
-    pub fn extract(manifest: &serde_json::Value) -> Result<Vec<StartupTraits>, StartupTraitsError> {
-        let mut matched_traits = Vec::new();
-
-        if let Some(traits) = manifest.get("+traits").and_then(|v| v.as_array()) {
-            for current_trait in traits {
-                match current_trait.as_str() {
-                    Some(current_trait) => {
-                        match current_trait {
-                            "FirstThreadOnMacOS" => {
-                                #[cfg(target_os = "macos")]
-                                matched_traits.push(StartupTraits::FirstThreadOnMacOS);
-                            },
-                            _ => continue
-                        }
-                    }
-                    None => continue
-                }
-            }
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "FirstThreadOnMacOS" => Some(Self::FirstThreadOnMacOS),
+            _ => None,
         }
+    }
 
-        if !matched_traits.is_empty() {
-            return Ok(matched_traits);
-        } else {
-            return Err(StartupTraitsError::TraitsNotFound)
+    const fn applies_here(self) -> bool {
+        match self {
+            Self::FirstThreadOnMacOS => cfg!(target_os = "macos"),
         }
+    }
+
+    pub fn extract(manifest: &serde_json::Value) -> Vec<Self> {
+        manifest
+            .get("+traits")
+            .and_then(|v| v.as_array())
+            .map(|traits| {
+                traits
+                    .iter()
+                    .filter_map(|t| t.as_str())
+                    .filter_map(Self::parse)
+                    .filter(|t| t.applies_here())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }

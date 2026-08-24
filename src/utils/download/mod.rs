@@ -1,38 +1,71 @@
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+use std::time::Duration;
+use std::{path::PathBuf, sync::Arc};
 
-use async_std::{
-    fs::{create_dir_all, File},
-};
+use async_std::fs::{create_dir_all, remove_file, rename, File};
+use async_std::future::timeout;
 use futures::{AsyncReadExt, AsyncWriteExt};
 use sha1::{Digest, Sha1};
-use surf::{self, Error, Url};
+use surf::{self, Url};
+use uuid::Uuid;
 
 use crate::utils::download::buffer::BufferPool;
+use crate::utils::download::error::{DownloadError, Result};
 
 pub mod buffer;
+pub mod error;
+pub mod sweep;
 #[cfg(test)]
 mod tests;
 
-pub const MAX_REDIRECT_COUNT: usize = 100;
+pub const MAX_REDIRECT_COUNT: usize = 20;
 
-pub async fn download(url: String) -> Result<Vec<u8>, String> {
-    match surf::get(url).recv_bytes().await {
-        Ok(response) => return Ok(response),
-        Err(e) => return Err(e.to_string()),
-    }
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub const ONESHOT_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub async fn download(url: String) -> Result<Vec<u8>> {
+    let fetch = timeout(ONESHOT_TIMEOUT, surf::get(&url).recv_bytes())
+        .await
+        .map_err(|_| DownloadError::Timeout {
+            url: url.clone(),
+            phase: "response",
+            after: ONESHOT_TIMEOUT,
+        })?;
+
+    fetch.map_err(|e| DownloadError::Request {
+        url,
+        source: e.into(),
+    })
 }
 
-pub async fn download_in_json<'a>(url: &'a str) -> Result<serde_json::Value, Error> {
-    match surf::get(url).await {
-        Ok(mut response) => match response.body_json::<serde_json::Value>().await {
-            Ok(data) => Ok(data),
-            Err(e) => Err(e),
-        },
-        Err(e) => return Err(e),
-    }
+pub async fn download_in_json<'a>(url: &'a str) -> Result<serde_json::Value> {
+    let mut response = timeout(REQUEST_TIMEOUT, surf::get(url))
+        .await
+        .map_err(|_| DownloadError::Timeout {
+            url: url.to_string(),
+            phase: "response",
+            after: REQUEST_TIMEOUT,
+        })?
+        .map_err(|e| DownloadError::Request {
+            url: url.to_string(),
+            source: e.into(),
+        })?;
+
+    timeout(ONESHOT_TIMEOUT, response.body_json::<serde_json::Value>())
+        .await
+        .map_err(|_| DownloadError::Timeout {
+            url: url.to_string(),
+            phase: "body",
+            after: ONESHOT_TIMEOUT,
+        })?
+        .map_err(|e| DownloadError::MalformedJson {
+            url: url.to_string(),
+            source: e.into(),
+        })
 }
 
 pub struct Download<T: Downloadable> {
@@ -48,11 +81,7 @@ pub trait Downloadable {
 }
 
 impl<T: Downloadable + Send + Sync + 'static> Download<T> {
-    pub fn new(
-        save_path: PathBuf,
-        object: T,
-        buffers_pool: Arc<BufferPool>,
-    ) -> Download<T> {
+    pub fn new(save_path: PathBuf, object: T, buffers_pool: Arc<BufferPool>) -> Download<T> {
         Download {
             save_path,
             object,
@@ -60,121 +89,179 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
         }
     }
 
-    pub async fn download_with_checksum(self) -> Result<T, String> {
-        let save_dir = match self.save_path.parent() {
-            Some(dir) => dir,
-            None => return Err("Cannot get parent folder of the save path".to_string())
+    pub async fn download_with_checksum(self) -> Result<T> {
+        let (save_dir, file_name) = match (self.save_path.parent(), self.save_path.file_name()) {
+            (Some(dir), Some(name)) => (dir, name),
+            _ => {
+                return Err(DownloadError::InvalidSavePath {
+                    path: self.save_path.clone(),
+                })
+            }
         };
 
-        let file_name = match self.save_path.file_name() {
-            Some(file_name) => file_name,
-            None => return Err("Cannot get file name of the save path".to_string())
-        };
+        create_dir_all(save_dir)
+            .await
+            .map_err(|e| DownloadError::DirectoryCreation {
+                path: save_dir.to_path_buf(),
+                source: e,
+            })?;
 
-        if let Err(e) = create_dir_all(&save_dir).await {
-            println!("Failed to create directory: {e}");
-            return Err(e.to_string());
+        let temp_path = temp_path(save_dir, file_name);
+
+        if let Err(e) = self.fetch_to(&temp_path).await {
+            if let Err(cleanup) = remove_file(&temp_path).await {
+                tracing::warn!(path = %temp_path.display(), error = %cleanup, "failed to remove partial download");
+            }
+
+            return Err(e);
         }
 
-        let mut current_url = self.object.get_url().to_owned();
-        let mut redirect_count: usize = 0;
+        rename(&temp_path, &self.save_path)
+            .await
+            .map_err(|e| DownloadError::FileCommit {
+                from: temp_path,
+                to: self.save_path.clone(),
+                source: e,
+            })?;
+
+        Ok(self.object)
+    }
+
+    async fn fetch_to(&self, temp_path: &Path) -> Result<()> {
+        let mut url = Url::parse(self.object.get_url()).map_err(|e| DownloadError::InvalidUrl {
+            url: self.object.get_url().clone(),
+            source: e,
+        })?;
+
+        let mut redirects: usize = 0;
+
+        let mut resp = loop {
+            let resp = timeout(
+                REQUEST_TIMEOUT,
+                surf::get(&url).header("Accept-Encoding", "identity"),
+            )
+            .await
+            .map_err(|_| DownloadError::Timeout {
+                url: url.to_string(),
+                phase: "response",
+                after: REQUEST_TIMEOUT,
+            })?
+            .map_err(|e| DownloadError::Request {
+                url: url.to_string(),
+                source: e.into(),
+            })?;
+
+            let status = resp.status();
+
+            if !status.is_redirection() {
+                break resp;
+            }
+
+            if redirects >= MAX_REDIRECT_COUNT {
+                return Err(DownloadError::TooManyRedirects {
+                    url: url.to_string(),
+                    count: redirects,
+                });
+            }
+
+            let location = resp
+                .header("Location")
+                .map(|v| v.last().as_str().to_owned())
+                .ok_or_else(|| DownloadError::RedirectWithoutLocation {
+                    status,
+                    url: url.to_string(),
+                })?;
+
+            let next = url.join(&location);
+            let base = url.to_string();
+
+            url = next.map_err(|e| DownloadError::RedirectTargetInvalid {
+                base,
+                location,
+                source: e,
+            })?;
+
+            redirects += 1;
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(DownloadError::Http {
+                status,
+                url: url.to_string(),
+            });
+        }
+
+        tracing::debug!(name = %self.object.get_name(), %url, "downloading");
+
+        let mut file = File::create(temp_path)
+            .await
+            .map_err(|e| DownloadError::FileCreation {
+                path: temp_path.to_path_buf(),
+                source: e,
+            })?;
+
+        let mut hasher = Sha1::new();
+        let mut guard = self.buffers_pool.acquire().await;
+        let buf = guard.as_mut_slice();
 
         loop {
-            // Ask for identity encoding
-            let req = surf::get(&current_url.to_string()).header("Accept-Encoding", "identity");
-            let mut resp = match req.await {
-                Ok(data) => data,
-                Err(e) => return Err(format!("Request error for {}: {}", current_url, e)),
-            };
+            let n = timeout(READ_TIMEOUT, resp.read(buf))
+                .await
+                .map_err(|_| DownloadError::Timeout {
+                    url: url.to_string(),
+                    phase: "body chunk",
+                    after: READ_TIMEOUT,
+                })?
+                .map_err(|e| DownloadError::BodyRead {
+                    url: url.to_string(),
+                    source: e,
+                })?;
 
-            // Handle redirect from server
-            if resp.status().is_redirection() {
-                let status = resp.status();
-                let location = resp.header("Location").map(|v| v.last());
-
-                if redirect_count >= MAX_REDIRECT_COUNT {
-                    return Err(format!("Too many redirects when fetcing {}", current_url));
-                }
-
-                let location = match location {
-                    Some(loc) => loc.as_str(),
-                    None => {
-                        return Err(format!(
-                            "Redirect (status {}) without Location for {}.",
-                            status, current_url
-                        ));
-                    }
-                };
-
-                // Resolve relative Location
-                let base = Url::parse(&current_url)
-                    .map_err(|e| format!("Base URL parse error {}: {}", current_url, e))?;
-                let next_url = match Url::parse(&location) {
-                    Ok(u) => u, // Absolute
-                    Err(_) => base
-                        .join(&location)
-                        .map_err(|e| format!("Failed to join {} + {}: {}", base, location, e))?,
-                };
-
-                current_url = next_url.to_string();
-                redirect_count += 1;
-
-                continue;
+            if n == 0 {
+                break;
             }
 
-            // Not a redirect -> proceed to download
-            println!(
-                "Downloading \"{}\" from URL {}",
-                self.object.get_name(),
-                current_url
-            );
+            hasher.update(&buf[..n]);
 
-            if !resp.status().is_success() {
-                return Err(format!(
-                    "HTTP error {} when fetching {}",
-                    resp.status(),
-                    current_url
-                ));
-            }
-
-            // Prepare file
-            let full_save_path = save_dir.join(file_name);
-            let mut file = match File::create(&full_save_path).await {
-                Ok(f) => {
-                    println!("Saving to: {}", full_save_path.display());
-                    f
-                }
-                Err(e) => return Err(format!("Failed to create file {}: {}", full_save_path.display(), e)),
-            };
-
-            // Stream -> hasher + file at once with bytes read logging
-            let mut hasher = Sha1::new();
-            let mut guard = self.buffers_pool.acquire().await;
-            let buf = guard.as_mut_slice();
-            let mut total_read: usize = 0;
-            loop {
-                let n = resp.read(buf).await.map_err(|e| e.to_string())?;
-                if n == 0 {
-                    break;
-                }
-
-                hasher.update(&buf[..n]);
-                file.write_all(&buf[..n]).await.map_err(|e| e.to_string())?;
-                total_read += n;
-            }
-
-            if total_read == 0 {
-                return Err(format!("Read 0 bytes from {}", current_url));
-            }
-
-            let calculated_sha1 = format!("{:x}", hasher.finalize());
-            let expected = self.object.get_hash().to_lowercase();
-
-            if calculated_sha1 != expected {
-                return Err(format!("SHA1 mismatch at {}", current_url));
-            } else {
-                return Ok(self.object);
-            }
+            file.write_all(&buf[..n])
+                .await
+                .map_err(|e| DownloadError::FileWrite {
+                    path: temp_path.to_path_buf(),
+                    source: e,
+                })?;
         }
+
+        let actual = format!("{:x}", hasher.finalize());
+        let expected = self.object.get_hash().to_lowercase();
+
+        if actual != expected {
+            return Err(DownloadError::ChecksumMismatch {
+                url: url.to_string(),
+                expected,
+                actual,
+            });
+        }
+
+        file.sync_all()
+            .await
+            .map_err(|e| DownloadError::FileWrite {
+                path: temp_path.to_path_buf(),
+                source: e,
+            })?;
+
+        drop(file);
+
+        Ok(())
     }
+}
+
+fn temp_path(save_dir: &Path, file_name: &OsStr) -> PathBuf {
+    let mut name = OsString::with_capacity(file_name.len() + 46);
+
+    name.push(".");
+    name.push(file_name);
+    name.push(format!(".{}.part", Uuid::new_v4().simple()));
+
+    save_dir.join(name)
 }

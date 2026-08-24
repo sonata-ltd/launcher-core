@@ -1,65 +1,74 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::collections::HashMap;
 
 use async_std::process::Command;
 
-use crate::instance::launch::{natives::Natives, traits::StartupTraits};
+use crate::instance::launch::{natives::Natives, traits::StartupTraits, LaunchError};
 
 use super::LaunchInfo;
 
-pub async fn launch_instance<'a>(manifest: serde_json::Value, launch_info: LaunchInfo) {
-    let args = define_launch_args(manifest, launch_info).await;
-    println!("{:#?}", args);
+pub async fn launch_instance(info: LaunchInfo) -> Result<(), LaunchError> {
+    let java_exec_path = info.java_bin_path.exec_path.clone();
+    let args = define_launch_args(info).await;
 
-    // Command execution
-    let output =
-        Command::new("java")
-            .args(args)
-            .output()
-            .await
-            .unwrap();
+    tracing::debug!("executed with args:\n{:#?}", args);
 
-    println!("{:#?}", output);
+    let mut child = Command::new(java_exec_path)
+        .args(args)
+        .spawn()
+        .map_err(LaunchError::Spawn)?;
+
+    let status = child.status().await.map_err(LaunchError::Wait)?;
+
+    tracing::info!(%status, "game was stopped");
+
+    Ok(())
 }
 
-async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -> Vec<String> {
+async fn define_launch_args(info: LaunchInfo) -> Vec<String> {
+    let LaunchInfo {
+        manifest,
+        classpath,
+        native_libs,
+        natives_dir,
+        main_class,
+        game_args,
+        memory_min,
+        memory_max,
+        jvm_args,
+        ..
+    } = info;
+
     let mut tmp_args: Vec<String> = Vec::new();
 
-    let mut jvm_args = vec![
+    let mut launch_args = vec![
         // "-Xdock:icon=icon.png".to_string(),
-        format!(r#"-Xdock:name="Sonata Launcher: {}""#, info.name),
-        "-Xms512M".to_string(),
-        "-Xmx4096M".to_string(),
+        format!("-Xms{memory_min}M"),
+        format!("-Xmx{memory_max}M"),
     ];
-    tmp_args.append(&mut jvm_args);
+    launch_args.extend(jvm_args);
 
-   match StartupTraits::extract(&manifest) {
-        Ok(traits) => {
-            for current_trait in traits {
-                match current_trait {
-                    StartupTraits::FirstThreadOnMacOS => {
-                        tmp_args.push("-XstartOnFirstThread".to_string());
-                    }
-                }
+    tmp_args.append(&mut launch_args);
+
+    for startup_trait in StartupTraits::extract(&manifest) {
+        match startup_trait {
+            StartupTraits::FirstThreadOnMacOS => {
+                tmp_args.push("-XstartOnFirstThread".to_string());
             }
-        },
-        Err(e) => println!("{e}")
-    };
-
+        }
+    }
 
     // TODO: Determine windows version and add that argument only on windows 10
     #[cfg(target_os = "windows")]
     tmp_args.push("-Dos.name=Windows 10 -Dos.version=10.0".to_string());
 
     // Handle natives
-    if !info.native_libs.is_empty() {
-        let native_dir = PathBuf::from("/Users/quartix/.sonata/instances/1.5.2/natives");
-
-        match Natives::extract(info.native_libs, &native_dir).await {
+    if !native_libs.is_empty() {
+        match Natives::extract(native_libs, &natives_dir).await {
             Ok(_) => {
-                tmp_args.push("-Djava.library.path=".to_owned() + &native_dir.to_string_lossy());
+                tmp_args.push("-Djava.library.path=".to_owned() + &natives_dir.to_string_lossy());
             }
             Err(e) => {
-                eprintln!("Error occured during natives extraction: {}", e);
+                tracing::error!("error occured during natives extraction {}", e);
             }
         }
     }
@@ -69,10 +78,10 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
     // tmp_args.push("-Dio.netty.native.workdir=/".to_owned() + natives_dir);
 
     tmp_args.push("-cp".to_string());
-    tmp_args.push(info.classpath);
+    tmp_args.push(classpath);
 
     // Append main class that contains run point
-    if let Some(main_class) = info.main_class {
+    if let Some(main_class) = main_class {
         tmp_args.push(main_class);
     } else if let Some(main_class) = manifest["mainClass"].as_str() {
         tmp_args.push(main_class.to_string());
@@ -99,40 +108,30 @@ async fn define_launch_args<'a>(manifest: serde_json::Value, info: LaunchInfo) -
 
     // Check for modern manifest pattern
     if let Some(arguments) = manifest["arguments"].as_object() {
-        if let Some(game_args) = arguments["game"].as_array() {
-            for arg in game_args {
-
+        if let Some(manifest_game_args) = arguments["game"].as_array() {
+            for arg in manifest_game_args {
                 // First we have to handle simple args
                 // Iterate other `keys`
                 if let Some(simple_arg) = arg.as_str() {
-                    handle_simple_arg(simple_arg, &info.game_args, &mut tmp_args);
+                    handle_simple_arg(simple_arg, &game_args, &mut tmp_args);
                 } else if let Some(_complex_arg) = arg.as_object() {
-                    // println!("Complex arg: {:#?}", complex_arg);
-                    // println!("Complex args is not implemented yet");
+                    tracing::warn!(
+                        "found complex argument, but complex arguments is not supported yet"
+                    );
                 }
             }
         }
     } else if let Some(arguments) = manifest["minecraftArguments"].as_str() {
-        println!("Using legacy manifest extraction pattern...");
+        tracing::debug!("using legacy manifest extraction pattern");
         let arguments = arguments.split_whitespace();
 
         // Iterate other `keys`
         for arg in arguments {
-            handle_simple_arg(arg, &info.game_args, &mut tmp_args);
+            handle_simple_arg(arg, &game_args, &mut tmp_args);
         }
     }
 
     return tmp_args;
-}
-
-fn _extract_launch_args<'a>(manifest: serde_json::Value) -> Vec<(&'a str, &'a str)> {
-    if let Some(arguments) = manifest["arguments"]["game"].as_array() {
-        for argument in arguments {
-            println!("{}", argument);
-        }
-    }
-
-    vec![("asd", "asd")]
 }
 
 fn handle_simple_arg(
@@ -140,7 +139,7 @@ fn handle_simple_arg(
     defined_map: &HashMap<String, String>,
     output_array: &mut Vec<String>,
 ) {
-    if &arg[..2] == "${" {
+    if arg.starts_with("${") {
         let default = " ".to_string();
 
         // Extract the value from predefined game args or leave it empty

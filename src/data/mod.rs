@@ -1,98 +1,133 @@
-use std::{collections::HashMap, path::PathBuf, process::exit, sync::Arc, usize};
+use std::{sync::Arc, time::Duration};
 
-use async_std::sync::{Mutex, MutexGuard};
+use async_std::task;
 use thiserror::Error;
 
-use crate::data::{config::Config, db::Database, instance::Instances, task::Tasks};
-
-mod config;
+pub mod config;
 pub mod db;
-pub mod definitions;
-mod instance;
-mod task;
+pub mod layout;
+pub mod registry;
 
-pub type _GlobalAppDataGuard<'a> = MutexGuard<'a, GlobalAppData<'a>>;
+use crate::{
+    bus::EventBus,
+    data::{
+        config::{Config, DEFAULT_EVENTBUS_CAPACITY},
+        db::{Database, DbError},
+        layout::{LauncherPaths, LauncherPathsError},
+        registry::operation::OperationRegistry,
+    },
+    instance::{
+        options::service::OptionsService, service::InstanceService,
+        settings::service::SettingsService,
+    },
+    java::service::JavaService,
+    utils::download::sweep::sweep_partials,
+    version::catalog::VersionCatalog,
+};
 
-#[derive(Debug, Clone)]
-pub struct GlobalAppData<'a> {
-    pub tasks: Tasks<'a>,
-    pub instances: Instances,
+pub struct LauncherServices {
+    java: Arc<JavaService>,
+    versions: Arc<VersionCatalog>,
+    instances: Arc<InstanceService>,
+    options: Arc<OptionsService>,
 }
 
-#[derive(Debug, Clone)]
-pub struct StaticData {
-    pub launcher_root_path: PathBuf,
-    pub db: Database,
-}
-
-#[derive(Debug, Clone)]
-pub struct GlobalDataState<'a> {
-    pub data: GlobalAppData<'a>,
-    pub static_data: StaticData,
+pub struct GlobalState {
+    pub db: Arc<Database>,
+    pub bus: EventBus,
+    pub config: Config,
+    pub paths: Arc<LauncherPaths>,
+    pub operations: Arc<OperationRegistry>,
+    pub services: LauncherServices,
 }
 
 #[derive(Error, Debug)]
-pub enum GlobalAppDataError {
-    #[error("Task with id {0} not found")]
-    TaskNotFound(usize),
+pub enum AppError {
+    #[error("failed to initialize launcher paths: {0}")]
+    Paths(#[from] LauncherPathsError),
 
-    #[error("Failed to broadcast message: {0}")]
-    BroadcastError(String),
-
-    #[error("Failed to get home path")]
-    HomeDirNotFound,
+    #[error("failed to initialize database: {0}")]
+    Database(#[from] DbError),
 }
 
-pub type GlobalDataStateResult<T> = std::result::Result<T, GlobalAppDataError>;
+pub type GlobalDataStateResult<T> = std::result::Result<T, AppError>;
 
-impl<'a> GlobalDataState<'a> {
-    pub async fn new() -> Self {
-        let (task_tx, task_rx) = Self::create_task_broadcast();
-        let (instances_tx, instances_rx) = Self::create_instance_broadcast();
+impl GlobalState {
+    pub async fn new(config: Config) -> Result<Self, AppError> {
+        let paths = Arc::new(LauncherPaths::resolve(&config).await?);
 
-        let data = GlobalAppData {
-            tasks: Tasks {
-                tasks_map: Arc::new(Mutex::new(HashMap::new())),
-                notifier: task_tx,
-                _receiver: Arc::new(Mutex::new(task_rx)),
-            },
-            instances: Instances {
-                instances_map: Arc::new(Mutex::new(HashMap::new())),
-                notifier: instances_tx,
-                _reciever: Arc::new(Mutex::new(instances_rx)),
-            },
-        };
+        {
+            let paths = Arc::clone(&paths);
 
-        let config = match Config::init().await {
-            Ok(config) => config,
-            Err(e) => {
-                eprintln!("An unrecoverable error occured: {}", e.to_string());
-                exit(1);
-            }
-        };
+            task::spawn(async move {
+                const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
-        let db = match Database::init(&config.get_db_path()).await {
-            Ok(pool) => {
-                println!("DB initialized");
-                pool
-            }
-            Err(e) => {
-                println!("Error occured on DB init: {e}");
-                exit(1);
-            }
-        };
+                let removed = sweep_partials(paths.libraries(), STALE_AFTER).await
+                    + sweep_partials(paths.assets(), STALE_AFTER).await;
 
-        Self {
-            data,
-            static_data: StaticData {
-                launcher_root_path: config.take_launcher_root_path(),
-                db,
-            },
+                if removed > 0 {
+                    tracing::info!(removed, "cleaned up partial downloads");
+                }
+            });
         }
+
+        let db = Arc::new(Database::init(paths.cache_db()).await?);
+
+        let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
+        let operations = Arc::new(OperationRegistry::new(bus.clone()));
+
+        let java_service = Arc::new(JavaService::new(Arc::clone(&db)));
+        let java_registry = java_service.get_registry();
+
+        let settings = Arc::new(SettingsService::new(Arc::clone(&db)));
+
+        let instance_service = Arc::new(InstanceService::new(
+            Arc::clone(&db),
+            Arc::clone(&settings),
+            Arc::clone(&java_registry),
+            Arc::clone(&operations),
+            Arc::clone(&paths),
+            bus.clone(),
+        ));
+
+        let instance_registry = instance_service.get_registry();
+
+        let services = LauncherServices {
+            java: java_service,
+            versions: Arc::new(VersionCatalog::new(config.meta_provider)),
+            instances: instance_service,
+            options: Arc::new(OptionsService::new(
+                Arc::clone(&db),
+                instance_registry,
+                settings,
+                java_registry,
+                bus.clone(),
+            )),
+        };
+
+        Ok(Self {
+            db,
+            bus,
+            config,
+            paths,
+            operations,
+            services,
+        })
     }
 
-    pub async fn request_launcher_paths_migration() {
-        println!("not implemented");
-        // TODO: Implement
+    pub fn java(&self) -> Arc<JavaService> {
+        Arc::clone(&self.services.java)
+    }
+
+    pub fn versions(&self) -> Arc<VersionCatalog> {
+        Arc::clone(&self.services.versions)
+    }
+
+    pub fn instances(&self) -> Arc<InstanceService> {
+        Arc::clone(&self.services.instances)
+    }
+
+    pub fn options(&self) -> Arc<OptionsService> {
+        Arc::clone(&self.services.options)
     }
 }
