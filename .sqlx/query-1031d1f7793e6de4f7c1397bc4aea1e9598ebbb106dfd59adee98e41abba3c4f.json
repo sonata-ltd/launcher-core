@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT i.name, o.tags, o.export_type, o.playtime\n                FROM instances_overview o\n                JOIN instances i ON i.id = o.instance_id\n                WHERE o.instance_id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "name",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "tags",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "export_type",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "playtime",
+        "ordinal": 3,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1031d1f7793e6de4f7c1397bc4aea1e9598ebbb106dfd59adee98e41abba3c4f"
+}

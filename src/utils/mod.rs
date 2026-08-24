@@ -1,56 +1,36 @@
-use std::path::PathBuf;
-use std::env;
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
-use async_std::path::Path;
 use home::home_dir;
 
-use crate::data::definitions::EnvVars;
-
 pub mod download;
-pub mod metacache;
 pub mod maven;
-pub mod unify;
-pub mod db;
-
-
-pub fn _extract_filename(path: &str) -> Option<&str> {
-    let last_slash = path.rfind('/')?;
-    let last_dot = path.rfind('.')?;
-
-    if last_slash < last_dot {
-        Some(&path[last_slash + 1..last_dot])
-    } else {
-        None
-    }
-}
 
 pub async fn get_home_dir() -> Option<PathBuf> {
-    let home_dir_env_key = EnvVars::as_str(&EnvVars::HomeDirOverride);
-
-    match env::var(home_dir_env_key) {
+    match env::var("SONATA_MC_HOME") {
         Ok(val) => {
-            let exists = Path::new(&val).exists().await;
+            let exists = Path::new(&val).exists();
             if exists {
-                println!("Using home dir override: {}", val);
+                tracing::info!("using home directory override: {}", val);
                 return Some(PathBuf::from(val));
             }
-        },
-        Err(e) => {
-            match e {
-                env::VarError::NotUnicode(_) => {
-                    eprintln!("Environment variable {} is not unicode.", home_dir_env_key);
-                },
-                _ => ()
-            }
         }
+        Err(e) => match e {
+            env::VarError::NotUnicode(_) => {
+                tracing::error!("environment variable {} is not unicode", "SONATA_MC_HOME");
+            }
+            _ => (),
+        },
     };
 
     match home_dir() {
         Some(path) => {
             return Some(PathBuf::from(path));
-        },
+        }
         None => {
-            eprintln!("Couldn't determine the home dir");
+            tracing::error!("couldn't determine the home directory");
             return None;
         }
     };
@@ -58,7 +38,7 @@ pub async fn get_home_dir() -> Option<PathBuf> {
 
 pub fn str_nth_occurrence(s: &str, pat: char, n: usize) -> Option<usize> {
     s.char_indices()
-     .filter(|(_, c)| *c == pat)
-     .nth(n - 1)
-     .map(|(idx, _)| idx)
+        .filter(|(_, c)| *c == pat)
+        .nth(n - 1)
+        .map(|(idx, _)| idx)
 }

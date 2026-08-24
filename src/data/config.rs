@@ -1,40 +1,35 @@
 use std::path::PathBuf;
 
-use thiserror::Error;
-
-use crate::utils::get_home_dir;
+use crate::version::provider::MetaProvider;
 
 pub struct Config {
-    db_path: PathBuf,
-    launcher_root_path: PathBuf
+    pub root_override: Option<PathBuf>,
+    pub dirs: DirOverrides,
+    pub database_url: Option<String>,
+
+    pub meta_provider: MetaProvider,
 }
 
-const DEFAULT_DB_NAME: &'static str = "cache.db";
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("Cannot get home dir")]
-    HomeNotAvailable
+#[derive(Default)]
+pub struct DirOverrides {
+    pub libraries: Option<PathBuf>,
+    pub assets: Option<PathBuf>,
+    pub instances: Option<PathBuf>,
+    pub java_runtimes: Option<PathBuf>,
+    pub meta: Option<PathBuf>,
+    pub cache_db: Option<PathBuf>,
 }
+
+pub const DEFAULT_EVENTBUS_CAPACITY: usize = 1024;
 
 impl Config {
-    pub async fn init() -> Result<Self, ConfigError> {
-        let root_path = match get_home_dir().await {
-            Some(path) => path,
-            None => return Err(ConfigError::HomeNotAvailable)
-        };
+    pub fn init() -> Self {
+        Self {
+            root_override: None,
+            dirs: DirOverrides::default(),
+            database_url: None,
 
-        let launcher_root_path = root_path.join(".sonata");
-        let db_path = launcher_root_path.join(DEFAULT_DB_NAME);
-
-        Ok(Config { db_path, launcher_root_path })
-    }
-
-    pub fn get_db_path(&self) -> &PathBuf {
-        &self.db_path
-    }
-
-    pub fn take_launcher_root_path(self) -> PathBuf {
-        self.launcher_root_path
+            meta_provider: MetaProvider::Prism,
+        }
     }
 }

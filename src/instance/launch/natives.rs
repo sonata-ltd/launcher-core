@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{io, path::PathBuf};
 
 use async_std::fs::create_dir_all;
 use zip_extensions::zip_extract;
@@ -6,21 +6,27 @@ use zip_extensions::zip_extract;
 pub struct Natives {}
 
 impl Natives {
-    pub async fn extract(paths: Vec<PathBuf>, destination: &PathBuf) -> Result<(), String> {
-        println!("paths: {:#?}", paths);
+    pub async fn extract(paths: Vec<PathBuf>, destination: &PathBuf) -> Result<(), io::Error> {
+        tracing::debug!("paths found: {:#?}", paths);
+
         match create_dir_all(&destination).await {
             Ok(_) => {
                 for lib_path in paths {
-                    println!("{}", lib_path.display());
                     match zip_extract(&lib_path, &destination) {
-                        Ok(_) => println!("Extracted: {}", lib_path.display()),
+                        Ok(_) => {
+                            tracing::debug!(lib_path = %lib_path.display(), "native extracted")
+                        }
                         Err(e) => {
-                            println!("{} - {}", lib_path.display(), e.to_string());
+                            tracing::error!(
+                                "native failed to extract: {} ({})",
+                                lib_path.display(),
+                                e
+                            )
                         }
                     }
                 }
             }
-            Err(e) => return Err(e.to_string())
+            Err(e) => return Err(e),
         }
 
         Ok(())

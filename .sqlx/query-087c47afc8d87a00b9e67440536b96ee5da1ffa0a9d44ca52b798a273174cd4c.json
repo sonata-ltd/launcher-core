@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO instances_overview (instance_id) VALUES (?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "087c47afc8d87a00b9e67440536b96ee5da1ffa0a9d44ca52b798a273174cd4c"
+}

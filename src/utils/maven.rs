@@ -1,6 +1,15 @@
-use std::path::Path;
+use std::{path::Path, sync::LazyLock};
 
 use regex::Regex;
+
+// Regex to detect a version:
+// - starts with a digit
+// - may contain dot-separated numbers like 1.2.3
+// - allows suffixes via '-', '+', '_' or '.' and additional sections (RC, beta, SNAPSHOT, build, etc.)
+// Examples matched: "1", "1.2", "1.2.3", "1.0.0-SNAPSHOT", "1.0.0-beta+build.1"
+static VER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^\d+(?:\.\d+)*(?:[-+_\.][A-Za-z0-9]+(?:[.\-+_][A-Za-z0-9]+)*)?$").unwrap()
+});
 
 /// Converts a coordinate like `group:artifact:...` into a path:
 /// - dots in the `group` are replaced with `/`
@@ -18,18 +27,10 @@ pub fn coord_to_path(coord: &str) -> String {
         return String::new();
     }
 
-    // Regex to detect a version:
-    // - starts with a digit
-    // - may contain dot-separated numbers like 1.2.3
-    // - allows suffixes via '-', '+', '_' or '.' and additional sections (RC, beta, SNAPSHOT, build, etc.)
-    // Examples matched: "1", "1.2", "1.2.3", "1.0.0-SNAPSHOT", "1.0.0-beta+build.1"
-    let ver_re =
-        Regex::new(r"^\d+(?:\.\d+)*(?:[-+_\.][A-Za-z0-9]+(?:[.\-+_][A-Za-z0-9]+)*)?$").unwrap();
-
     // Find the first segment after group that looks like a version
     let mut version_idx: Option<usize> = None;
     for (i, p) in parts.iter().enumerate().skip(1) {
-        if ver_re.is_match(p) {
+        if VER_RE.is_match(p) {
             version_idx = Some(i);
             break;
         }
@@ -66,7 +67,7 @@ pub fn coord_to_path(coord: &str) -> String {
 pub fn build_file_path<S, P>(libs_dir: &P, maven_path: S) -> String
 where
     S: Into<String>,
-    P: AsRef<Path>
+    P: AsRef<Path>,
 {
     let maven_path = maven_path.into();
 

@@ -1,21 +1,14 @@
-use std::{path::PathBuf, sync::Arc};
-
 use serde_json::Value;
 
 use crate::{
-    instance::download::{
-        libs::{LibInfo, SyncResult},
-        manifest::download_manifest,
-    },
+    instance::download::{libs::LibInfo, manifest::fetch_manifest},
     utils::str_nth_occurrence,
 };
 
 use super::*;
 
-const META_BASE_URL: &'static str = "https://meta.prismlauncher.org/v1/";
-
 impl<'a, 'b> LibsData<'a, 'b> {
-    pub async fn parse_manifest_prism(&self) -> Result<SyncResult, String> {
+    pub async fn parse_manifest_prism(&self) -> Result<Vec<LibInfo>, LibsSyncError> {
         let mut downloadable_libs: Vec<LibInfo> = Vec::new();
 
         if let Some(libs) = self.manifest.get("libraries").and_then(|v| v.as_array()) {
@@ -110,43 +103,29 @@ impl<'a, 'b> LibsData<'a, 'b> {
         }
 
         // Check for modern builded libs
-        let mut additional_classpaths: Vec<String> = Vec::new();
-        let mut additional_natives_paths: Vec<PathBuf> = Vec::new();
         if let Some(requires) = self.manifest.get("requires").and_then(|v| v.as_array()) {
+            let base_url = self.provider.source().base_url();
+
             for req in requires {
                 if let (Some(suggests), Some(uid)) = (
                     req.get("suggests").and_then(|v| v.as_str()),
                     req.get("uid").and_then(|v| v.as_str()),
                 ) {
                     // Parse another page
-                    let url = format!("{}{}/{}.json", META_BASE_URL, uid, suggests);
-                    let manifest = match download_manifest::<String>(&url, None).await {
-                        Ok(data) => data.0,
-                        Err(e) => return Err(e.to_string()),
-                    };
+                    let url = format!("{}/{}/{}.json", base_url, uid, suggests);
 
-                    let libs_data = LibsData {
+                    let manifest = fetch_manifest(&url)
+                        .await
+                        .map_err(|e| LibsSyncError::ManifestMalformed(e.to_string()))?;
+
+                    let child = LibsData {
                         manifest: &manifest,
-                        paths: self.paths.clone(),
-                        ws_status: self.ws_status.clone(),
-                        db: self.db,
+                        paths: self.paths,
+                        provider: self.provider,
                         current_os: self.current_os,
                     };
 
-                    match Box::pin(LibsData::parse_manifest_prism(&libs_data)).await {
-                        Ok(mut result) => {
-                            // Insert delimiter
-                            if !result.classpaths.is_empty() {
-                                result.classpaths[0].insert(0, ':');
-                                additional_classpaths.append(&mut result.classpaths);
-                            }
-
-                            if !result.natives_paths.is_empty() {
-                                additional_natives_paths.append(&mut result.natives_paths);
-                            }
-                        }
-                        Err(e) => return Err(e),
-                    };
+                    downloadable_libs.extend(Box::pin(child.parse_manifest_prism()).await?);
                 }
             }
         }
@@ -168,9 +147,14 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 self.manifest.get("version").and_then(|v| v.as_str()),
             ) {
                 let file_name = version_name.to_owned() + "-client.jar";
-                let path = format!("{}/com/mojang/minecraft/{}", self.paths.libs().display(), file_name);
+                let path = format!(
+                    "{}/com/mojang/minecraft/{}",
+                    self.paths.libraries().display(),
+                    file_name
+                );
 
-                println!("{}", jar_name);
+                tracing::debug!(jar_name = %jar_name, "main jar found");
+
                 downloadable_libs.push(LibInfo {
                     hash: hash.to_string(),
                     name: jar_name.to_string(),
@@ -181,20 +165,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
             }
         }
 
-        match Self::download_missing_libs(
-            downloadable_libs,
-            Arc::clone(&self.ws_status),
-            self.db,
-        )
-        .await
-        {
-            Ok(mut result) => {
-                result.classpaths.append(&mut additional_classpaths);
-                result.natives_paths.append(&mut additional_natives_paths);
-                Ok(result)
-            }
-            Err(e) => Err(e.to_string()),
-        }
+        Ok(downloadable_libs)
     }
 }
 

@@ -1,15 +1,13 @@
-use std::sync::Arc;
-
-use crate::instance::download::libs::{LibInfo, LibsData, SyncResult};
+use crate::instance::download::libs::{LibInfo, LibsData, LibsSyncError};
 
 mod prism;
 
 impl<'a, 'b> LibsData<'a, 'b> {
-    pub async fn parse_manifest_official(&self) -> Result<SyncResult, String> {
+    pub async fn parse_manifest_official(&self) -> Result<Vec<LibInfo>, LibsSyncError> {
         // Hashmap contains: hash, (name, path, url)
         let mut downloadable_libs: Vec<LibInfo> = Vec::new();
 
-        println!("Extraction libraries...");
+        tracing::info!("starting libraries extraction");
 
         if let Some(libraries) = self.manifest["libraries"].as_array() {
             for lib in libraries {
@@ -72,7 +70,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             Some(lib_hash),
                                         ) = (lib_name, lib_path, lib_url, lib_hash)
                                         {
-                                            println!("Found: {}", lib_name);
                                             downloadable_libs.push(LibInfo {
                                                 hash: lib_hash.to_string(),
                                                 name: lib_name.to_string(),
@@ -91,27 +88,22 @@ impl<'a, 'b> LibsData<'a, 'b> {
         }
 
         if let Some(client_url) = self.manifest["downloads"]["client"]["url"].as_str() {
-            let name = self.manifest["id"].as_str().unwrap();
-            let name = name.to_owned() + "-client.jar";
-            let path = "com/mojang/minecraft/".to_owned() + &name;
-            let hash = self.manifest["downloads"]["client"]["sha1"]
-                .as_str()
-                .unwrap();
+            if let Some(id) = self.manifest["id"].as_str() {
+                if let Some(hash) = self.manifest["downloads"]["client"]["sha1"].as_str() {
+                    let name = format!("{id}-client.jar");
+                    let path = format!("com/mojang/minecraft/{name}");
 
-            downloadable_libs.push(LibInfo {
-                hash: hash.to_string(),
-                name,
-                path: self.build_maven_file_path(&path),
-                url: client_url.to_string(),
-                native: false,
-            });
+                    downloadable_libs.push(LibInfo {
+                        hash: hash.to_string(),
+                        name,
+                        path: self.build_maven_file_path(&path),
+                        url: client_url.to_string(),
+                        native: false,
+                    });
+                }
+            }
         }
 
-        Self::download_missing_libs(
-            downloadable_libs,
-            Arc::clone(&self.ws_status),
-            &self.db,
-        )
-        .await
+        Ok(downloadable_libs)
     }
 }

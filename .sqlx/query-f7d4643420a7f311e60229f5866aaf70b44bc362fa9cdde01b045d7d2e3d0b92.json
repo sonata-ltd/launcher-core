@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT\n                    java_runtime AS \"java_runtime?: i64\",\n                    memory_min   AS \"memory_min?: i64\",\n                    memory_max   AS \"memory_max?: i64\",\n                    jvm_args     AS \"jvm_args?: String\"\n                FROM instances_settings\n                WHERE instance_id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "java_runtime?: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "memory_min?: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "memory_max?: i64",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "jvm_args?: String",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "f7d4643420a7f311e60229f5866aaf70b44bc362fa9cdde01b045d7d2e3d0b92"
+}

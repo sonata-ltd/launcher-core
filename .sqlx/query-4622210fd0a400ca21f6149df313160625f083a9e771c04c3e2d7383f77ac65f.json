@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                INSERT INTO java_runtimes(\n                    version,\n                    exec_path,\n                    home_path,\n                    vendor\n                )\n                VALUES(?, ?, ?, ?)\n                RETURNING id, version, exec_path, home_path, vendor\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "version",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "exec_path",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "home_path",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "vendor",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4622210fd0a400ca21f6149df313160625f083a9e771c04c3e2d7383f77ac65f"
+}

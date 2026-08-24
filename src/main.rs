@@ -1,112 +1,15 @@
-use data::GlobalDataState;
-use endpoints::{
-    debug_ws, handle_init_root,
-    instance::{init_instance_ws, instance_options_dispatcher, run_instance_ws},
-    java::download_java_ws,
-    versions::{get_version_ws, get_versions},
-};
+use std::process::exit;
 
-use http_types::headers::HeaderValue;
-use serde_json::json;
-use tide::security::CorsMiddleware;
-use tide::{security::Origin, Request};
-use tide_websockets::{Message, WebSocket, WebSocketConnection};
+use crate::cli::run;
 
-use crate::endpoints::{
-    instance::{instance_dispather, instance_option_change, instance_options_sync},
-    versions::get_versions_unified,
-};
-
-pub mod instance;
-pub mod java;
-pub mod root;
-
-// mod config;
-mod data;
-mod endpoints;
-mod manifest;
-mod utils;
-mod websocket;
-
-pub type EndpointRequest<'a> = Request<GlobalDataState<'a>>;
+mod cli;
 
 #[async_std::main]
-async fn main() -> tide::Result<()> {
-    let state = GlobalDataState::new().await;
-    state.init_instances_list().await;
+async fn main() {
+    tracing_subscriber::fmt::init();
 
-    let mut app = tide::with_state(state);
-
-    app.with(
-        CorsMiddleware::new()
-            .allow_origin(Origin::from("*"))
-            .allow_methods("GET, POST".parse::<HeaderValue>().unwrap()),
-    );
-
-    // Init routes
-    app.at("/init/root").post(handle_init_root);
-
-    // Java routes
-    app.at("/ws/java/install")
-        .get(WebSocket::new(|_req, ws| download_java_ws(ws)));
-
-    // Instance routes
-    app.at("/instance/download_versions").post(get_versions);
-    app.at("/instance/download_versions_unified")
-        .get(get_versions_unified);
-    app.at("/ws/instance/get_version")
-        .get(WebSocket::new(|_req, ws| get_version_ws(ws)));
-
-    app.at("/ws/instance/init")
-        .get(WebSocket::new(|req, ws| init_instance_ws(req, ws)));
-    app.at("/ws/instance/run")
-        .get(WebSocket::new(|req, ws| run_instance_ws(req, ws)));
-    app.at("/ws/instance/list")
-        .get(WebSocket::new(|req, ws| instance_dispather(req, ws)));
-    app.at("/instance/:id/:page")
-        .get(instance_options_dispatcher);
-    app.at("/instance/options/sync")
-        .get(WebSocket::new(|_req, ws| instance_options_sync(ws)));
-    app.at("/instance/options/change")
-        .post(instance_option_change);
-    // app.at("/instance/options").get(instance_options_dispatcher);
-
-    app.at("/debug/ws")
-        .get(WebSocket::new(|_req, stream| debug_ws(stream)));
-    app.at("/debug/tasks/notif")
-        .get(WebSocket::new(|req, ws| debug_tasks(req, ws)));
-
-    // Run server
-    app.listen("127.0.0.1:8080").await?;
-
-    Ok(())
-}
-
-async fn debug_tasks(req: EndpointRequest<'_>, ws: WebSocketConnection) -> tide::Result<()> {
-    let all_tasks = req.state().get_all_tasks_json().await;
-    if ws
-        .send(Message::text(json!({"all_tasks": all_tasks}).to_string()))
-        .await
-        .is_err()
-    {
-        println!("Failed to send all tasks");
+    if let Err(e) = run().await {
+        tracing::error!("{e}");
+        exit(1);
     }
-
-    let mut rx = req.state().create_task_reciever();
-
-    loop {
-        match rx.recv().await {
-            Ok(notif) => {
-                if ws.send(Message::text(notif.to_string())).await.is_err() {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to receive notification: {:?}", e);
-                break;
-            }
-        }
-    }
-
-    Ok(())
 }

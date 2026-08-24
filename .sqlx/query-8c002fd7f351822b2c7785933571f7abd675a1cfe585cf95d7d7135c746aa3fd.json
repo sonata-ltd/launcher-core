@@ -1,0 +1,56 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id: InstanceId\",\n            name, dir, version, loader, manifest_url, meta_provider FROM instances ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: InstanceId",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "dir",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "version",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "loader",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "manifest_url",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "meta_provider",
+        "ordinal": 6,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8c002fd7f351822b2c7785933571f7abd675a1cfe585cf95d7d7135c746aa3fd"
+}
