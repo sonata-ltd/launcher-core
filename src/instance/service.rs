@@ -135,8 +135,18 @@ impl InstanceService {
     }
 
     pub async fn list(&self) -> Result<Vec<Arc<InstanceRecord>>> {
-        let list = self.registry.list().await?;
-        Ok(list)
+        self.registry.list().await
+    }
+
+    /// Renames the instance. Only the display name changes: `dir` is the
+    /// identity on disk and stays as it was slugified at creation, so a renamed
+    /// instance keeps its original folder.
+    pub async fn rename(&self, id: InstanceId, new_name: &str) -> Result<Arc<InstanceRecord>> {
+        let rec = self.registry.rename(id, new_name).await?;
+
+        self.bus.publish(rec.to_scan_msg());
+
+        Ok(rec)
     }
 
     pub(crate) fn get_registry(&self) -> Arc<InstanceRegistry> {
