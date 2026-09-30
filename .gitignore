@@ -23,3 +23,6 @@ local_docs/
 
 # Development stuff
 dev.db*
+
+# Run logs
+logs/
