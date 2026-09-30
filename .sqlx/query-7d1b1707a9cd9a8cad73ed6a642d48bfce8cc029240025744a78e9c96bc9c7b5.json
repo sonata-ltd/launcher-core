@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n                SELECT\n                    l.hash   AS \"hash!: String\",\n                    l.name   AS \"name!: String\",\n                    l.path   AS \"path!: String\",\n                    l.url    AS \"url!: String\",\n                    l.native AS \"native!: bool\"\n                FROM instance_libraries il\n                JOIN libraries l ON l.id = il.library_id\n                WHERE il.instance_id = ?\n                ORDER BY il.position\n            ",
+  "query": "\n                SELECT\n                    l.hash   AS \"hash!: String\",\n                    l.name   AS \"name!: String\",\n                    l.path   AS \"path!: String\",\n                    l.url    AS \"url!: String\",\n                    l.native AS \"native!: bool\"\n                FROM instances_libraries il\n                JOIN libraries l ON l.id = il.library_id\n                WHERE il.instance_id = ?\n                ORDER BY il.position\n            ",
   "describe": {
     "columns": [
       {
@@ -40,5 +40,5 @@
       false
     ]
   },
-  "hash": "cb330db8391a1c41177da0eeb8d8121d3b5423ff915021eeeddbc24d3165bd84"
+  "hash": "7d1b1707a9cd9a8cad73ed6a642d48bfce8cc029240025744a78e9c96bc9c7b5"
 }
