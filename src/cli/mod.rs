@@ -10,7 +10,7 @@ use sonata_launcher_core::{
 mod progress;
 
 const USAGE: &str = "\
-sonata-launcher-core usage:
+sonata-launcher-core cli usage:
 
     java-add <version> <exec_path> <home_path> [vendor]
     create   <name> <version> <loader> <manifest_url> <provider>
@@ -21,6 +21,8 @@ sonata-launcher-core usage:
 ";
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
 
