@@ -8,7 +8,7 @@ pub enum LifeCycle {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Hash)]
 pub enum Outcome {
     Completed,
     Failed,

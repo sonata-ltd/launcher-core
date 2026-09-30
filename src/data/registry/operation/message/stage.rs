@@ -4,7 +4,7 @@ use ts_rs::TS;
 
 use crate::data::registry::operation::message::status::Outcome;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Display)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 pub enum OperationStage {
     FetchManifest,
     DownloadLibs,
