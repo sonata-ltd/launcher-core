@@ -71,7 +71,11 @@ impl GlobalState {
             });
         }
 
-        let db = Arc::new(Database::init(paths.cache_db()).await?);
+        let db_url = config
+            .database_url
+            .clone()
+            .unwrap_or_else(|| format!("sqlite://{}", paths.cache_db().display()));
+        let db = Arc::new(Database::init(&db_url).await?);
 
         let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
         let operations = Arc::new(OperationRegistry::new(bus.clone()));

@@ -1,5 +1,3 @@
-use std::{env, path::Path};
-
 use sqlx::{
     migrate::{MigrateDatabase, MigrateError},
     Sqlite, SqlitePool,
@@ -37,41 +35,14 @@ pub enum DbError {
 pub type Result<T> = std::result::Result<T, DbError>;
 
 impl Database {
-    pub async fn init(path: &Path) -> Result<Self> {
-        let db_url = {
-            let def = format!("sqlite://{}", path.display());
+    pub async fn init(url: &str) -> Result<Self> {
+        tracing::info!(%url, "opening database");
 
-            if cfg!(debug_assertions) {
-                dotenvy::dotenv_override().ok();
-
-                match env::var("DATABASE_URL") {
-                    Ok(val) => {
-                        tracing::info!("using development database url: {}", val);
-                        val
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "development environment detected, but database cannot be found: {}\nusing default path",
-                            e.to_string()
-                        );
-                        def
-                    }
-                }
-            } else {
-                def
-            }
-        };
-
-        tracing::info!("current database url: {}", db_url);
-
-        if !Sqlite::database_exists(&db_url).await.unwrap_or(false) {
-            Sqlite::create_database(&db_url).await?;
+        if !Sqlite::database_exists(url).await.unwrap_or(false) {
+            Sqlite::create_database(url).await?;
         }
 
-        // `foreign_keys = ON` is a per-connection pragma, so running it once
-        // against the pool would only cover whichever connection served that
-        // query. sqlx already applies it to every connection it opens.
-        let pool = SqlitePool::connect(&db_url).await?;
+        let pool = SqlitePool::connect(url).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
 
         Ok(Self { pool })
