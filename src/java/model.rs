@@ -14,8 +14,13 @@ pub struct JavaRuntime {
 /// New external java runtime structure
 #[derive(Debug, Deserialize)]
 pub struct NewJavaRuntime {
-    pub version: String,
-    pub exec_path: PathBuf,
-    pub home_path: PathBuf,
+    pub version: Option<String>,
+    pub exec_path: Option<PathBuf>,
+    pub home_path: Option<PathBuf>,
     pub vendor: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum JavaEvent {
+    ListChanged,
 }

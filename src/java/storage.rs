@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use sqlx::prelude::FromRow;
 use async_trait::async_trait;
+use sqlx::prelude::FromRow;
 
 use crate::data::db::Database;
+use crate::data::db::DbError::InsufficientData;
 use crate::data::db::Result;
 use crate::java::model::JavaRuntime;
 use crate::java::model::NewJavaRuntime;
@@ -14,6 +15,7 @@ pub trait JavaStore: Send + Sync {
     async fn insert(&self, java: &NewJavaRuntime) -> Result<JavaRuntime>;
     async fn get_by_id(&self, id: i64) -> Result<Option<JavaRuntime>>;
     async fn exists_by_path(&self, path: &PathBuf) -> Result<bool>;
+    async fn list_all(&self) -> Result<Vec<JavaRuntime>>;
 }
 
 #[derive(Debug, FromRow)]
@@ -48,8 +50,28 @@ impl DbJavaStore {
 #[async_trait]
 impl JavaStore for DbJavaStore {
     async fn insert(&self, new: &NewJavaRuntime) -> Result<JavaRuntime> {
-        let exec_path = new.exec_path.to_str();
-        let home_path = new.home_path.to_str();
+        let NewJavaRuntime {
+            version,
+            exec_path,
+            home_path,
+            vendor,
+        } = new;
+
+        let Some(version) = version else {
+            return Err(InsufficientData(format!("version is None")));
+        };
+
+        let Some(exec_path) = exec_path else {
+            return Err(InsufficientData(format!("exec_path is None")));
+        };
+
+        let exec_path = exec_path.to_str();
+
+        let Some(home_path) = home_path else {
+            return Err(InsufficientData(format!("home_path is None")));
+        };
+
+        let home_path = home_path.to_str();
 
         let java = sqlx::query_as!(
             JavaRuntime,
@@ -63,10 +85,10 @@ impl JavaStore for DbJavaStore {
                 VALUES(?, ?, ?, ?)
                 RETURNING id, version, exec_path, home_path, vendor
             "#,
-            new.version,
+            version,
             exec_path,
             home_path,
-            new.vendor
+            vendor
         )
         .fetch_one(&self.db.pool)
         .await?;
@@ -101,5 +123,20 @@ impl JavaStore for DbJavaStore {
         .await?;
 
         Ok(exists)
+    }
+
+    async fn list_all(&self) -> Result<Vec<JavaRuntime>> {
+        let rows = sqlx::query_as!(
+            JavaRow,
+            r#"
+                SELECT id, version, exec_path, home_path, vendor
+                FROM java_runtimes
+                ORDER BY id
+            "#
+        )
+        .fetch_all(&self.db.pool)
+        .await?;
+
+        Ok(rows.into_iter().map(Self::row_to_model).collect())
     }
 }

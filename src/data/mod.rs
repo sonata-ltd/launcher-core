@@ -80,7 +80,7 @@ impl GlobalState {
         let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
         let operations = Arc::new(OperationRegistry::new(bus.clone()));
 
-        let java_service = Arc::new(JavaService::new(Arc::clone(&db)));
+        let java_service = Arc::new(JavaService::new(Arc::clone(&db), bus.clone()));
         let java_registry = java_service.get_registry();
 
         let settings = Arc::new(SettingsService::new(Arc::clone(&db)));

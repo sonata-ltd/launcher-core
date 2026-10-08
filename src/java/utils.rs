@@ -6,12 +6,12 @@ use std::{
 use async_std::{fs, future, io, process::Command};
 use serde::Serialize;
 
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DetectedJavaRuntime {
-    version: Option<String>,
-    exec_path: PathBuf,
-    home_path: Option<PathBuf>,
-    vendor: Option<String>,
+    pub version: Option<String>,
+    pub exec_path: PathBuf,
+    pub home_path: Option<PathBuf>,
+    pub vendor: Option<String>,
 }
 
 pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJavaRuntime> {

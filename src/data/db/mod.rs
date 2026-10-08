@@ -28,6 +28,9 @@ pub enum DbError {
     #[error("Data corrupted")]
     ResultCorrupted,
 
+    #[error("Insufficient data: {0}")]
+    InsufficientData(String),
+
     #[error("Migration error: {0}")]
     MigrateError(#[source] MigrateError),
 }
