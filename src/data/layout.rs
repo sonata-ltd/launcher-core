@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use async_std::{fs::create_dir_all, io};
 use thiserror::Error;
 
 use crate::{
@@ -23,6 +24,9 @@ pub struct LauncherPaths {
 pub enum LauncherPathsError {
     #[error("Cannot get home dir")]
     HomeNotAvailable,
+
+    #[error("filesystem error occured: {0}")]
+    IO(#[from] io::Error),
 }
 
 impl LauncherPaths {
@@ -31,6 +35,10 @@ impl LauncherPaths {
             .root_override
             .clone()
             .unwrap_or(Self::construct_default_root().await?);
+
+        if let Err(e) = create_dir_all(&root).await {
+            return Err(LauncherPathsError::IO(e));
+        }
 
         let d = &config.dirs;
 
