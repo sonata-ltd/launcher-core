@@ -18,7 +18,7 @@ use crate::{
         launch::{execute::launch_instance, prepare},
         model::{InstanceId, InstanceRecord, NewInstance},
         registry::InstanceRegistry,
-        settings::service::SettingsService,
+        settings::{service::SettingsService, GlobalSettings, InstanceSettings, SettingsPatch},
         storage::{DbInstanceStore, InstanceStore},
     },
     java::{model::JavaRuntime, registry::JavaRegistry},
@@ -147,6 +147,18 @@ impl InstanceService {
         self.bus.publish(rec.to_scan_msg());
 
         Ok(rec)
+    }
+
+    pub async fn settings(&self, id: InstanceId) -> Result<InstanceSettings> {
+        self.settings.raw(id).await
+    }
+
+    pub async fn update_settings(&self, id: InstanceId, patch: &SettingsPatch) -> Result<()> {
+        self.settings.patch(id, patch).await
+    }
+
+    pub async fn global_settings(&self) -> Result<GlobalSettings> {
+        self.settings.global().await
     }
 
     pub(crate) fn get_registry(&self) -> Arc<InstanceRegistry> {
