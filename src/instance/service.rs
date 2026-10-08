@@ -97,7 +97,7 @@ impl InstanceService {
         let rec = self.get_instance(id).await?;
         let provider = MetaProvider::from_str(&rec.meta_provider)?;
 
-        self.resolve_java(id).await?;
+        // self.resolve_java(id).await?;
 
         let op = self.operations.begin(
             "instance.install".to_string(),
