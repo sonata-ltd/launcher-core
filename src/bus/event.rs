@@ -1,6 +1,6 @@
 use crate::{
     data::registry::operation::message::OperationMessage,
-    instance::{options::model::OptionUpdateMessage, scan::ScanMessage},
+    instance::{event::InstanceEvent, options::model::OptionUpdateMessage, scan::ScanMessage},
     java::model::JavaEvent,
 };
 
@@ -9,6 +9,7 @@ pub enum CoreEvent {
     Operation(OperationMessage),
     Option(OptionUpdateMessage),
     Scan(ScanMessage),
+    Instance(InstanceEvent),
     Java(JavaEvent),
 }
 
@@ -27,6 +28,12 @@ impl From<OptionUpdateMessage> for CoreEvent {
 impl From<ScanMessage> for CoreEvent {
     fn from(value: ScanMessage) -> Self {
         CoreEvent::Scan(value)
+    }
+}
+
+impl From<InstanceEvent> for CoreEvent {
+    fn from(value: InstanceEvent) -> Self {
+        CoreEvent::Instance(value)
     }
 }
 

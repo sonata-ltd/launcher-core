@@ -15,10 +15,15 @@ use crate::{
     instance::{
         self,
         error::InstanceError,
-        launch::{execute::launch_instance, prepare},
+        event::InstanceEvent,
+        launch::{execute::spawn_instance, prepare},
         model::{InstanceId, InstanceRecord, NewInstance},
         registry::InstanceRegistry,
-        settings::{service::SettingsService, GlobalSettings, InstanceSettings, SettingsPatch},
+        running::{RunPhase, RunningInstances},
+        settings::{
+            service::SettingsService, EffectiveSettings, GlobalSettings, InstanceSettings,
+            SettingsPatch,
+        },
         storage::{DbInstanceStore, InstanceStore},
     },
     java::{model::JavaRuntime, registry::JavaRegistry},
@@ -34,6 +39,7 @@ pub struct InstanceService {
     java: Arc<JavaRegistry>,
     operations: Arc<OperationRegistry>,
     paths: Arc<LauncherPaths>,
+    running: RunningInstances,
     bus: EventBus,
 }
 
@@ -55,6 +61,7 @@ impl InstanceService {
             java,
             operations,
             paths,
+            running: RunningInstances::new(bus.clone()),
             bus,
         }
     }
@@ -122,16 +129,31 @@ impl InstanceService {
     }
 
     pub async fn launch(&self, id: InstanceId) -> Result<()> {
+        let reservation = self.running.reserve(id)?;
+
         let rec = self.get_instance(id).await?;
         let settings = self.settings.effective(id).await?;
-        let java = self.resolve_java(id).await?;
+        let java = self.resolve_java(id, &settings).await?;
 
         let info =
             prepare::prepare(&rec, &settings, &java, &self.paths, Arc::clone(&self.db)).await?;
 
-        launch_instance(info).await?;
+        let child = spawn_instance(info).await?;
+        reservation.commit(child);
 
         Ok(())
+    }
+
+    pub fn running(&self) -> Vec<(InstanceId, RunPhase)> {
+        self.running.snapshot()
+    }
+
+    pub fn run_phase(&self, id: InstanceId) -> Option<RunPhase> {
+        self.running.phase(id)
+    }
+
+    pub fn kill(&self, id: InstanceId) -> Result<()> {
+        self.running.kill(id)
     }
 
     pub async fn list(&self) -> Result<Vec<Arc<InstanceRecord>>> {
@@ -154,7 +176,11 @@ impl InstanceService {
     }
 
     pub async fn update_settings(&self, id: InstanceId, patch: &SettingsPatch) -> Result<()> {
-        self.settings.patch(id, patch).await
+        let res = self.settings.patch(id, patch).await?;
+
+        self.bus.publish(InstanceEvent::SettingsChanged(id));
+
+        Ok(res)
     }
 
     pub async fn global_settings(&self) -> Result<GlobalSettings> {
@@ -169,9 +195,11 @@ impl InstanceService {
         Ok(self.registry.get(id).await?)
     }
 
-    async fn resolve_java(&self, id: InstanceId) -> Result<Arc<JavaRuntime>> {
-        let settings = self.settings.effective(id).await?;
-
+    async fn resolve_java(
+        &self,
+        id: InstanceId,
+        settings: &EffectiveSettings,
+    ) -> Result<Arc<JavaRuntime>> {
         let java_id = settings
             .java_runtime
             .ok_or(InstanceError::JavaRuntimeNotSelected(id))?;

@@ -39,8 +39,8 @@ pub enum LaunchError {
     #[error("failed to spawn java process: {0}")]
     Spawn(#[source] std::io::Error),
 
-    #[error("failed to wait for java process: {0}")]
-    Wait(#[source] std::io::Error),
+    #[error("failed to extract natives: {0}")]
+    Natives(#[source] std::io::Error),
 }
 
 #[derive(Debug, Clone)]
