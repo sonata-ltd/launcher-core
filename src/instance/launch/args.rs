@@ -72,8 +72,8 @@ impl<'a> ArgType {
             ArgType::GameDir => ".",
             ArgType::AssetsDir => ".",
             ArgType::AssetIndex => " ",
-            ArgType::AuthUuid => " ",
-            ArgType::AccessToken => " ",
+            ArgType::AuthUuid => "00000000-0000-0000-0000-000000000000",
+            ArgType::AccessToken => "",
             ArgType::ClientId => " ",
             ArgType::XUid => " ",
             ArgType::UserProperties => "{}",
@@ -83,4 +83,22 @@ impl<'a> ArgType {
 
         value.to_string()
     }
+}
+
+pub fn offline_uuid(username: &str) -> String {
+    let input = format!("OfflinePlayer:{username}");
+    let mut bytes = md5::compute(input.as_bytes()).0;
+
+    bytes[6] = (bytes[6] & 0x0f) | 0x30;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    let hex = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }

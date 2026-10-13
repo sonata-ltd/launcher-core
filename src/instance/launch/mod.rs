@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::{
     instance::{
-        launch::args::ArgType,
+        launch::args::{offline_uuid, ArgType},
         settings::{DEFAULT_MEMORY_MAX, DEFAULT_MEMORY_MIN},
     },
     java::model::JavaRuntime,
@@ -163,6 +163,16 @@ impl LaunchInfoBuilder {
     {
         Self::set_arg_value(self, ArgType::Version, &version);
         self.version = Some(version.as_ref().display().to_string());
+        self
+    }
+
+    pub fn set_username(&mut self, username: String) -> &mut Self {
+        let uuid = offline_uuid(&username);
+
+        self.game_args
+            .insert(ArgType::Username.get_value_placeholder(), username);
+        self.game_args
+            .insert(ArgType::AuthUuid.get_value_placeholder(), uuid);
         self
     }
 
