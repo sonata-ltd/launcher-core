@@ -66,6 +66,7 @@ impl InstanceRegistry {
 
         let mut out = Vec::with_capacity(rows.len());
         let mut cache = self.cache.lock().unwrap();
+        cache.clear();
 
         for rec in rows {
             let rec = Arc::new(rec);
