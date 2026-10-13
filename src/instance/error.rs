@@ -62,6 +62,12 @@ pub enum InstanceError {
     #[error(transparent)]
     Launch(#[from] LaunchError),
 
+    #[error("Instance {0} is already running")]
+    AlreadyRunning(InstanceId),
+
+    #[error("Instance {0} is not running")]
+    NotRunning(InstanceId),
+
     #[error(transparent)]
     DB(#[from] DbError),
 }

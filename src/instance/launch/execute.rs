@@ -1,30 +1,24 @@
 use std::collections::HashMap;
 
-use async_std::process::Command;
+use async_std::process::{Child, Command};
 
 use crate::instance::launch::{natives::Natives, traits::StartupTraits, LaunchError};
 
 use super::LaunchInfo;
 
-pub async fn launch_instance(info: LaunchInfo) -> Result<(), LaunchError> {
+pub async fn spawn_instance(info: LaunchInfo) -> Result<Child, LaunchError> {
     let java_exec_path = info.java_bin_path.exec_path.clone();
-    let args = define_launch_args(info).await;
+    let args = define_launch_args(info).await?;
 
-    tracing::debug!("executed with args:\n{:#?}", args);
+    tracing::debug!("executed with args: \n{:#?}", args);
 
-    let mut child = Command::new(java_exec_path)
+    Command::new(java_exec_path)
         .args(args)
         .spawn()
-        .map_err(LaunchError::Spawn)?;
-
-    let status = child.status().await.map_err(LaunchError::Wait)?;
-
-    tracing::info!(%status, "game was stopped");
-
-    Ok(())
+        .map_err(LaunchError::Spawn)
 }
 
-async fn define_launch_args(info: LaunchInfo) -> Vec<String> {
+async fn define_launch_args(info: LaunchInfo) -> Result<Vec<String>, LaunchError> {
     let LaunchInfo {
         manifest,
         classpath,
@@ -59,18 +53,18 @@ async fn define_launch_args(info: LaunchInfo) -> Vec<String> {
 
     // TODO: Determine windows version and add that argument only on windows 10
     #[cfg(target_os = "windows")]
-    tmp_args.push("-Dos.name=Windows 10 -Dos.version=10.0".to_string());
+    {
+        tmp_args.push("-Dos.name=Windows 10".to_string());
+        tmp_args.push("-Dos.version=10.0".to_string());
+    }
 
     // Handle natives
     if !native_libs.is_empty() {
-        match Natives::extract(native_libs, &natives_dir).await {
-            Ok(_) => {
-                tmp_args.push("-Djava.library.path=".to_owned() + &natives_dir.to_string_lossy());
-            }
-            Err(e) => {
-                tracing::error!("error occured during natives extraction {}", e);
-            }
-        }
+        Natives::extract(native_libs, &natives_dir)
+            .await
+            .map_err(LaunchError::Natives)?;
+
+        tmp_args.push("-Djava.library.path=".to_owned() + &natives_dir.to_string_lossy());
     }
 
     // tmp_args.push("-Djna.tmpdir=".to_owned() + natives_dir);
@@ -131,7 +125,7 @@ async fn define_launch_args(info: LaunchInfo) -> Vec<String> {
         }
     }
 
-    return tmp_args;
+    Ok(tmp_args)
 }
 
 fn handle_simple_arg(
