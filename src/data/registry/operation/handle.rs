@@ -21,6 +21,7 @@ pub struct OperationHandle {
     id: OperationId,
     bus: EventBus,
     snapshots: Arc<Mutex<HashMap<OperationId, OperationSnapshot>>>,
+    finished: bool,
 }
 
 impl OperationHandle {
@@ -29,7 +30,12 @@ impl OperationHandle {
         bus: EventBus,
         snapshots: Arc<Mutex<HashMap<OperationId, OperationSnapshot>>>,
     ) -> Self {
-        Self { id, bus, snapshots }
+        Self {
+            id,
+            bus,
+            snapshots,
+            finished: false,
+        }
     }
 
     fn publish(&self, data: impl Into<OperationEvent>) {
@@ -86,11 +92,25 @@ impl OperationHandle {
         self.emit(OperationUpdate::Completed(res));
     }
 
-    pub fn finish(self, outcome: Outcome) {
+    pub fn finish(mut self, outcome: Outcome) {
+        self.close(outcome);
+    }
+
+    fn close(&mut self, outcome: Outcome) {
+        if std::mem::replace(&mut self.finished, true) {
+            return;
+        }
+
         self.publish(OperationFinish { outcome });
 
         if let Ok(mut active) = self.snapshots.lock() {
             active.remove(&self.id);
         }
+    }
+}
+
+impl Drop for OperationHandle {
+    fn drop(&mut self) {
+        self.close(Outcome::Cancelled);
     }
 }
