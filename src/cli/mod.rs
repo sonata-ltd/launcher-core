@@ -47,9 +47,9 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             let java = state
                 .java()
                 .init_external(NewJavaRuntime {
-                    version: (*version).to_string(),
-                    exec_path: PathBuf::from(exec_path),
-                    home_path: PathBuf::from(home_path),
+                    version: Some((*version).to_string()),
+                    exec_path: Some(PathBuf::from(exec_path)),
+                    home_path: Some(PathBuf::from(home_path)),
                     vendor: rest.first().map(|v| (*v).to_string()),
                 })
                 .await?;
