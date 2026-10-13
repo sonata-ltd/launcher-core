@@ -65,6 +65,7 @@ pub async fn prepare(
     builder.add_version(&rec.version);
     builder.add_cps(classpath);
     builder.add_natives(natives);
+    builder.set_username("Player".to_string());
 
     Ok(builder
         .set_preferred_java_runtime(java.clone())

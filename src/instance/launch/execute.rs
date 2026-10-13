@@ -10,7 +10,7 @@ pub async fn spawn_instance(info: LaunchInfo) -> Result<Child, LaunchError> {
     let java_exec_path = info.java_bin_path.exec_path.clone();
     let args = define_launch_args(info).await?;
 
-    tracing::debug!("executed with args: \n{:#?}", args);
+    tracing::info!("executed with args: \n{:#?}", args);
 
     Command::new(java_exec_path)
         .args(args)
@@ -82,23 +82,6 @@ async fn define_launch_args(info: LaunchInfo) -> Result<Vec<String>, LaunchError
     } else {
         tmp_args.push(String::from("net.minecraft.launchwrapper.Launch"));
     }
-
-    // for arg in info.game_args {
-    //     tmp_args.push(arg.0);
-    //     tmp_args.push(arg.1);
-    // }
-
-    // tmp_args.push("--accessToken".to_string());
-    // tmp_args.push("".to_string());
-
-    // tmp_args.push("--userProperties".to_string());
-    // tmp_args.push("{}".to_string());
-
-    // tmp_args.push("--username".to_string());
-    // tmp_args.push("Melicta".to_string());
-
-    // tmp_args.push("--userType".to_string());
-    // tmp_args.push("legacy".to_string());
 
     // Check for modern manifest pattern
     if let Some(arguments) = manifest["arguments"].as_object() {
