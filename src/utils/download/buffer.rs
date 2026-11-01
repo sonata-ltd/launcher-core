@@ -9,7 +9,7 @@ use async_std::task;
 #[derive(Clone)]
 pub struct BufferPool {
     tx: Sender<Vec<u8>>,
-    rx: Receiver<Vec<u8>>
+    rx: Receiver<Vec<u8>>,
 }
 
 impl BufferPool {
@@ -30,16 +30,15 @@ impl BufferPool {
         let buf = self.rx.recv().await.expect("Pool recieve closed");
         BufferGuard {
             buf: Some(buf),
-            tx: self.tx.clone()
+            tx: self.tx.clone(),
         }
     }
 }
 
-
 /// Guard that holds a buffer and returns it to the pool on Drop
 pub struct BufferGuard {
     buf: Option<Vec<u8>>,
-    tx: Sender<Vec<u8>>
+    tx: Sender<Vec<u8>>,
 }
 
 #[allow(dead_code)]
@@ -69,7 +68,7 @@ impl Drop for BufferGuard {
         if let Some(buf) = self.buf.take() {
             // Non-blocking return to pool
             match self.tx.try_send(buf) {
-                Ok(()) => {},
+                Ok(()) => {}
                 Err(TrySendError::Full(buf)) => {
                     // Extremely unlikely: pool is full. Spawn background task to send it asynchronously
                     let tx_clone = self.tx.clone();

@@ -196,7 +196,13 @@ async fn full_cache_reports_completion_immediately() {
         .enumerate()
         // Порт 1 никто не слушает: если реализация всё же полезет в сеть,
         // тест упадёт на отказе в соединении, а не зависнет на таймауте.
-        .map(|(i, body)| item(&format!("f{i}"), "http://127.0.0.1:1/never".to_string(), body))
+        .map(|(i, body)| {
+            item(
+                &format!("f{i}"),
+                "http://127.0.0.1:1/never".to_string(),
+                body,
+            )
+        })
         .collect();
 
     let store = FakeStore::with_known(wanted.iter().map(|item| item.hash.clone()));
