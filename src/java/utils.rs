@@ -1,14 +1,21 @@
 use std::{
     path::{Path, PathBuf},
+    process::Stdio,
     time::Duration,
 };
 
 use async_std::{fs, future, io, process::Command};
 use serde::Serialize;
 
+use crate::java::version::parse_major;
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DetectedJavaRuntime {
     pub version: Option<String>,
+    pub major: Option<u32>,
+    pub arch: Option<String>,
     pub exec_path: PathBuf,
     pub home_path: Option<PathBuf>,
     pub vendor: Option<String>,
@@ -17,16 +24,20 @@ pub struct DetectedJavaRuntime {
 pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJavaRuntime> {
     let input = input.as_ref();
 
-    let exec_path = match input.canonicalize() {
-        Ok(p) => p,
-        Err(_) => input.to_path_buf(),
-    };
+    let exec_path = dunce::canonicalize(input).unwrap_or_else(|_| input.to_path_buf());
 
-    let output = run_with_timeout(
-        Command::new(&exec_path).args(["-XshowSettings:properties", "-version"]),
-        Duration::from_secs(5),
-    )
-    .await?;
+    let mut cmd = Command::new(&exec_path);
+    cmd.args(["-XshowSettings:properties", "-version"])
+        .stdin(Stdio::null());
+
+    #[cfg(windows)]
+    {
+        use async_std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = run_with_timeout(&mut cmd, PROBE_TIMEOUT).await?;
 
     // java -version writes only to stderr but we still have to check the stdout
     let output = {
@@ -37,9 +48,15 @@ pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJa
         s
     };
 
-    let home_path = parse_option(&output, "java.home").map(PathBuf::from);
+    // Canonical, so two paths into one JDK (macOS `/Library` vs `/private/…`,
+    // symlinked homes) compare equal when the search dedupes by home.
+    let home_path = parse_option(&output, "java.home")
+        .map(PathBuf::from)
+        .map(|p| dunce::canonicalize(&p).unwrap_or(p));
     let mut version = parse_option(&output, "java.runtime.version");
     let mut vendor = parse_option(&output, "java.vendor");
+    let spec_version = parse_option(&output, "java.specification.version");
+    let arch = parse_option(&output, "os.arch");
 
     if version.is_none() || vendor.is_none() {
         if let Some(ref java_home) = home_path {
@@ -61,8 +78,15 @@ pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJa
         }
     }
 
+    let major = spec_version
+        .as_deref()
+        .and_then(parse_major)
+        .or_else(|| version.as_deref().and_then(parse_major));
+
     Ok(DetectedJavaRuntime {
         version,
+        major,
+        arch,
         exec_path,
         home_path,
         vendor,
@@ -70,7 +94,9 @@ pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJa
 }
 
 async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::process::Output> {
+    cmd.kill_on_drop(true);
     let fut = cmd.output();
+
     match future::timeout(dur, fut).await {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => Err(e),
@@ -79,23 +105,10 @@ async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::p
 }
 
 fn parse_option(output: &str, key: &str) -> Option<String> {
-    for line in output.lines() {
-        let line = line.trim();
-
-        if line.starts_with(key) {
-            if let Some(eq_pos) = line.find('=') {
-                let val = line[eq_pos + 1..].trim();
-                return Some(strip_quotes(val));
-            }
-        } else {
-            let parts: Vec<&str> = line.splitn(2, '=').collect();
-            if parts.len() == 2 && parts[0].trim() == key {
-                return Some(strip_quotes(parts[1].trim()));
-            }
-        }
-    }
-
-    None
+    output.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| strip_quotes(v.trim()))
+    })
 }
 
 fn strip_quotes(s: &str) -> String {
@@ -108,16 +121,58 @@ fn strip_quotes(s: &str) -> String {
 }
 
 fn parse_release_field(contents: &str, key: &str) -> Option<String> {
-    for line in contents.lines() {
-        let line = line.trim();
+    contents.lines().find_map(|line| {
+        let (k, v) = line.split_once('=')?;
+        (k.trim() == key).then(|| strip_quotes(v.trim()))
+    })
+}
 
-        if line.starts_with(key) {
-            if let Some(eq) = line.find('=') {
-                let val = line[eq + 1..].trim();
-                return Some(strip_quotes(val));
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SETTINGS: &str = "\
+Property settings:
+    java.home = /usr/lib/jvm/java-21-openjdk
+    java.runtime.version = 21.0.5+11
+    java.specification.version = 21
+    java.vendor = Arch Linux
+    java.vendor.url = https://archlinux.org/
+    os.arch = amd64
+";
+
+    #[test]
+    fn option_key_matches_exactly() {
+        assert_eq!(
+            parse_option(SETTINGS, "java.vendor").as_deref(),
+            Some("Arch Linux")
+        );
+        assert_eq!(
+            parse_option(SETTINGS, "java.vendor.url").as_deref(),
+            Some("https://archlinux.org/")
+        );
+        assert_eq!(parse_option(SETTINGS, "os.arch").as_deref(), Some("amd64"));
+        assert_eq!(parse_option(SETTINGS, "java"), None);
     }
 
-    None
+    #[test]
+    fn release_field_ignores_longer_keys() {
+        let release = "JAVA_VERSION_DATE=\"2024-10-15\"\nJAVA_VERSION=\"21.0.5\"\n";
+
+        assert_eq!(
+            parse_release_field(release, "JAVA_VERSION").as_deref(),
+            Some("21.0.5")
+        );
+    }
+
+    /// Runs the `java` on `PATH`: `cargo test -- --ignored`.
+    #[async_std::test]
+    #[ignore]
+    async fn probes_java_on_path() {
+        let found = detect_properties("java").await.expect("java on PATH");
+
+        assert!(found.major.is_some(), "{found:?}");
+        assert!(found.arch.is_some(), "{found:?}");
+        assert!(found.home_path.is_some(), "{found:?}");
+    }
 }

@@ -7,6 +7,7 @@ pub mod config;
 pub mod db;
 pub mod layout;
 pub mod registry;
+pub mod state;
 
 use crate::{
     bus::EventBus,
@@ -20,7 +21,11 @@ use crate::{
         options::service::OptionsService, service::InstanceService,
         settings::service::SettingsService,
     },
-    java::service::JavaService,
+    java::{
+        error::JavaResult,
+        model::{JavaRuntime, NewJavaRuntime},
+        service::JavaService,
+    },
     utils::download::sweep::sweep_partials,
     version::catalog::VersionCatalog,
 };
@@ -80,7 +85,11 @@ impl GlobalState {
         let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
         let operations = Arc::new(OperationRegistry::new(bus.clone()));
 
-        let java_service = Arc::new(JavaService::new(Arc::clone(&db), bus.clone()));
+        let java_service = Arc::new(JavaService::new(
+            Arc::clone(&db),
+            bus.clone(),
+            paths.java_runtimes().clone(),
+        ));
         let java_registry = java_service.get_registry();
 
         let settings = Arc::new(SettingsService::new(Arc::clone(&db)));
@@ -88,7 +97,7 @@ impl GlobalState {
         let instance_service = Arc::new(InstanceService::new(
             Arc::clone(&db),
             Arc::clone(&settings),
-            Arc::clone(&java_registry),
+            Arc::clone(&java_service),
             Arc::clone(&operations),
             Arc::clone(&paths),
             bus.clone(),
@@ -109,6 +118,22 @@ impl GlobalState {
             )),
         };
 
+        // The first-run Java search. In the background: `GlobalState::new`
+        // is awaited before the GUI opens its window, and probing a hung
+        // candidate takes seconds.
+        {
+            let java = Arc::clone(&services.java);
+            let instances = Arc::clone(&services.instances);
+
+            task::spawn(async move {
+                match java.ensure_discovered().await {
+                    Ok(added) if added > 0 => instances.assign_missing().await,
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "java discovery failed"),
+                }
+            });
+        }
+
         Ok(Self {
             db,
             bus,
@@ -117,6 +142,25 @@ impl GlobalState {
             operations,
             services,
         })
+    }
+
+    /// Registers a runtime the user picked by hand, then gives it to every
+    /// instance that has no Java yet and can use this one.
+    pub async fn add_java(&self, new: NewJavaRuntime) -> JavaResult<Arc<JavaRuntime>> {
+        let java = self.services.java.init_external(new).await?;
+        self.services.instances.assign_missing().await;
+
+        Ok(java)
+    }
+
+    /// Searches for installed runtimes again, regardless of the first-run
+    /// flag, then retries every instance without a Java — also when nothing
+    /// new turned up: one may fit a runtime registered before it was installed.
+    pub async fn rediscover_java(&self) -> JavaResult<usize> {
+        let added = self.services.java.rediscover().await?;
+        self.services.instances.assign_missing().await;
+
+        Ok(added)
     }
 
     pub fn java(&self) -> Arc<JavaService> {

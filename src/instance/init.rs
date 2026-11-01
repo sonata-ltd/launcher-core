@@ -25,6 +25,7 @@ use crate::{
         paths::InstancePaths,
         Result,
     },
+    java::select::JavaRequirement,
     version::provider::MetaProvider,
 };
 
@@ -34,7 +35,7 @@ pub async fn install(
     paths: &LauncherPaths,
     db: Arc<Database>,
     op: &OperationHandle,
-) -> Result<()> {
+) -> Result<JavaRequirement> {
     let instance_paths = InstancePaths::resolve(paths, &rec.dir);
 
     fs::create_dir_all(instance_paths.root())
@@ -50,6 +51,8 @@ pub async fn install(
         .map_err(|e| {
             InstanceError::CreationFailed(format!("failed to download version manifest: {e}"))
         })?;
+
+    let java_requirement = JavaRequirement::from_manifest(&version_manifest);
 
     op.complete_stage(StageResult {
         status: Outcome::Completed,
@@ -83,5 +86,5 @@ pub async fn install(
         .await
         .map_err(|e| InstanceError::CreationFailed(format!("failed to sync assets: {e}")))?;
 
-    Ok(())
+    Ok(java_requirement)
 }

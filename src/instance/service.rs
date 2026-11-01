@@ -12,6 +12,7 @@ use crate::{
             OperationRegistry,
         },
     },
+    instance::download::manifest::load_cached,
     instance::{
         self,
         error::InstanceError,
@@ -26,7 +27,12 @@ use crate::{
         },
         storage::{DbInstanceStore, InstanceStore},
     },
-    java::{model::JavaRuntime, registry::JavaRegistry},
+    java::{
+        model::{JavaEvent, JavaRuntime},
+        registry::JavaRegistry,
+        select::{self, JavaRequirement},
+        service::JavaService,
+    },
     version::provider::MetaProvider,
 };
 
@@ -37,6 +43,7 @@ pub struct InstanceService {
     registry: Arc<InstanceRegistry>,
     settings: Arc<SettingsService>,
     java: Arc<JavaRegistry>,
+    java_service: Arc<JavaService>,
     operations: Arc<OperationRegistry>,
     paths: Arc<LauncherPaths>,
     running: RunningInstances,
@@ -47,7 +54,7 @@ impl InstanceService {
     pub fn new(
         db: Arc<Database>,
         settings: Arc<SettingsService>,
-        java: Arc<JavaRegistry>,
+        java_service: Arc<JavaService>,
         operations: Arc<OperationRegistry>,
         paths: Arc<LauncherPaths>,
         bus: EventBus,
@@ -58,7 +65,8 @@ impl InstanceService {
             registry: Arc::new(InstanceRegistry::new(store)),
             db,
             settings,
-            java,
+            java: java_service.get_registry(),
+            java_service,
             operations,
             paths,
             running: RunningInstances::new(bus.clone()),
@@ -104,8 +112,6 @@ impl InstanceService {
         let rec = self.get_instance(id).await?;
         let provider = MetaProvider::from_str(&rec.meta_provider)?;
 
-        // self.resolve_java(id).await?;
-
         let op = self.operations.begin(
             "instance.install".to_string(),
             vec![
@@ -115,17 +121,113 @@ impl InstanceService {
             ],
         );
 
-        match instance::init::install(&rec, provider, &self.paths, Arc::clone(&self.db), &op).await
-        {
-            Ok(()) => {
-                op.finish(Outcome::Completed);
-                Ok(())
-            }
+        let requirement =
+            match instance::init::install(&rec, provider, &self.paths, Arc::clone(&self.db), &op)
+                .await
+            {
+                Ok(requirement) => {
+                    op.finish(Outcome::Completed);
+                    requirement
+                }
+                Err(e) => {
+                    op.finish(Outcome::Failed);
+                    return Err(e);
+                }
+            };
+
+        // Outside the operation: an instance without a fitting Java is
+        // installed all the same, the user is told by `NoSuitableRuntime`.
+        self.auto_select(&rec, &requirement, true).await?;
+
+        Ok(())
+    }
+
+    /// After new runtimes appear: picks a Java for every instance that has
+    /// none of its own. Requirements come from the cached manifests; an
+    /// instance never installed has none and is skipped. Never notifies about
+    /// instances still left without one, the user did not ask about them.
+    pub async fn assign_missing(&self) {
+        let list = match self.list().await {
+            Ok(list) => list,
             Err(e) => {
-                op.finish(Outcome::Failed);
-                Err(e)
+                tracing::warn!(error = %e, "cannot list instances for java auto-select");
+                return;
+            }
+        };
+
+        for rec in list {
+            match self.has_own_java(rec.id).await {
+                Ok(false) => {}
+                Ok(true) => continue,
+                Err(e) => {
+                    tracing::warn!(instance = %rec.id, error = %e, "cannot read instance settings");
+                    continue;
+                }
+            }
+
+            let Some(manifest) = load_cached(&rec.manifest_url, self.paths.meta()).await else {
+                tracing::debug!(instance = %rec.id, "no cached manifest, not installed yet");
+                continue;
+            };
+
+            let requirement = JavaRequirement::from_manifest(&manifest);
+
+            if let Err(e) = self.auto_select(&rec, &requirement, false).await {
+                tracing::warn!(instance = %rec.id, error = %e, "java auto-select failed");
             }
         }
+    }
+
+    /// Writes the best registered runtime into the instance's own settings,
+    /// unless it has one already. Publishes `AutoSelected`, or with `notify`
+    /// `NoSuitableRuntime` when nothing fits.
+    async fn auto_select(
+        &self,
+        rec: &InstanceRecord,
+        requirement: &JavaRequirement,
+        notify: bool,
+    ) -> Result<()> {
+        self.java_service.wait_discovery().await;
+
+        if self.has_own_java(rec.id).await? {
+            return Ok(());
+        }
+
+        let runtimes = self.java.list_all().await?;
+
+        match select::pick(&runtimes, requirement, select::host_arch()) {
+            Some((java, fit)) => {
+                tracing::info!(
+                    instance = %rec.id,
+                    runtime = java.id,
+                    major = java.major,
+                    ?fit,
+                    "java auto-selected"
+                );
+
+                let runtime = java.id;
+                let patch = SettingsPatch {
+                    java_runtime: Some(Some(runtime)),
+                    ..Default::default()
+                };
+
+                self.update_settings(rec.id, &patch).await?;
+                self.bus.publish(JavaEvent::AutoSelected {
+                    instance: rec.id,
+                    runtime,
+                });
+            }
+            None if notify => {
+                self.bus.publish(JavaEvent::NoSuitableRuntime {
+                    instance: rec.id,
+                    name: rec.name.clone(),
+                    required: requirement.majors.clone(),
+                });
+            }
+            None => {}
+        }
+
+        Ok(())
     }
 
     pub async fn launch(&self, id: InstanceId) -> Result<()> {
@@ -185,6 +287,16 @@ impl InstanceService {
 
     pub async fn global_settings(&self) -> Result<GlobalSettings> {
         self.settings.global().await
+    }
+
+    /// Whether the instance points at a runtime that still exists. A dangling
+    /// id (the runtime was removed) counts as none: auto-selection replaces it.
+    async fn has_own_java(&self, id: InstanceId) -> Result<bool> {
+        let Some(java_id) = self.settings.raw(id).await?.java_runtime else {
+            return Ok(false);
+        };
+
+        Ok(self.java.get(java_id).await?.is_some())
     }
 
     pub(crate) fn get_registry(&self) -> Arc<InstanceRegistry> {

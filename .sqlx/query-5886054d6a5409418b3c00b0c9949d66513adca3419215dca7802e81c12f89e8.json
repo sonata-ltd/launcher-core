@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT id, version, major, arch, exec_path, home_path, vendor, source\n                FROM java_runtimes\n                ORDER BY id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "version",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "major",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "arch",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "exec_path",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "home_path",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "vendor",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "source",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "5886054d6a5409418b3c00b0c9949d66513adca3419215dca7802e81c12f89e8"
+}

@@ -94,6 +94,15 @@ pub async fn load_or_fetch<P: AsRef<Path>>(
     Ok(fetch_and_cache_manifest(url, save_dir).await?.0)
 }
 
+/// The manifest `load_or_fetch` cached for `url`, if there is one. Never
+/// touches the network.
+pub async fn load_cached<P: AsRef<Path>>(url: &str, save_dir: P) -> Option<serde_json::Value> {
+    let cached = save_dir.as_ref().join(file_name_from_url(url)?);
+    let body = fs::read(&cached).await.ok()?;
+
+    serde_json::from_slice(&body).ok()
+}
+
 pub fn asset_index_id(version_manifest: &serde_json::Value) -> Result<&str, ManifestError> {
     version_manifest
         .get("assetIndex")

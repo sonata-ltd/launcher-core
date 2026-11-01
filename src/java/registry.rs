@@ -41,6 +41,25 @@ impl JavaRegistry {
         Ok(self.upsert(java).await)
     }
 
+    /// Registers every runtime whose `exec_path` is new; returns those.
+    pub async fn register_many(
+        &self,
+        new: Vec<NewJavaRuntime>,
+    ) -> JavaResult<Vec<Arc<JavaRuntime>>> {
+        let added = self.store.insert_many(&new).await?;
+        let mut out = Vec::with_capacity(added.len());
+
+        for java in added {
+            out.push(self.upsert(java).await);
+        }
+
+        Ok(out)
+    }
+
+    pub async fn backfill_major(&self) -> JavaResult<()> {
+        Ok(self.store.backfill_major().await?)
+    }
+
     pub async fn list_all(&self) -> JavaResult<Vec<Arc<JavaRuntime>>> {
         let all = self.store.list_all().await?;
         let mut out = Vec::with_capacity(all.len());

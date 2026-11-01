@@ -1,6 +1,9 @@
+pub mod discovery;
 pub mod error;
 pub mod model;
 pub mod registry;
+pub mod select;
 pub mod service;
 pub mod storage;
 pub mod utils;
+pub mod version;

@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::exit};
 use sonata_launcher_core::{
     data::GlobalState,
     instance::{model::InstanceId, settings::SettingsPatch},
-    java::model::NewJavaRuntime,
+    java::model::{JavaSource, NewJavaRuntime},
     Config,
 };
 
@@ -13,6 +13,8 @@ const USAGE: &str = "\
 sonata-launcher-core cli usage:
 
     java-add <version> <exec_path> <home_path> [vendor]
+    java-discover
+    java-list
     create   <name> <version> <loader> <manifest_url> <provider>
     set-java <instance_id> <java_id>
     install  <instance_id>
@@ -45,16 +47,37 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
     match argv {
         ["java-add", version, exec_path, home_path, rest @ ..] => {
             let java = state
-                .java()
-                .init_external(NewJavaRuntime {
+                .add_java(NewJavaRuntime {
                     version: Some((*version).to_string()),
+                    major: None,
+                    arch: None,
                     exec_path: Some(PathBuf::from(exec_path)),
                     home_path: Some(PathBuf::from(home_path)),
                     vendor: rest.first().map(|v| (*v).to_string()),
+                    source: JavaSource::Manual,
                 })
                 .await?;
 
             println!("java runtime registered: id={} {}", java.id, java.version);
+        }
+
+        ["java-discover"] => {
+            let added = state.rediscover_java().await?;
+            println!("java runtimes found: {added}");
+        }
+
+        ["java-list"] => {
+            for java in state.java().list_all().await? {
+                println!(
+                    "{:>3}  java {:<3} {:<14} {:<8} {:<10} {}",
+                    java.id,
+                    java.major,
+                    java.version,
+                    java.arch.as_deref().unwrap_or("?"),
+                    java.source.as_str(),
+                    java.exec_path,
+                );
+            }
         }
 
         ["create", name, version, loader, manifest_url, provider] => {
