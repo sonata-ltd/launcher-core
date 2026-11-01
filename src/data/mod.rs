@@ -107,7 +107,10 @@ impl GlobalState {
 
         let services = LauncherServices {
             java: java_service,
-            versions: Arc::new(VersionCatalog::new(config.meta_provider)),
+            versions: Arc::new(VersionCatalog::with_cache(
+                config.meta_provider,
+                paths.meta().join("version-catalog"),
+            )),
             instances: instance_service,
             options: Arc::new(OptionsService::new(
                 Arc::clone(&db),

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::version::provider::VersionKind;
 use crate::version::provider::{VersionSource, VersionSummary};
 
@@ -60,6 +62,23 @@ impl VersionSource for PrismSource {
                 source: e,
             }
         })?;
+
+        if index.format_version != 1 || index.uid != "net.minecraft" {
+            return Err(VersionError::InvalidIndex(format!(
+                "expected Prism v1 net.minecraft, got format={} uid={}",
+                index.format_version, index.uid
+            )));
+        }
+
+        let mut ids = HashSet::new();
+        for version in &index.versions {
+            if version.version.trim().is_empty() || !ids.insert(version.version.as_str()) {
+                return Err(VersionError::InvalidIndex(format!(
+                    "empty or duplicate version id: {:?}",
+                    version.version
+                )));
+            }
+        }
 
         let base_url = self.base_url();
         let mut version_summary = Vec::new();

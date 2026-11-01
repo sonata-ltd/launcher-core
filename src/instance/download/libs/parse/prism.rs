@@ -104,7 +104,11 @@ impl<'a, 'b> LibsData<'a, 'b> {
 
         // Check for modern builded libs
         if let Some(requires) = self.manifest.get("requires").and_then(|v| v.as_array()) {
-            let base_url = self.provider.source().base_url();
+            let base_url = self
+                .provider
+                .source()
+                .map_err(|e| LibsSyncError::ManifestMalformed(e.to_string()))?
+                .base_url();
 
             for req in requires {
                 if let (Some(suggests), Some(uid)) = (

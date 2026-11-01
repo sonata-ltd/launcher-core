@@ -43,10 +43,10 @@ pub enum MetaProvider {
 }
 
 impl MetaProvider {
-    pub fn source(&self) -> &'static dyn VersionSource {
+    pub fn source(&self) -> Result<&'static dyn VersionSource> {
         match self {
-            MetaProvider::Mojang => todo!(),
-            MetaProvider::Prism => &PrismSource,
+            Self::Prism => Ok(&PrismSource),
+            Self::Mojang => Err(VersionError::ProviderUnsupported(self.to_string())),
         }
     }
 }
