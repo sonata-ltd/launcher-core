@@ -27,8 +27,8 @@ pub fn collect(cx: &DiscoveryContext, out: &mut Vec<PathBuf>) {
         }
     }
 
-    // Our own downloads (future feature) — always considered.
-    scan_homes(&cx.own_runtimes, |_| true, out);
+    // Managed installations are registered only after explicit validation.
+    scan_homes(&cx.own_runtimes, |n| n != "managed" && n != ".managed", out);
 
     let Some(home) = cx.home.as_deref() else {
         return;

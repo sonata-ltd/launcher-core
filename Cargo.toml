@@ -14,8 +14,12 @@ futures = "0.3.30"
 surf = "2.3.2"
 chrono = { version = "0.4.38", features = ["serde"] }
 home = "0.5.9"
-uuid = { version = "1.11.0", features = ["v4", "v5"] }
+uuid = { version = "1.11.0", features = ["v4", "v5", "serde"] }
 sha1 = "0.10.6"
+sha2 = "0.10.9"
+flate2 = "1.1"
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "3.0", default-features = false, features = ["deflate"] }
 strum = { version = "0.27", features = ["derive"] }
 ts-rs = { version = "10.1", features = ["chrono-impl", "serde-json-impl", "no-serde-warnings"] }
 http-types = "2.12.0"

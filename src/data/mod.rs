@@ -166,6 +166,25 @@ impl GlobalState {
         Ok(added)
     }
 
+    pub async fn validate_managed_java(
+        self: &Arc<Self>,
+        id: uuid::Uuid,
+    ) -> crate::java::managed::Result<Arc<JavaRuntime>> {
+        let core = Arc::clone(self);
+        let (tx, rx) = async_channel::bounded(1);
+        task::spawn(async move {
+            let java = core.java();
+            let result = java.managed.validate(id, &java).await;
+            if result.is_ok() {
+                core.services.instances.assign_missing().await;
+            }
+            let _ = tx.send(result).await;
+        });
+        rx.recv()
+            .await
+            .map_err(|e| crate::java::managed::ManagedJavaError::new("validation", e))?
+    }
+
     pub fn java(&self) -> Arc<JavaService> {
         Arc::clone(&self.services.java)
     }

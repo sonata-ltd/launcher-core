@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::{instance::model::InstanceId, java::utils::DetectedJavaRuntime};
 
-/// How a runtime got into the registry: added by the user, or found by the
-/// search in `java::discovery`.
+/// How a runtime entered the registry: added, discovered, or installed by the launcher.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JavaSource {
     #[default]
     Manual,
     Discovered,
+    Managed,
 }
 
 impl JavaSource {
@@ -19,12 +19,14 @@ impl JavaSource {
         match self {
             Self::Manual => "manual",
             Self::Discovered => "discovered",
+            Self::Managed => "managed",
         }
     }
 
     pub(crate) fn parse(s: &str) -> Self {
         match s {
             "discovered" => Self::Discovered,
+            "managed" => Self::Managed,
             _ => Self::Manual,
         }
     }

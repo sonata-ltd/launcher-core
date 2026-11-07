@@ -21,6 +21,7 @@ pub struct JavaService {
     registry: Arc<JavaRegistry>,
     bus: EventBus,
     own_runtimes: PathBuf,
+    pub managed: Arc<super::managed::ManagedJavaService>,
     /// Held for the whole search. Auto-selection waits on it too, so an
     /// instance installed during the first-run search sees its results.
     discovery: Mutex<()>,
@@ -34,9 +35,16 @@ impl JavaService {
             db,
             registry: Arc::new(JavaRegistry::new(store, DEFAULT_JAVAREG_CACHE_SIZE)),
             bus,
+            managed: Arc::new(super::managed::ManagedJavaService::new(
+                own_runtimes.clone(),
+            )),
             own_runtimes,
             discovery: Mutex::new(()),
         }
+    }
+
+    pub(crate) fn managed_bus(&self) -> EventBus {
+        self.bus.clone()
     }
 
     pub(crate) fn get_registry(&self) -> Arc<JavaRegistry> {

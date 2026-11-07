@@ -7,3 +7,5 @@ pub mod service;
 pub mod storage;
 pub mod utils;
 pub mod version;
+
+pub mod managed;
