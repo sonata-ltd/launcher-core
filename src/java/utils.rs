@@ -5,6 +5,7 @@ use std::{
 };
 
 use async_std::{fs, future, io, process::Command};
+use futures::AsyncReadExt;
 use serde::Serialize;
 
 use crate::java::version::parse_major;
@@ -94,14 +95,75 @@ pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJa
 }
 
 async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::process::Output> {
-    cmd.kill_on_drop(true);
-    let fut = cmd.output();
-
-    match future::timeout(dur, fut).await {
-        Ok(Ok(out)) => Ok(out),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out")),
+    cmd.kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let result = future::timeout(dur, async {
+        let (status, stdout_result, stderr_result) = futures::join!(
+            child.status(),
+            read_diagnostic(stdout, &mut stdout_bytes),
+            read_diagnostic(stderr, &mut stderr_bytes)
+        );
+        stdout_result?;
+        stderr_result?;
+        status
+    })
+    .await;
+    let status = match result {
+        Ok(Ok(status)) => status,
+        failure => {
+            let _ = child.kill();
+            let _ = child.status().await;
+            let (kind, reason) = match failure {
+                Ok(Err(error)) => (error.kind(), error.to_string()),
+                _ => (io::ErrorKind::TimedOut, "Java process timed out".into()),
+            };
+            return Err(io::Error::new(
+                kind,
+                format!(
+                    "{reason}\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&stdout_bytes),
+                    String::from_utf8_lossy(&stderr_bytes)
+                ),
+            ));
+        }
+    };
+    let output = std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "Java exited with {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        )));
     }
+    Ok(output)
+}
+
+async fn read_diagnostic(
+    mut reader: impl futures::AsyncRead + Unpin,
+    output: &mut Vec<u8>,
+) -> io::Result<()> {
+    const LIMIT: usize = 64 * 1024;
+    let mut buffer = vec![0; 8192];
+    loop {
+        let n = reader.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        let keep = n.min(LIMIT.saturating_sub(output.len()));
+        output.extend_from_slice(&buffer[..keep]);
+    }
+    Ok(())
 }
 
 fn parse_option(output: &str, key: &str) -> Option<String> {
@@ -163,6 +225,48 @@ Property settings:
             parse_release_field(release, "JAVA_VERSION").as_deref(),
             Some("21.0.5")
         );
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn nonzero_exit_keeps_stdout_and_stderr() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf stdout; printf stderr >&2; exit 7"]);
+        let error = run_with_timeout(&mut command, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("stdout"));
+        assert!(error.to_string().contains("stderr"));
+        assert!(error.to_string().contains('7'));
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn timeout_terminates_process_and_keeps_partial_diagnostics() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf starting >&2; exec sleep 30"]);
+        let start = std::time::Instant::now();
+        let error = run_with_timeout(&mut command, Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("starting"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn output_is_drained_but_capture_is_bounded() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 100000 /dev/zero; head -c 100000 /dev/zero >&2",
+        ]);
+        let output = run_with_timeout(&mut command, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(output.stdout.len(), 64 * 1024);
+        assert_eq!(output.stderr.len(), 64 * 1024);
     }
 
     /// Runs the `java` on `PATH`: `cargo test -- --ignored`.
