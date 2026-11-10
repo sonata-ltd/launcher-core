@@ -14,7 +14,6 @@ use crate::{
     },
 };
 
-const HASH_CHUNK: usize = 500;
 const INSERT_CHUNK: usize = 150;
 
 pub struct DbLibStore {
@@ -115,25 +114,22 @@ impl DbLibStore {
 #[async_trait]
 impl SyncStore<LibInfo> for DbLibStore {
     async fn cached(&self, wanted: &[LibInfo]) -> Result<HashSet<String>, DbError> {
-        let mut found = HashSet::with_capacity(wanted.len());
+        let wanted = wanted.to_vec();
 
-        for chunk in wanted.chunks(HASH_CHUNK) {
-            let mut qb: QueryBuilder<Sqlite> =
-                QueryBuilder::new("SELECT hash FROM libraries WHERE hash IN (");
+        async_std::task::spawn_blocking(move || {
+            let mut found = HashSet::new();
 
-            let mut list = qb.separated(", ");
-
-            for lib in chunk {
-                list.push_bind(lib.hash().clone());
+            for lib in wanted {
+                if crate::modloader::files::matches(std::path::Path::new(lib.path()), lib.hash())
+                    .map_err(|e| DbError::InvalidInput(e.to_string()))?
+                {
+                    found.insert(lib.hash().clone());
+                }
             }
 
-            qb.push(")");
-
-            let hashes: Vec<String> = qb.build_query_scalar().fetch_all(&self.db.pool).await?;
-            found.extend(hashes);
-        }
-
-        Ok(found)
+            Ok(found)
+        })
+        .await
     }
 
     async fn register(&self, items: &[LibInfo]) -> Result<(), DbError> {
@@ -149,7 +145,7 @@ impl SyncStore<LibInfo> for DbLibStore {
                     .push_bind(lib.url().clone());
             });
 
-            qb.push(" ON CONFLICT(hash) DO NOTHING");
+            qb.push(" ON CONFLICT(hash) DO UPDATE SET name=excluded.name, path=excluded.path, native=excluded.native, url=excluded.url");
 
             qb.build().execute(&self.db.pool).await?;
         }

@@ -12,9 +12,8 @@ use crate::{
             OperationRegistry,
         },
     },
-    instance::download::manifest::load_cached,
     instance::{
-        self,
+        download::manifest::load_cached,
         error::InstanceError,
         event::InstanceEvent,
         launch::{execute::spawn_instance, prepare},
@@ -33,6 +32,7 @@ use crate::{
         select::{self, JavaRequirement},
         service::JavaService,
     },
+    modloader::model::LoaderSpec,
     version::provider::MetaProvider,
 };
 
@@ -48,6 +48,8 @@ pub struct InstanceService {
     paths: Arc<LauncherPaths>,
     running: RunningInstances,
     bus: EventBus,
+    install_jobs: crate::modloader::jobs::InstallJobs,
+    lifecycle: std::sync::Mutex<()>,
 }
 
 impl InstanceService {
@@ -71,6 +73,8 @@ impl InstanceService {
             paths,
             running: RunningInstances::new(bus.clone()),
             bus,
+            install_jobs: Default::default(),
+            lifecycle: std::sync::Mutex::new(()),
         }
     }
 
@@ -78,7 +82,24 @@ impl InstanceService {
         &self,
         name: String,
         version: String,
-        loader: String,
+        manifest_url: String,
+        meta_provider: String,
+    ) -> Result<Arc<InstanceRecord>> {
+        self.create_with_loader(
+            name,
+            version,
+            LoaderSpec::vanilla(),
+            manifest_url,
+            meta_provider,
+        )
+        .await
+    }
+
+    pub async fn create_with_loader(
+        &self,
+        name: String,
+        version: String,
+        loader: LoaderSpec,
         manifest_url: String,
         meta_provider: String,
     ) -> Result<Arc<InstanceRecord>> {
@@ -91,55 +112,116 @@ impl InstanceService {
         }
 
         MetaProvider::from_str(&meta_provider)?;
+        loader.validate(&version)?;
 
         let new = NewInstance {
             name,
             version,
-            loader,
+            loader: loader.kind.as_str().to_owned(),
+            loader_version: loader.version,
             manifest_url,
             meta_provider,
             dir,
         };
 
         let rec = self.registry.create(new).await?;
-
         self.bus.publish(rec.to_scan_msg());
 
         Ok(rec)
     }
 
-    pub async fn install(&self, id: InstanceId) -> Result<()> {
-        let rec = self.get_instance(id).await?;
-        let provider = MetaProvider::from_str(&rec.meta_provider)?;
+    pub async fn install(self: &Arc<Self>, id: InstanceId) -> Result<()> {
+        let job = {
+            let _guard = self
+                .lifecycle
+                .lock()
+                .map_err(|_| InstanceError::CreationFailed("lifecycle lock poisoned".into()))?;
 
+            if self.running.phase(id).is_some() {
+                return Err(InstanceError::AlreadyRunning(id));
+            }
+
+            self.install_jobs.begin(id)?
+        };
+
+        let service = Arc::clone(self);
+        let (tx, rx) = async_channel::bounded(1);
+
+        async_std::task::spawn(async move {
+            let result = service.install_inner(id, &job.cancel).await;
+            let _ = tx.send(result).await;
+
+            drop(job);
+        });
+
+        rx.recv()
+            .await
+            .map_err(|e| InstanceError::CreationFailed(e.to_string()))?
+    }
+
+    pub fn cancel_install(&self, id: InstanceId) {
+        self.install_jobs.cancel(id);
+    }
+
+    async fn install_inner(
+        &self,
+        id: InstanceId,
+        cancel: &crate::modloader::transfer::Cancel,
+    ) -> Result<()> {
+        let rec = self.get_instance(id).await?;
         let op = self.operations.begin(
-            "instance.install".to_string(),
+            "instance.install".into(),
             vec![
                 OperationStage::FetchManifest,
                 OperationStage::DownloadLibs,
+                OperationStage::CreateStructure,
                 OperationStage::DownloadAssets,
+                OperationStage::VerifyFiles,
             ],
         );
 
-        let requirement =
-            match instance::init::install(&rec, provider, &self.paths, Arc::clone(&self.db), &op)
-                .await
-            {
-                Ok(requirement) => {
-                    op.finish(Outcome::Completed);
-                    requirement
-                }
-                Err(e) => {
-                    op.finish(Outcome::Failed);
-                    return Err(e);
-                }
-            };
+        self.java_service.wait_discovery().await;
+        let java = self.java.list_all().await?;
 
-        // Outside the operation: an instance without a fitting Java is
-        // installed all the same, the user is told by `NoSuitableRuntime`.
-        self.auto_select(&rec, &requirement, true).await?;
+        let catalog = crate::modloader::catalog::ModloaderCatalog::new(
+            self.paths.meta().join("modloader-catalog"),
+        );
 
-        Ok(())
+        let result = crate::modloader::install::install(
+            &rec,
+            &self.paths,
+            Arc::clone(&self.db),
+            &catalog,
+            &java,
+            &op,
+            cancel,
+        )
+        .await;
+
+        match result {
+            Ok(profile) => {
+                op.finish(Outcome::Completed);
+                self.auto_select(
+                    &rec,
+                    &JavaRequirement {
+                        majors: profile.java.majors,
+                    },
+                    true,
+                )
+                .await?;
+                Ok(())
+            }
+            Err(e) => {
+                let outcome = if matches!(e, crate::modloader::error::ModloaderError::Cancelled) {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Failed
+                };
+
+                op.finish(outcome);
+                Err(e.into())
+            }
+        }
     }
 
     /// After new runtimes appear: picks a Java for every instance that has
@@ -165,12 +247,23 @@ impl InstanceService {
                 }
             }
 
-            let Some(manifest) = load_cached(&rec.manifest_url, self.paths.meta()).await else {
-                tracing::debug!(instance = %rec.id, "no cached manifest, not installed yet");
-                continue;
+            let requirement = match crate::modloader::storage::load(&self.db, rec.id).await {
+                Ok(Some(profile)) => JavaRequirement {
+                    majors: profile.java.majors,
+                },
+                Ok(None) if rec.loader == "vanilla" => {
+                    let Some(manifest) = load_cached(&rec.manifest_url, self.paths.meta()).await
+                    else {
+                        continue;
+                    };
+                    JavaRequirement::from_manifest(&manifest)
+                }
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(%error,"cannot load installed Java policy");
+                    continue;
+                }
             };
-
-            let requirement = JavaRequirement::from_manifest(&manifest);
 
             if let Err(e) = self.auto_select(&rec, &requirement, false).await {
                 tracing::warn!(instance = %rec.id, error = %e, "java auto-select failed");
@@ -195,7 +288,15 @@ impl InstanceService {
 
         let runtimes = self.java.list_all().await?;
 
-        match select::pick(&runtimes, requirement, select::host_arch()) {
+        let policy = crate::modloader::storage::load(&self.db, rec.id)
+            .await?
+            .map(|p| p.java)
+            .unwrap_or(crate::modloader::model::JavaPolicy {
+                majors: requirement.majors.clone(),
+                allow_newer: true,
+            });
+
+        match select::pick_with_policy(&runtimes, &policy, select::host_arch()) {
             Some((java, fit)) => {
                 tracing::info!(
                     instance = %rec.id,
@@ -231,11 +332,40 @@ impl InstanceService {
     }
 
     pub async fn launch(&self, id: InstanceId) -> Result<()> {
-        let reservation = self.running.reserve(id)?;
+        let reservation = {
+            let _guard = self
+                .lifecycle
+                .lock()
+                .map_err(|_| InstanceError::RunFailed("lifecycle lock poisoned".into()))?;
+
+            if self.install_jobs.busy(id) {
+                return Err(InstanceError::RunFailed("installed is active".into()));
+            }
+
+            self.running.reserve(id)?
+        };
 
         let rec = self.get_instance(id).await?;
         let settings = self.settings.effective(id).await?;
         let java = self.resolve_java(id, &settings).await?;
+
+        if let Some(profile) = crate::modloader::storage::load(&self.db, id).await? {
+            let command = crate::instance::launch::resolved::prepare(
+                &rec,
+                &settings,
+                &java,
+                &self.paths,
+                profile,
+            )
+            .await?;
+            reservation.commit(crate::instance::launch::resolved::spawn(command)?);
+
+            return Ok(());
+        }
+
+        if rec.loader != "vanilla" {
+            return Err(InstanceError::NotInstalled(id));
+        }
 
         let info =
             prepare::prepare(&rec, &settings, &java, &self.paths, Arc::clone(&self.db)).await?;

@@ -89,6 +89,31 @@ impl Downloadable for LibInfo {
 }
 
 impl LibInfo {
+    pub fn new(
+        name: String,
+        hash: String,
+        path: PathBuf,
+        url: String,
+        native: bool,
+    ) -> Result<Self, LibsSyncError> {
+        if !crate::modloader::files::hash_valid(&hash, 40) {
+            return Err(LibsSyncError::ManifestMalformed("invalid SHA-1".into()));
+        }
+
+        let path = path
+            .into_os_string()
+            .into_string()
+            .map_err(|_| LibsSyncError::ManifestMalformed("non-Unicode library path".into()))?;
+
+        Ok(Self {
+            hash,
+            name,
+            path,
+            url,
+            native,
+        })
+    }
+
     pub fn is_native(&self) -> bool {
         self.native
     }
@@ -109,9 +134,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
         db: Arc<Database>,
         op: &OperationHandle,
     ) -> Result<LibsOutcome, LibsSyncError> {
-        op.start_stage(STAGE_TYPE);
-        let started = Instant::now();
-
         let data = LibsData {
             manifest,
             paths,
@@ -124,47 +146,64 @@ impl<'a, 'b> LibsData<'a, 'b> {
             MetaProvider::Prism => data.parse_manifest_prism().await?,
         };
 
-        let order: Vec<String> = wanted.iter().map(|lib| lib.hash().clone()).collect();
+        Self::sync_prepared(id, wanted, db, op).await
+    }
+
+    pub async fn sync_prepared(
+        id: InstanceId,
+        wanted: Vec<LibInfo>,
+        db: Arc<Database>,
+        op: &OperationHandle,
+    ) -> Result<LibsOutcome, LibsSyncError> {
+        op.start_stage(STAGE_TYPE);
+        let started = Instant::now();
+
+        let mut unique = HashMap::new();
+
+        for lib in &wanted {
+            if let Some(previous) = unique.insert(lib.hash().clone(), lib) {
+                if previous.path() != lib.path() || previous.is_native() != lib.is_native() {
+                    return Err(LibsSyncError::ManifestMalformed(
+                           "legacy DB cannot represent one hash at different paths/roles; use InstalledProfile".into(),
+                       ));
+                }
+            }
+        }
 
         let store = DbLibStore::new(db);
+
         let outcome = Syncer::default()
             .run(
-                wanted,
+                wanted.clone(),
                 |lib| PathBuf::from(lib.path()),
                 &store,
                 op,
                 STAGE_TYPE,
             )
             .await?;
-
-        let mut by_hash: HashMap<&str, &LibInfo> =
-            HashMap::with_capacity(outcome.cached.len() + outcome.downloaded.len());
-
-        for lib in outcome.all() {
-            by_hash.entry(lib.hash().as_str()).or_insert(lib);
+        if !outcome.cached.is_empty() {
+            crate::instance::download::sync::SyncStore::register(&store, &outcome.cached).await?;
         }
 
-        let mut ordered: Vec<&LibInfo> = Vec::with_capacity(order.len());
-        let mut classpath = Vec::with_capacity(order.len());
-        let mut natives = Vec::new();
+        let mut seen = std::collections::HashSet::new();
 
-        for hash in &order {
-            let Some(lib) = by_hash.remove(hash.as_str()) else {
-                continue;
-            };
+        let ordered: Vec<&LibInfo> = wanted
+            .iter()
+            .filter(|lib| seen.insert(lib.hash().clone()))
+            .collect();
 
-            let path = PathBuf::from(lib.path());
+        let classpath = ordered
+            .iter()
+            .map(|lib| PathBuf::from(lib.path()))
+            .collect();
 
-            if lib.is_native() {
-                natives.push(path.clone());
-            }
-
-            classpath.push(path);
-            ordered.push(lib);
-        }
+        let natives = ordered
+            .iter()
+            .filter(|lib| lib.is_native())
+            .map(|lib| PathBuf::from(lib.path()))
+            .collect();
 
         store.link_instance(id, &ordered).await?;
-
         op.complete_stage(StageResult {
             status: Outcome::Completed,
             stage: STAGE_TYPE,
@@ -223,4 +262,55 @@ fn construct_os_name() -> Result<&'static str, LibsSyncError> {
     // If OS/arch combination is not supported
     #[allow(unreachable_code)]
     Err(LibsSyncError::OsNotAvailable)
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    #[async_std::test]
+    async fn prepared_files_repair_missing_db_rows_without_network() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("library.jar");
+        std::fs::write(&file, b"fixture").unwrap();
+        let hash = crate::modloader::files::sha1_file(&file).unwrap();
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        sqlx::query("INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider) VALUES(1,'prepared','prepared','1.20.1','vanilla','https://example.invalid/base.json','prism')").execute(&db.pool).await.unwrap();
+        let operations = crate::data::registry::operation::OperationRegistry::new(
+            crate::bus::EventBus::new(128),
+        );
+        let op = operations.begin("test".into(), vec![STAGE_TYPE]);
+        let library = LibInfo {
+            hash,
+            name: "fixture".into(),
+            path: file.to_string_lossy().into_owned(),
+            url: "https://example.invalid/never-requested".into(),
+            native: false,
+        };
+        let result = LibsData::sync_prepared(1.into(), vec![library], Arc::clone(&db), &op)
+            .await
+            .unwrap();
+        assert_eq!(result.classpath, vec![file]);
+        assert_eq!(linked_libs(1.into(), db).await.unwrap().len(), 1);
+        op.finish(Outcome::Completed);
+    }
+    #[async_std::test]
+    async fn legacy_cache_rejects_corrupted_file_despite_db_entry() {
+        use crate::instance::download::sync::SyncStore;
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("library.jar");
+        std::fs::write(&file, b"fixture").unwrap();
+        let hash = crate::modloader::files::sha1_file(&file).unwrap();
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        let store = DbLibStore::new(db);
+        let lib = LibInfo {
+            hash,
+            name: "fixture".into(),
+            path: file.to_string_lossy().into_owned(),
+            url: "https://example.invalid/unused".into(),
+            native: false,
+        };
+        store.register(&[lib.clone()]).await.unwrap();
+        std::fs::write(file, b"corrupted").unwrap();
+        assert!(store.cached(&[lib]).await.unwrap().is_empty());
+    }
 }

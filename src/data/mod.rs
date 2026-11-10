@@ -26,6 +26,7 @@ use crate::{
         model::{JavaRuntime, NewJavaRuntime},
         service::JavaService,
     },
+    modloader::catalog::ModloaderCatalog,
     utils::download::sweep::sweep_partials,
     version::catalog::VersionCatalog,
 };
@@ -34,6 +35,7 @@ pub struct LauncherServices {
     java: Arc<JavaService>,
     versions: Arc<VersionCatalog>,
     instances: Arc<InstanceService>,
+    modloaders: Arc<crate::modloader::catalog::ModloaderCatalog>,
     options: Arc<OptionsService>,
 }
 
@@ -112,6 +114,9 @@ impl GlobalState {
                 paths.meta().join("version-catalog"),
             )),
             instances: instance_service,
+            modloaders: Arc::new(crate::modloader::catalog::ModloaderCatalog::new(
+                paths.meta().join("modloader-catalog"),
+            )),
             options: Arc::new(OptionsService::new(
                 Arc::clone(&db),
                 instance_registry,
@@ -195,6 +200,10 @@ impl GlobalState {
 
     pub fn instances(&self) -> Arc<InstanceService> {
         Arc::clone(&self.services.instances)
+    }
+
+    pub fn modloaders(&self) -> Arc<ModloaderCatalog> {
+        Arc::clone(&self.services.modloaders)
     }
 
     pub fn options(&self) -> Arc<OptionsService> {
