@@ -16,6 +16,9 @@ sonata-launcher-core cli usage:
     java-discover
     java-list
     create   <name> <version> <loader> <manifest_url> <provider>
+    create-modded <name> <mc> <loader> <loader-version> <manifest-url> <provider>
+    register-cleanroom <release-descriptor.json>
+    register-cleanroom-url <loader-version> <official-mmc-zip-url> <java-majors-comma-separated>
     set-java <instance_id> <java_id>
     install  <instance_id>
     launch   <instance_id>
@@ -80,13 +83,12 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             }
         }
 
-        ["create", name, version, loader, manifest_url, provider] => {
+        ["create", name, version, manifest_url, provider] => {
             let rec = state
                 .instances()
                 .create(
                     (*name).to_string(),
                     (*version).to_string(),
-                    (*loader).to_string(),
                     (*manifest_url).to_string(),
                     (*provider).to_string(),
                 )
@@ -95,6 +97,51 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             println!("instance created: id={} dir={}", rec.id, rec.dir);
         }
 
+        ["create-modded", name, mc, loader, version, url, provider] => {
+            use sonata_launcher_core::modloader::model::{LoaderKind, LoaderSpec};
+            let kind = LoaderKind::ALL
+                .into_iter()
+                .find(|kind| kind.as_str() == *loader)
+                .ok_or("unknown loader")?;
+            let rec = state
+                .instances()
+                .create_with_loader(
+                    (*name).into(),
+                    (*mc).into(),
+                    LoaderSpec {
+                        kind,
+                        version: Some((*version).into()),
+                    },
+                    (*url).into(),
+                    (*provider).into(),
+                )
+                .await?;
+            println!("instance created: id={} dir={}", rec.id, rec.dir);
+        }
+        ["register-cleanroom-url", version, url, majors] => {
+            let majors = majors
+                .split(',')
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()?;
+            sonata_launcher_core::modloader::cleanroom::import_archive(
+                &state.modloaders().repository,
+                (*version).into(),
+                (*url).into(),
+                majors,
+            )
+            .await?;
+            println!("Cleanroom release registered from archive");
+        }
+        ["register-cleanroom", descriptor] => {
+            let bytes = async_std::fs::read(descriptor).await?;
+            let release = serde_json::from_slice(&bytes)?;
+            sonata_launcher_core::modloader::cleanroom::register(
+                &state.modloaders().repository,
+                release,
+            )
+            .await?;
+            println!("Cleanroom release registered");
+        }
         ["set-java", id, java_id] => {
             let view = state
                 .options()
