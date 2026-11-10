@@ -2,6 +2,7 @@ pub mod bus;
 pub mod data;
 pub mod instance;
 pub mod java;
+pub mod modloader;
 pub mod utils;
 pub mod version;
 

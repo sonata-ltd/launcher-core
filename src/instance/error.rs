@@ -70,6 +70,9 @@ pub enum InstanceError {
 
     #[error(transparent)]
     DB(#[from] DbError),
+
+    #[error(transparent)]
+    Modloader(#[from] crate::modloader::error::ModloaderError),
 }
 
 pub type Result<T> = std::result::Result<T, InstanceError>;

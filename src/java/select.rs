@@ -1,16 +1,11 @@
-//! Which registered runtime an instance should use. Pure: no I/O, no DB.
-
 use crate::java::{model::JavaRuntime, version::sort_key};
 
-/// What a Minecraft version asks of Java.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JavaRequirement {
-    /// Acceptable majors, best first. Empty: the manifest did not say.
     pub majors: Vec<u32>,
 }
 
 impl JavaRequirement {
-    /// Prism: `compatibleJavaMajors: [21]`; Mojang: `javaVersion.majorVersion: 21`.
     pub fn from_manifest(manifest: &serde_json::Value) -> Self {
         let prism = manifest
             .get("compatibleJavaMajors")
@@ -41,14 +36,10 @@ impl JavaRequirement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fit {
-    /// The major is one the version lists.
     Exact,
-    /// Newer than every listed major: runs, but not what the version was built for.
     Newer,
 }
 
-/// `amd64`/`x86_64` → `x86_64`, `aarch64`/`arm64` → `aarch64`,
-/// `x86`/`i386`/`i686` → `x86`, `arm`/`armv7l` → `arm`.
 pub fn normalize_arch(arch: &str) -> &str {
     match arch {
         "amd64" | "x86_64" => "x86_64",
@@ -59,25 +50,16 @@ pub fn normalize_arch(arch: &str) -> &str {
     }
 }
 
-/// The launcher's own architecture, spelled as `normalize_arch` spells it.
 pub fn host_arch() -> &'static str {
     normalize_arch(std::env::consts::ARCH)
 }
 
-/// Unknown arch (rows added before it was recorded) counts as compatible.
 fn arch_ok(java: &JavaRuntime, host: &str) -> bool {
     java.arch
         .as_deref()
         .is_none_or(|arch| normalize_arch(arch) == host)
 }
 
-/// The best runtime for `req`:
-/// 1. a listed major: the newest build of the first listed major there is;
-/// 2. otherwise the nearest newer major (its newest build), unless the version
-///    needs Java 8: pre-1.17 versions and their modloaders break on 9+;
-/// 3. otherwise nothing.
-///
-/// An unknown requirement gets the newest runtime there is, as `Newer`.
 pub fn pick<'a, J: AsRef<JavaRuntime>>(
     runtimes: &'a [J],
     req: &JavaRequirement,
@@ -120,6 +102,33 @@ pub fn pick<'a, J: AsRef<JavaRuntime>>(
         .min()?;
 
     newest_of(nearest).map(|j| (j, Fit::Newer))
+}
+
+pub fn pick_with_policy<'a, J: AsRef<JavaRuntime>>(
+    runtimes: &'a [J],
+    policy: &crate::modloader::model::JavaPolicy,
+    host: &str,
+) -> Option<(&'a JavaRuntime, Fit)> {
+    let usable: Vec<&JavaRuntime> = runtimes
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|java| policy.accepts(java.major) && arch_ok(java, host))
+        .collect();
+    let chosen = pick(
+        &usable,
+        &JavaRequirement {
+            majors: policy.majors.clone(),
+        },
+        host,
+    )
+    .map(|(j, fit)| (j.id, fit));
+    chosen.and_then(|(id, fit)| {
+        runtimes
+            .iter()
+            .map(AsRef::as_ref)
+            .find(|j| j.id == id)
+            .map(|j| (j, fit))
+    })
 }
 
 #[cfg(test)]
