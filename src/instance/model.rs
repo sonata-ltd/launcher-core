@@ -34,6 +34,7 @@ pub struct InstanceRecord {
     pub dir: String,
     pub version: String,
     pub loader: String,
+    pub loader_version: Option<String>,
     pub manifest_url: String,
     pub meta_provider: String,
 }
@@ -62,6 +63,7 @@ pub struct NewInstance {
     pub dir: String,
     pub version: String,
     pub loader: String,
+    pub loader_version: Option<String>,
     pub manifest_url: String,
     pub meta_provider: String,
 }

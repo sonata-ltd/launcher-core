@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n                INSERT INTO instances (name, dir, version, loader, manifest_url, meta_provider)\n                VALUES (?, ?, ?, ?, ?, ?)\n                RETURNING id AS \"id: InstanceId\",\n                name, dir, version, loader, manifest_url, meta_provider\n            ",
+  "query": "\n                SELECT id AS \"id: InstanceId\",\n                name, dir, version, loader, loader_version, manifest_url, meta_provider FROM instances WHERE id = ?\n            ",
   "describe": {
     "columns": [
       {
@@ -29,18 +29,23 @@
         "type_info": "Text"
       },
       {
-        "name": "manifest_url",
+        "name": "loader_version",
         "ordinal": 5,
         "type_info": "Text"
       },
       {
-        "name": "meta_provider",
+        "name": "manifest_url",
         "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "meta_provider",
+        "ordinal": 7,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 6
+      "Right": 1
     },
     "nullable": [
       false,
@@ -48,9 +53,10 @@
       false,
       false,
       false,
+      true,
       false,
       false
     ]
   },
-  "hash": "d967dbd6653e3f8a5c0dde4e73cdf03c3e2fc6058fe134af9fc7b15d74938d55"
+  "hash": "eed6aca2a18d3fcce27224bc4f9a5a1bac9f6165194604dbbba708d2fe935fb7"
 }

@@ -37,15 +37,16 @@ impl InstanceStore for DbInstanceStore {
         let rec = sqlx::query_as!(
             InstanceRecord,
             r#"
-                INSERT INTO instances (name, dir, version, loader, manifest_url, meta_provider)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO instances (name, dir, version, loader, loader_version, manifest_url, meta_provider)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 RETURNING id AS "id: InstanceId",
-                name, dir, version, loader, manifest_url, meta_provider
+                    name, dir, version, loader, loader_version, manifest_url, meta_provider
             "#,
             new.name,
             new.dir,
             new.version,
             new.loader,
+            new.loader_version,
             new.manifest_url,
             new.meta_provider
         )
@@ -76,7 +77,7 @@ impl InstanceStore for DbInstanceStore {
             InstanceRecord,
             r#"
                 SELECT id AS "id: InstanceId",
-                name, dir, version, loader, manifest_url, meta_provider FROM instances WHERE id = ?
+                name, dir, version, loader, loader_version, manifest_url, meta_provider FROM instances WHERE id = ?
             "#,
             id
         )
@@ -97,7 +98,7 @@ impl InstanceStore for DbInstanceStore {
         Ok(sqlx::query_as!(
             InstanceRecord,
             r#"SELECT id AS "id: InstanceId",
-            name, dir, version, loader, manifest_url, meta_provider FROM instances ORDER BY id"#
+            name, dir, version, loader, loader_version, manifest_url, meta_provider FROM instances ORDER BY id"#
         )
         .fetch_all(&self.db.pool)
         .await?)
