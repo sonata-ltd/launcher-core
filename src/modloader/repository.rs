@@ -3,7 +3,6 @@ use super::{
     files, http,
 };
 use serde_json::Value;
-use shlex::bytes;
 use std::{
     path::{Path, PathBuf},
     time::{Duration, SystemTime},

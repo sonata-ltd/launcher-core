@@ -182,7 +182,7 @@ pub fn apply(target: &mut Components, component: &Value) -> Result<()> {
 
 pub async fn prism(
     repo: &Repository,
-    version: &str,
+    game_version: &str,
     base_url: &str,
     locals: HashMap<String, Value>,
     roots: Vec<(String, String)>,
@@ -272,7 +272,7 @@ pub async fn prism(
                     } else if let Some((v, _)) = states.get(id) {
                         v.clone()
                     } else if id == "net.minecraft" {
-                        version.into()
+                        game_version.into()
                     } else {
                         suggested
                             .ok_or_else(|| {
@@ -291,7 +291,7 @@ pub async fn prism(
         }
     }
 
-    result.manifest["id"] = Value::String(version.into());
+    result.manifest["id"] = Value::String(game_version.into());
     Ok(result)
 }
 

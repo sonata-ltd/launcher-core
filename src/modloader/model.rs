@@ -2,6 +2,8 @@ use std::{collections::HashSet, fmt, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::modloader::artifacts::Wanted;
+
 use super::error::{ModloaderError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
