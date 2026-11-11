@@ -57,7 +57,7 @@ pub struct LaunchInfo {
     memory_max: i64,
     jvm_args: Vec<String>,
     java_bin_path: JavaRuntime,
-    version: String,
+    // version: String,
 }
 
 #[derive(Debug, Default)]
@@ -208,10 +208,10 @@ impl LaunchInfoBuilder {
         let java_bin_path = self.preferred_java.ok_or(LaunchError::JavaRuntimeMissing)?;
         let manifest = self.manifest.ok_or(LaunchError::ManifestMissing)?;
 
-        let version = match self.version {
-            Some(v) => v,
-            None => String::from("Version is not retrieved"),
-        };
+        // let version = match self.version {
+        //     Some(v) => v,
+        //     None => String::from("Version is not retrieved"),
+        // };
 
         let natives_dir = self.natives_dir.unwrap_or_default();
 
@@ -226,7 +226,7 @@ impl LaunchInfoBuilder {
             memory_max: self.memory_max.unwrap_or(DEFAULT_MEMORY_MAX),
             jvm_args: self.jvm_args,
             java_bin_path,
-            version,
+            // version,
         })
     }
 }
