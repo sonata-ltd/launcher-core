@@ -1,9 +1,17 @@
 use super::{args::offline_uuid, arguments, traits::StartupTraits};
 use crate::{
     data::layout::LauncherPaths,
-    instance::{error::InstanceError, model::InstanceRecord, settings::EffectiveSettings, Result},
-    java::{model::JavaRuntime, select},
-    modloader::{archive, files, model::InstalledProfile},
+    instance::{
+        download::{artifacts, transfer},
+        error::InstanceError,
+        init::model::InstalledProfile,
+        model::InstanceRecord,
+        settings::EffectiveSettings,
+        Result,
+    },
+    java::model::JavaRuntime,
+    modloader::archive,
+    utils::files,
 };
 use serde_json::Value;
 use std::{collections::HashMap, path::PathBuf};
@@ -56,7 +64,7 @@ pub async fn prepare(
     for item in &profile.artifacts {
         let path = files::child(&maven, &item.path)?;
 
-        crate::modloader::transfer::check_file(path.clone(), item.sha1.clone()).await?;
+        transfer::check_file(path.clone(), item.sha1.clone()).await?;
 
         if item.classpath {
             classpath.push(path.clone());
@@ -130,7 +138,7 @@ pub async fn prepare(
         ("launcher_version".into(), env!("CARGO_PKG_VERSION").into()),
     ]);
 
-    let mut context = crate::modloader::artifacts::host();
+    let mut context = artifacts::host();
 
     let os_version = os_version();
     context.os_version = &os_version;

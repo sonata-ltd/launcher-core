@@ -12,6 +12,7 @@ use crate::{
         download::{libs::LibInfo, sync::SyncStore},
         model::InstanceId,
     },
+    utils::files,
 };
 
 const INSERT_CHUNK: usize = 150;
@@ -120,7 +121,7 @@ impl SyncStore<LibInfo> for DbLibStore {
             let mut found = HashSet::new();
 
             for lib in wanted {
-                if crate::modloader::files::matches(std::path::Path::new(lib.path()), lib.hash())
+                if files::matches(std::path::Path::new(lib.path()), lib.hash())
                     .map_err(|e| DbError::InvalidInput(e.to_string()))?
                 {
                     found.insert(lib.hash().clone());

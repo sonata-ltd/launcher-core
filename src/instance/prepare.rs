@@ -3,14 +3,14 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 
 use crate::{
+    instance::download::transfer::Cancel,
     modloader::{
         components::{self, Components},
         error::Result,
-        files,
         model::MetadataPin,
         repository::Repository,
-        transfer::Cancel,
     },
+    utils::files,
     version::provider::{prism::PrismSource, MetaProvider, VersionSource},
 };
 

@@ -23,7 +23,7 @@ use crate::{
         },
         model::InstanceId,
     },
-    utils::{download::Downloadable, maven},
+    utils::{download::Downloadable, files, maven},
     version::provider::MetaProvider,
 };
 
@@ -96,7 +96,7 @@ impl LibInfo {
         url: String,
         native: bool,
     ) -> Result<Self, LibsSyncError> {
-        if !crate::modloader::files::hash_valid(&hash, 40) {
+        if !files::hash_valid(&hash, 40) {
             return Err(LibsSyncError::ManifestMalformed("invalid SHA-1".into()));
         }
 
@@ -272,7 +272,7 @@ mod prepared_tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("library.jar");
         std::fs::write(&file, b"fixture").unwrap();
-        let hash = crate::modloader::files::sha1_file(&file).unwrap();
+        let hash = files::sha1_file(&file).unwrap();
         let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
         sqlx::query("INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider) VALUES(1,'prepared','prepared','1.20.1','vanilla','https://example.invalid/base.json','prism')").execute(&db.pool).await.unwrap();
         let operations = crate::data::registry::operation::OperationRegistry::new(
@@ -299,7 +299,7 @@ mod prepared_tests {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("library.jar");
         std::fs::write(&file, b"fixture").unwrap();
-        let hash = crate::modloader::files::sha1_file(&file).unwrap();
+        let hash = files::sha1_file(&file).unwrap();
         let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
         let store = DbLibStore::new(db);
         let lib = LibInfo {

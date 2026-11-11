@@ -14,10 +14,10 @@ use crate::{
     },
     instance::{
         self,
-        download::manifest::load_cached,
+        download::{self, manifest::load_cached},
         error::InstanceError,
         event::InstanceEvent,
-        install::{InstallContext, InstallRequest},
+        init::install::{InstallContext, InstallRequest},
         launch::{execute::spawn_instance, prepare},
         model::{InstanceId, InstanceRecord, NewInstance},
         registry::InstanceRegistry,
@@ -171,7 +171,7 @@ impl InstanceService {
     async fn install_inner(
         &self,
         id: InstanceId,
-        cancel: &crate::modloader::transfer::Cancel,
+        cancel: &download::transfer::Cancel,
     ) -> Result<()> {
         let rec = self.get_instance(id).await?;
 
@@ -219,7 +219,7 @@ impl InstanceService {
             cancel,
         };
 
-        let result = instance::install::execute(&request, &context).await;
+        let result = instance::init::install::execute(&request, &context).await;
 
         match result {
             Ok(profile) => {
@@ -235,7 +235,7 @@ impl InstanceService {
                 Ok(())
             }
             Err(e) => {
-                let outcome = if matches!(e, crate::modloader::error::ModloaderError::Cancelled) {
+                let outcome = if e.is_cancelled() {
                     Outcome::Cancelled
                 } else {
                     Outcome::Failed
@@ -270,7 +270,7 @@ impl InstanceService {
                 }
             }
 
-            let requirement = match crate::modloader::storage::load(&self.db, rec.id).await {
+            let requirement = match instance::init::storage::load(&self.db, rec.id).await {
                 Ok(Some(profile)) => JavaRequirement {
                     majors: profile.java.majors,
                 },
@@ -311,7 +311,7 @@ impl InstanceService {
 
         let runtimes = self.java.list_all().await?;
 
-        let policy = crate::modloader::storage::load(&self.db, rec.id)
+        let policy = instance::init::storage::load(&self.db, rec.id)
             .await?
             .map(|p| p.java)
             .unwrap_or(crate::modloader::model::JavaPolicy {
@@ -372,7 +372,7 @@ impl InstanceService {
         let settings = self.settings.effective(id).await?;
         let java = self.resolve_java(id, &settings).await?;
 
-        if let Some(profile) = crate::modloader::storage::load(&self.db, id).await? {
+        if let Some(profile) = instance::init::storage::load(&self.db, id).await? {
             let command = crate::instance::launch::resolved::prepare(
                 &rec,
                 &settings,
