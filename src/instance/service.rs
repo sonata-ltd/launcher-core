@@ -13,9 +13,11 @@ use crate::{
         },
     },
     instance::{
+        self,
         download::manifest::load_cached,
         error::InstanceError,
         event::InstanceEvent,
+        install::{InstallContext, InstallRequest},
         launch::{execute::spawn_instance, prepare},
         model::{InstanceId, InstanceRecord, NewInstance},
         registry::InstanceRegistry,
@@ -32,7 +34,10 @@ use crate::{
         select::{self, JavaRequirement},
         service::JavaService,
     },
-    modloader::model::LoaderSpec,
+    modloader::{
+        error::ModloaderError,
+        model::{LoaderKind, LoaderSpec},
+    },
     version::provider::MetaProvider,
 };
 
@@ -169,6 +174,31 @@ impl InstanceService {
         cancel: &crate::modloader::transfer::Cancel,
     ) -> Result<()> {
         let rec = self.get_instance(id).await?;
+
+        self.java_service.wait_discovery().await;
+        let java = self.java.list_all().await?;
+
+        let catalog = crate::modloader::catalog::ModloaderCatalog::new(
+            self.paths.meta().join("modloader-catalog"),
+        );
+
+        let loader_kind = LoaderKind::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == rec.loader)
+            .ok_or_else(|| ModloaderError::Invalid("unknown loader".into()))?;
+
+        let request = InstallRequest {
+            instance_id: rec.id,
+            instance_dir_name: rec.dir.clone(),
+            game_version: rec.version.clone(),
+            manifest_url: rec.manifest_url.clone(),
+            meta_provider: MetaProvider::from_str(&rec.meta_provider)?,
+            loader: LoaderSpec {
+                kind: loader_kind,
+                version: rec.loader_version.clone(),
+            },
+        };
+
         let op = self.operations.begin(
             "instance.install".into(),
             vec![
@@ -180,23 +210,16 @@ impl InstanceService {
             ],
         );
 
-        self.java_service.wait_discovery().await;
-        let java = self.java.list_all().await?;
-
-        let catalog = crate::modloader::catalog::ModloaderCatalog::new(
-            self.paths.meta().join("modloader-catalog"),
-        );
-
-        let result = crate::modloader::install::install(
-            &rec,
-            &self.paths,
-            Arc::clone(&self.db),
-            &catalog,
-            &java,
-            &op,
+        let context = InstallContext {
+            paths: &self.paths,
+            db: Arc::clone(&self.db),
+            catalog: &catalog,
+            modloader_java_runtimes: &java,
+            op: &op,
             cancel,
-        )
-        .await;
+        };
+
+        let result = instance::install::execute(&request, &context).await;
 
         match result {
             Ok(profile) => {
