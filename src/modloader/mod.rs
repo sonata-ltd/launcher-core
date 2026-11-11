@@ -10,6 +10,7 @@ pub mod forge;
 pub mod http;
 pub mod install;
 pub mod jobs;
+pub mod loaders;
 pub mod maven;
 pub mod model;
 pub mod profile;
