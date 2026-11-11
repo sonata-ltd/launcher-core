@@ -241,12 +241,18 @@ impl ManagedJavaService {
                         registry.register(new).await.map_err(|e| ManagedJavaError::new("registration", e))?
                     }
                 };
-                service.update(id, |record| {
-                    record.snapshot.stage = ManagedJavaStage::Ready;
-                    record.snapshot.runtime_id = Some(runtime.id);
-                    record.snapshot.error = None;
-                });
-                service.persist(id).await?;
+                let mut ready_record = service.entries.lock().expect("managed entries poisoned")
+                    .get(&id).map(|entry| entry.record.clone())
+                    .ok_or_else(|| ManagedJavaError::new("not_found", id))?;
+                ready_record.snapshot.stage = ManagedJavaStage::Ready;
+                ready_record.snapshot.runtime_id = Some(runtime.id);
+                ready_record.snapshot.error = None;
+                // Ready must also be recoverable from disk when polling callers
+                // observe it, including after the validation caller is dropped.
+                let directory = service.root.join(".managed/operations");
+                let persisted_record = ready_record.clone();
+                task::spawn_blocking(move || write_record(&directory, &persisted_record)).await?;
+                service.update(id, |record| *record = ready_record);
                 bus.publish(crate::java::model::JavaEvent::ListChanged);
                 Ok(runtime)
             }.await;
