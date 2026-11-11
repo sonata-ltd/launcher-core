@@ -1,6 +1,6 @@
-use crate::modloader::{
-    error::{ModloaderError, Result},
-    maven::MavenCoordinate,
+use crate::{
+    modloader::error::{ModloaderError, Result},
+    utils::maven::MavenCoordinate,
 };
 
 use std::{collections::HashMap, path::Path};

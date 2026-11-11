@@ -1,304 +1,199 @@
-use self::{model::ModernInstallProfile, processor::ProcessorCommand};
-use super::{
-    archive, components,
-    error::{ModloaderError, Result},
-    files,
-    maven::MavenCoordinate,
-    repository::Repository,
-    transfer::{self, Cancel},
-};
-use crate::data::registry::operation::message::stage::OperationStage;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
+
+use crate::data::registry::operation::handle::OperationHandle;
+use crate::instance::download::transfer::Cancel;
+use crate::java;
+use crate::java::model::JavaRuntime;
+use crate::modloader::components;
+use crate::modloader::components::Components;
+use crate::modloader::error::{ModloaderError, Result};
+use crate::modloader::forge::install::Prepared;
+use crate::modloader::model::MetadataPin;
+use crate::modloader::repository::Repository;
+use crate::modloader::{
+    catalog::ModloaderCatalog,
+    model::{LoaderKind, LoaderSpec},
 };
+use crate::utils::files;
+use crate::utils::maven::MavenCoordinate;
 
-pub mod model;
-pub mod processor;
-pub mod tokens;
+mod install;
+mod model;
+mod processor;
+mod tokens;
 
-pub async fn installer(
-    repo: &Repository,
-    component: &Value,
-    destination: &Path,
-    cancel: &Cancel,
-) -> Result<PathBuf> {
-    let mut installers = Vec::new();
-
-    for value in component
-        .get("mavenFiles")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(name) = value.get("name").and_then(Value::as_str) {
-            if MavenCoordinate::parse(name)?.classifier.as_deref() == Some("installer") {
-                installers.push(value);
-            }
-        }
-    }
-
-    if installers.len() != 1 {
-        return Err(ModloaderError::Unsupported(
-            "component has no unique installer artefact".into(),
-        ));
-    }
-
-    let descriptor = installers[0]
-        .pointer("/downloads/artifact")
-        .ok_or_else(|| ModloaderError::Invalid("installer artifact missing".into()))?;
-    let url = descriptor
-        .get("url")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ModloaderError::Invalid("installer URL missing".into()))?;
-    let hash = descriptor
-        .get("sha1")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ModloaderError::Invalid("installer hash missing".into()))?;
-
-    let _ = repo;
-
-    transfer::download(url, destination, Some(hash), cancel).await?;
-    Ok(destination.into())
+pub struct PrepareRequest {
+    pub game_version: String,
+    pub loader_kind: LoaderKind,
+    pub loader_version: String,
 }
 
-pub struct Prepared {
-    pub profile: ModernInstallProfile,
-    pub installer: PathBuf,
-    pub extracted: PathBuf,
+pub struct PrepareContext<'a> {
+    pub repo: &'a Repository,
+    pub catalog: &'a ModloaderCatalog,
+    pub maven_dir: &'a Path,
+    pub work_dir: &'a Path,
+    pub cancel: &'a Cancel,
 }
 
-pub async fn prepare(
-    installer: PathBuf,
-    extracted: PathBuf,
-    maven: PathBuf,
-    game_version: &str,
-    base: &mut components::Components,
-) -> Result<Prepared> {
-    let input = installer.clone();
-    let dir = extracted.clone();
+pub struct PreparedForge {
+    pub components: components::Components,
+    pub installer: Option<Prepared>,
+}
 
-    let value: Value = async_std::task::spawn_blocking(move || {
-        archive::extract(&input, &dir, &[])?;
-        Ok::<Value, ModloaderError>(serde_json::from_slice(&archive::read(
-            &input,
-            "install_profile.json",
-            4 * 1024 * 1024,
-        )?)?)
-    })
-    .await?;
+pub async fn prepare<'a>(
+    request: PrepareRequest,
+    context: &PrepareContext<'a>,
+    mut game_components: Components,
+) -> Result<PreparedForge> {
+    context.cancel.check()?;
 
-    if value.get("install").is_some() || value.get("versionInfo").is_some() {
-        return Err(ModloaderError::Unsupported(
-            "
-            legacy installer; use legacy Prism component"
-                .into(),
-        ));
-    }
-
-    let profile: ModernInstallProfile = serde_json::from_value(value)?;
-    if profile.spec.is_some_and(|s| s > 1) || profile.minecraft != game_version {
-        return Err(ModloaderError::Unsupported(
-            "installer spec or Minecraft version mismatch".into(),
-        ));
-    }
-
-    let input = installer.clone();
-    let json = profile.json.clone();
-    let mut patch: Value = async_std::task::spawn_blocking(move || {
-        Ok::<Value, ModloaderError>(serde_json::from_slice(&archive::read(
-            &input,
-            &json,
-            4 * 1024 * 1024,
-        )?)?)
-    })
-    .await?;
-
-    if patch
-        .get("inheritsFrom")
-        .and_then(Value::as_str)
-        .is_some_and(|v| v != game_version)
-    {
+    if !matches!(
+        request.loader_kind,
+        LoaderKind::Forge | LoaderKind::NeoForge
+    ) {
         return Err(ModloaderError::Invalid(
-            "installer version targets another Minecraft version".into(),
+            "forge::prepare supports only Forge and NeoForge loaders".into(),
         ));
     }
 
-    // Modern game arguments extend the inherited Minecraft command. Legacy
-    // minecraftArguments remains a complete template handled by components::apply.
-    patch
-        .as_object_mut()
-        .ok_or_else(|| ModloaderError::Invalid("version profile is not object".into()))?
-        .remove("inheritsFrom");
-    components::apply(base, &patch)?;
-    base.maven_files.extend(profile.libraries.clone());
+    let spec = LoaderSpec {
+        kind: request.loader_kind,
+        version: Some(request.loader_version),
+    };
 
-    let embedded = extracted.join("maven");
-    if embedded.is_dir() {
-        copy_tree(embedded, maven).await?;
-    }
+    spec.validate(&request.game_version)?;
 
-    Ok(Prepared {
-        profile,
-        installer,
-        extracted,
-    })
-}
+    let entry = context
+        .catalog
+        .versions(spec.kind, &request.game_version)
+        .await?
+        .into_iter()
+        .find(|v| Some(&v.version) == spec.version.as_ref())
+        .ok_or_else(|| {
+            ModloaderError::Invalid("loader not compatible with current Minecraft version".into())
+        })?;
 
-async fn copy_tree(source: PathBuf, destination: PathBuf) -> Result<()> {
-    async_std::task::spawn_blocking(move || {
-        let mut stack = vec![(source, destination)];
+    let url = entry
+        .component_url
+        .ok_or_else(|| ModloaderError::Invalid("missing component URL".into()))?;
 
-        while let Some((source, target)) = stack.pop() {
-            std::fs::create_dir_all(&target)?;
+    let modloader_manifest_bytes = context.repo.bytes(&url, entry.sha256.as_deref()).await?;
+    let modloader_manifest_value: Value = serde_json::from_slice(&modloader_manifest_bytes)?;
 
-            for item in std::fs::read_dir(source)? {
-                let item = item?;
-                let dest = target.join(item.file_name());
-                let kind = item.file_type()?;
+    game_components.pins.push(MetadataPin {
+        url,
+        sha256: files::sha256(&modloader_manifest_bytes),
+    });
 
-                if kind.is_symlink() {
-                    return Err(ModloaderError::Invalid("embedded Maven symlink".into()));
-                }
+    async_std::fs::create_dir_all(&context.maven_dir).await?;
 
-                if kind.is_dir() {
-                    stack.push((item.path(), dest));
-                } else {
-                    std::fs::copy(item.path(), dest)?;
-                }
-            }
-        }
-        Ok(())
-    })
-    .await
-}
-
-pub async fn run(
-    prepared: Prepared,
-    libraries: PathBuf,
-    minecraft: PathBuf,
-    game_root: PathBuf,
-    java: PathBuf,
-    cancel: &Cancel,
-    op: &crate::data::registry::operation::handle::OperationHandle,
-) -> Result<()> {
-    let mut tokens = HashMap::from([
-        ("SIDE".into(), "client".into()),
-        (
-            "MINECRAFT_VERSION".into(),
-            prepared.profile.minecraft.clone(),
-        ),
-        (
-            "MINECRAFT_JAR".into(),
-            minecraft.to_string_lossy().into_owned(),
-        ),
-        ("ROOT".into(), game_root.to_string_lossy().into_owned()),
-        (
-            "INSTALLER".into(),
-            prepared.installer.to_string_lossy().into_owned(),
-        ),
-        (
-            "LIBRARY_DIR".into(),
-            libraries.to_string_lossy().into_owned(),
-        ),
-    ]);
-
-    for (key, side) in &prepared.profile.data {
-        let Some(raw) = &side.client else {
-            continue;
-        };
-
-        let value = if raw.starts_with('[') {
-            tokens::resolve_argument(raw, &tokens, &libraries)?
-        } else if raw.starts_with('\'') {
-            tokens::expand_tokens(raw, &tokens)?
-        } else {
-            let path = PathBuf::from(raw.trim_start_matches('/'));
-
-            files::relative(&path)?;
-
-            let path = files::child(&prepared.extracted, &path)?;
-
-            if !path.is_file() {
-                return Err(ModloaderError::Invalid(
-                    "installer data file missing".into(),
-                ));
-            }
-
-            path.to_string_lossy().into_owned()
-        };
-
-        tokens.insert(key.clone(), value);
-    }
-
-    let total = prepared
-        .profile
-        .processors
-        .iter()
-        .filter(|step| step.applies_to_client())
-        .count();
-
-    let mut completed = 0;
-    op.update_stage(OperationStage::CreateStructure, 0, total, None);
-
-    for (index, step) in prepared.profile.processors.into_iter().enumerate() {
-        if !step.applies_to_client() {
-            continue;
-        }
-
-        cancel.check()?;
-
-        let jar = libraries.join(MavenCoordinate::parse(&step.jar)?.path());
-        let input = jar.clone();
-        let main_class =
-            async_std::task::spawn_blocking(move || archive::main_class(&input)).await?;
-        let mut classpath = vec![jar];
-
-        for item in step.classpath {
-            classpath.push(libraries.join(MavenCoordinate::parse(&item)?.path()));
-        }
-
-        let args = step
-            .args
-            .iter()
-            .map(|arg| tokens::resolve_argument(&arg, &tokens, &libraries))
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut outputs = Vec::new();
-        for (path, hash) in step.outputs {
-            let path = PathBuf::from(tokens::resolve_argument(&path, &tokens, &libraries)?);
-
-            if !path.starts_with(&libraries) {
-                return Err(ModloaderError::Invalid(
-                    "processor output escapes installation Maven root".into(),
-                ));
-            }
-
-            if let Some(parent) = path.parent() {
-                async_std::fs::create_dir_all(parent).await?;
-            }
-
-            outputs.push((path, tokens::expand_tokens(&hash, &tokens)?));
-        }
-
-        processor::run(
-            ProcessorCommand {
-                java: java.clone(),
-                main_class,
-                classpath,
-                args,
-                cwd: prepared.extracted.clone(),
-                log: prepared.extracted.join(format!("processor-{index}.log")),
-                outputs,
-            },
-            &cancel.0,
+    if modloader_manifest_value
+        .get("mainClass")
+        .and_then(Value::as_str)
+        == Some("io.github.zekerzhayard.forgewrapper.installer.Main")
+    {
+        let installer_jar = install::installer(
+            context.repo,
+            &modloader_manifest_value,
+            &context.work_dir.join("installer.jar"),
+            context.cancel,
         )
         .await?;
 
-        completed += 1;
-        op.update_stage(OperationStage::CreateStructure, completed, total, None);
+        context.cancel.check()?;
+
+        let prepared = install::prepare(
+            installer_jar,
+            context.work_dir.join("installer"),
+            context.maven_dir.into(),
+            &request.game_version,
+            &mut game_components,
+        )
+        .await?;
+
+        Ok(PreparedForge {
+            components: game_components,
+            installer: Some(prepared),
+        })
+    } else {
+        if spec.kind == LoaderKind::NeoForge {
+            return Err(ModloaderError::Unsupported(
+                "NeoForge component entrypoint schema".into(),
+            ));
+        }
+
+        components::apply(&mut game_components, &modloader_manifest_value)?;
+
+        Ok(PreparedForge {
+            components: game_components,
+            installer: None,
+        })
     }
+}
+
+pub struct FinalizeRequest<'a> {
+    pub game_dir: &'a Path,
+    pub game_version: &'a str,
+    pub prepared: Prepared,
+    pub maven_dir: &'a Path,
+}
+
+pub struct FinalizeContext<'a> {
+    pub modloader_java_runtimes: &'a [Arc<JavaRuntime>],
+    pub op: &'a OperationHandle,
+    pub cancel: &'a Cancel,
+}
+
+pub async fn finalize<'a>(
+    request: FinalizeRequest<'a>,
+    context: &FinalizeContext<'a>,
+    game_components: &Components,
+) -> Result<()> {
+    context.cancel.check()?;
+
+    let java = context
+        .modloader_java_runtimes
+        .iter()
+        .filter(|j| {
+            j.arch
+                .as_deref()
+                .is_none_or(|a| java::select::normalize_arch(a) == java::select::host_arch())
+        })
+        .max_by_key(|j| j.major)
+        .ok_or_else(|| {
+            ModloaderError::Invalid("register a Java runtime for installer processors".into())
+        })?;
+
+    let client = game_components
+        .manifest
+        .get("mainJar")
+        .and_then(|v| v.get("name"))
+        .and_then(Value::as_str)
+        .map(MavenCoordinate::parse)
+        .transpose()?
+        .map(|v| v.path())
+        .unwrap_or(
+            MavenCoordinate::parse(&format!(
+                "com.mojang:minecraft:{}:client",
+                request.game_version
+            ))?
+            .path(),
+        );
+
+    install::run(
+        request.prepared,
+        request.maven_dir.to_path_buf(),
+        request.maven_dir.join(client),
+        request.game_dir.to_path_buf(),
+        PathBuf::from(&java.exec_path),
+        context.cancel,
+        context.op,
+    )
+    .await?;
 
     Ok(())
 }
