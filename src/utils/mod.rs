@@ -6,7 +6,9 @@ use std::{
 use home::home_dir;
 
 pub mod download;
+pub mod files;
 pub mod maven;
+pub mod url;
 
 pub async fn get_home_dir() -> Option<PathBuf> {
     match env::var("SONATA_MC_HOME") {
