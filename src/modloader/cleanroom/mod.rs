@@ -1,12 +1,17 @@
 use std::path::Path;
 
+use crate::instance::download::transfer::Cancel;
 use crate::modloader::{
     self,
     components::Components,
     error::{ModloaderError, Result},
     repository::Repository,
-    transfer::Cancel,
 };
+
+mod package;
+mod releases;
+
+pub use releases::{get_releases, import_archive, register, CleanroomRelease};
 
 pub(crate) struct PrepareRequest {
     pub(crate) loader_version: String,
@@ -25,7 +30,7 @@ pub(crate) async fn prepare<'a>(
 ) -> Result<Components> {
     context.cancel.check()?;
 
-    let releases = modloader::cleanroom::releases(context.repo).await?;
+    let releases = modloader::cleanroom::get_releases(context.repo).await?;
     let release = releases
         .iter()
         .find(|v| v.version == request.loader_version)
@@ -35,7 +40,7 @@ pub(crate) async fn prepare<'a>(
             )
         })?;
 
-    let game_components = modloader::cleanroom::prepare(
+    let game_components = package::prepare(
         context.repo,
         release,
         context.work_dir,
