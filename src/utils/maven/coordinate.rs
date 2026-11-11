@@ -77,7 +77,7 @@ impl MavenCoordinate {
 }
 
 #[cfg(test)]
-mod tests2 {
+mod tests {
     use super::*;
 
     #[test]
