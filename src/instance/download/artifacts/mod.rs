@@ -1,15 +1,21 @@
-use super::{
-    error::{ModloaderError, Result},
-    files,
-    maven::MavenCoordinate,
-    model::InstalledArtifact,
-    repository,
-    transfer::{self, Cancel},
-};
+use crate::instance::init::model::InstalledArtifact;
 use crate::{
     data::registry::operation::message::stage::OperationStage,
-    instance::launch::arguments::{self, RuleContext},
+    instance::{
+        download::{
+            http,
+            transfer::{self, Cancel},
+        },
+        rules::{self, RuleContext},
+    },
+    utils::{files, maven::MavenCoordinate, url},
 };
+
+pub mod error;
+use error::{ArtifactError, Result};
+
+#[cfg(test)]
+mod tests;
 use futures::{stream, StreamExt, TryFutureExt, TryStreamExt};
 use serde_json::{json, Value};
 use std::{
@@ -62,7 +68,7 @@ fn descriptor(
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
-        .or_else(|| repository.and_then(|base| repository::relative_url(base, &path).ok()));
+        .or_else(|| repository.and_then(|base| url::relative_url(base, &path).ok()));
     let sha1 = value
         .get("sha1")
         .and_then(Value::as_str)
@@ -73,7 +79,7 @@ fn descriptor(
         .as_ref()
         .is_some_and(|hash| !files::hash_valid(hash, 40))
     {
-        return Err(ModloaderError::Invalid("invalid artifact hash".into()));
+        return Err(ArtifactError::Invalid("invalid artifact hash".into()));
     }
 
     Ok(Wanted {
@@ -103,9 +109,9 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
 
         for library in values {
             if let Some(rules) = library.get("rules") {
-                if !arguments::rules_allow(
+                if !rules::rules_allow(
                     rules.as_array().ok_or_else(|| {
-                        ModloaderError::Invalid("library rules must be array".into())
+                        ArtifactError::Invalid("library rules must be array".into())
                     })?,
                     &context,
                 )? {
@@ -116,7 +122,7 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
             let name = library
                 .get("name")
                 .and_then(Value::as_str)
-                .ok_or_else(|| ModloaderError::Invalid("library has no Maven coordinate".into()))?;
+                .ok_or_else(|| ArtifactError::Invalid("library has no Maven coordinate".into()))?;
 
             let repo = library.get("url").and_then(Value::as_str);
             let downloads = library.get("downloads");
@@ -148,7 +154,7 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
                         .and_then(|d| d.get("classifiers"))
                         .and_then(|c| c.get(&classifier))
                         .ok_or_else(|| {
-                            ModloaderError::Unsupported(format!(
+                            ArtifactError::Unsupported(format!(
                                 "missing native classifier: {classifier}"
                             ))
                         })?;
@@ -179,7 +185,7 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
         let name = main
             .get("name")
             .and_then(Value::as_str)
-            .ok_or_else(|| ModloaderError::Invalid("mainJar has no name".into()))?;
+            .ok_or_else(|| ArtifactError::Invalid("mainJar has no name".into()))?;
 
         let value = main.pointer("/downloads/artifact").unwrap_or(&Value::Null);
         result.push(descriptor(value, name, None, true, false)?);
@@ -187,7 +193,7 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
         let version = manifest
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| ModloaderError::Invalid("missing MC id".into()))?;
+            .ok_or_else(|| ArtifactError::Invalid("missing MC id".into()))?;
 
         result.push(descriptor(
             client,
@@ -202,7 +208,7 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
         let id = logging
             .get("id")
             .and_then(Value::as_str)
-            .ok_or_else(|| ModloaderError::Invalid("logging file id missing".into()))?;
+            .ok_or_else(|| ArtifactError::Invalid("logging file id missing".into()))?;
 
         let mut entry = descriptor(logging, "org.sonata:logging:1", None, false, false)?;
         entry.path = PathBuf::from("sonata-logging").join(id);
@@ -220,7 +226,7 @@ pub fn parse(manifest: &mut Value, maven_files: &[Value]) -> Result<Vec<Wanted>>
         if let Some(index) = indices.get(&wanted.path).copied() {
             let old: &mut Wanted = &mut unique[index];
             if old.sha1.is_some() && wanted.sha1.is_some() && old.sha1 != wanted.sha1 {
-                return Err(ModloaderError::Invalid(
+                return Err(ArtifactError::Invalid(
                     "different hashes for same artifact path".into(),
                 ));
             }
@@ -293,10 +299,10 @@ pub async fn hydrate(
             if let Some(url) = wanted.url {
                 let sidecar = if wanted.sha1.is_none() {
                     let mut checksum_url = http_types::Url::parse(&url)
-                        .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
+                        .map_err(|e| ArtifactError::Invalid(e.to_string()))?;
                     checksum_url.set_path(&format!("{}.sha1", checksum_url.path()));
 
-                    super::http::get_bytes(checksum_url.as_str(), 4096)
+                    http::get_bytes(checksum_url.as_str(), 4096)
                         .await
                         .ok()
                         .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -316,7 +322,7 @@ pub async fn hydrate(
                 .await?;
             }
 
-            Ok::<(), ModloaderError>(())
+            Ok::<(), ArtifactError>(())
         };
         work.map_ok(move |_| name)
     }))
@@ -355,14 +361,15 @@ pub async fn finish(
             let path = files::child(&root, &wanted.path)?;
             let hash = files::sha1_file(&path)?;
 
-            if wanted
+            if let Some(expected) = wanted
                 .sha1
-                .is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash))
+                .filter(|expected| !expected.eq_ignore_ascii_case(&hash))
             {
-                return Err(ModloaderError::Invalid(format!(
-                    "runtime checksum mismatch: {}",
-                    path.display()
-                )));
+                return Err(ArtifactError::ChecksumMismatch {
+                    path,
+                    expected,
+                    actual: hash,
+                });
             }
 
             result.push(InstalledArtifact {
@@ -375,7 +382,7 @@ pub async fn finish(
             count.fetch_add(1, std::sync::atomic::Ordering::Release);
         }
 
-        Ok::<_, ModloaderError>(result)
+        Ok::<_, ArtifactError>(result)
     });
 
     futures::pin_mut!(work);
