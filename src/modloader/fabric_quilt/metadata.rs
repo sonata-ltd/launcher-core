@@ -2,11 +2,10 @@ use http_types::Url;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::modloader::{files, model::MetadataPin};
+use crate::{instance::download::http::get_bytes, modloader::model::MetadataPin, utils::files};
 
-use super::{
+use crate::modloader::{
     error::{ModloaderError, Result},
-    http::get_bytes,
     model::LoaderKind,
     repository::Repository,
 };
@@ -106,4 +105,46 @@ pub async fn profile(
         manifest: manifest_value,
         pin,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    use crate::{
+        modloader::{
+            model::{LoaderKind, MetadataPin},
+            repository::Repository,
+        },
+        utils::files,
+    };
+
+    #[async_std::test]
+    async fn pinned_fabric_and_quilt_profiles_load_without_catalog_or_network() {
+        for (kind, host, version) in [
+            (LoaderKind::Fabric, "meta.fabricmc.net", "v2"),
+            (LoaderKind::Quilt, "meta.quiltmc.org", "v3"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let url =
+                format!("https://{host}/{version}/versions/loader/1.20.1/fixture/profile/json");
+            let data =
+                serde_json::to_vec(&json!({"inheritsFrom":"1.20.1","mainClass":"example.Loader"}))
+                    .unwrap();
+            files::atomic_write(
+                &temp
+                    .path()
+                    .join(format!("{}.json", files::sha256(url.as_bytes()))),
+                &data,
+            )
+            .unwrap();
+            let repo = Repository::new(temp.path().into()).pinned(&[MetadataPin {
+                url,
+                sha256: files::sha256(&data),
+            }]);
+            let profile = profile(&repo, kind, "1.20.1", "fixture").await.unwrap();
+            assert_eq!(profile.manifest["mainClass"], "example.Loader");
+        }
+    }
 }

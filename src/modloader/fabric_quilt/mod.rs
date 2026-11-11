@@ -1,7 +1,13 @@
-use crate::modloader::{
-    self, components::Components, error::Result, model::LoaderKind, repository::Repository,
-    transfer::Cancel,
+use crate::{
+    instance::download::transfer::Cancel,
+    modloader::{
+        self, components::Components, error::Result, model::LoaderKind, repository::Repository,
+    },
 };
+
+mod metadata;
+
+pub use metadata::versions;
 
 pub struct PrepareRequest<'a> {
     pub game_version: &'a str,
@@ -21,7 +27,7 @@ pub async fn prepare<'a>(
 ) -> Result<Components> {
     context.cancel.check()?;
 
-    let profile = modloader::fabric_quilt::profile(
+    let profile = metadata::profile(
         context.repo,
         request.loader_kind,
         &request.game_version,
