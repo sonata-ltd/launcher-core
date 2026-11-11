@@ -1,6 +1,6 @@
-use super::{
-    error::{ModloaderError, Result},
-    files,
+use crate::{
+    instance::download::error::{DownloadError, Result},
+    utils::files,
 };
 use async_std::{fs, task};
 use futures::{AsyncReadExt, AsyncWriteExt};
@@ -14,13 +14,16 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Default)]
 pub struct Cancel(pub Arc<AtomicBool>);
 
 impl Cancel {
     pub fn check(&self) -> Result<()> {
         if self.0.load(Ordering::Acquire) {
-            Err(ModloaderError::Cancelled)
+            Err(DownloadError::Cancelled)
         } else {
             Ok(())
         }
@@ -39,7 +42,7 @@ pub async fn download(
 ) -> Result<String> {
     if let Some(hash) = expected {
         if !files::hash_valid(hash, 40) {
-            return Err(ModloaderError::Invalid("invalid SHA-1".into()));
+            return Err(DownloadError::Invalid("invalid SHA-1".into()));
         }
     }
 
@@ -56,7 +59,7 @@ pub async fn download(
 
     let parent = destination
         .parent()
-        .ok_or_else(|| ModloaderError::Invalid("download path has no parent".into()))?;
+        .ok_or_else(|| DownloadError::Invalid("download path has no parent".into()))?;
 
     fs::create_dir_all(parent).await?;
 
@@ -68,7 +71,7 @@ pub async fn download(
 
         let result = async {
             let mut current =
-                http_types::Url::parse(url).map_err(|e| ModloaderError::Invalid(e.to_string()))?;
+                http_types::Url::parse(url).map_err(|e| DownloadError::Invalid(e.to_string()))?;
 
             let mut redirects = 0;
             let mut response = loop {
@@ -81,34 +84,31 @@ pub async fn download(
                         .header("Accept-Encoding", "identity"),
                 )
                 .await
-                .map_err(|_| ModloaderError::Http("download response timeout".into()))?
-                .map_err(|e| ModloaderError::Http(e.to_string()))?;
+                .map_err(|_| DownloadError::Timeout("response"))?
+                .map_err(|e| DownloadError::Http(e.to_string()))?;
 
                 if !response.status().is_redirection() {
                     break response;
                 }
 
                 if redirects >= 20 {
-                    return Err(ModloaderError::Http("too many redirects".into()));
+                    return Err(DownloadError::Http("too many redirects".into()));
                 }
 
                 let location = response
                     .header("Location")
                     .map(|h| h.last().as_str())
-                    .ok_or_else(|| ModloaderError::Http("redirect without Location".into()))?;
+                    .ok_or_else(|| DownloadError::Http("redirect without Location".into()))?;
 
                 current = current
                     .join(location)
-                    .map_err(|e| ModloaderError::Http(e.to_string()))?;
+                    .map_err(|e| DownloadError::Http(e.to_string()))?;
 
                 redirects += 1;
             };
 
             if !response.status().is_success() {
-                return Err(ModloaderError::Http(format!(
-                    "{}: {url}",
-                    response.status()
-                )));
+                return Err(DownloadError::Http(format!("{}: {url}", response.status())));
             }
 
             let mut reader = response.take_body().into_reader();
@@ -123,7 +123,7 @@ pub async fn download(
                 let count =
                     async_std::future::timeout(Duration::from_secs(30), reader.read(&mut buffer))
                         .await
-                        .map_err(|_| ModloaderError::Http("download body timeout".into()))??;
+                        .map_err(|_| DownloadError::Timeout("body"))??;
 
                 if count == 0 {
                     break;
@@ -132,7 +132,9 @@ pub async fn download(
                 size += count as u64;
 
                 if size > 2 * 1024 * 1024 * 1024 {
-                    return Err(ModloaderError::Invalid("artifact exceeds 2 GiB".into()));
+                    return Err(DownloadError::SizeLimit {
+                        limit: 2 * 1024 * 1024 * 1024,
+                    });
                 }
 
                 digest.update(&buffer[..count]);
@@ -140,10 +142,14 @@ pub async fn download(
             }
 
             let hash = format!("{:x}", digest.finalize());
-            if expected.is_some_and(|expected| !expected.eq_ignore_ascii_case(&hash)) {
-                return Err(ModloaderError::Invalid(format!(
-                    "artifact checksum mismatch: {url}"
-                )));
+            if let Some(expected) =
+                expected.filter(|expected| !expected.eq_ignore_ascii_case(&hash))
+            {
+                return Err(DownloadError::ChecksumMismatch {
+                    url: url.into(),
+                    expected: expected.into(),
+                    actual: hash,
+                });
             }
 
             output.sync_all().await?;
@@ -169,10 +175,7 @@ pub async fn download(
             Err(error) => {
                 let _ = fs::remove_file(&temporary).await;
 
-                if matches!(
-                    error,
-                    ModloaderError::Cancelled | ModloaderError::Invalid(_)
-                ) {
+                if !error.is_retryable() {
                     return Err(error);
                 }
 
@@ -183,7 +186,7 @@ pub async fn download(
         task::sleep(Duration::from_millis(500 * 2u64.pow(attempt))).await;
     }
 
-    Err(last.unwrap_or_else(|| ModloaderError::Http("download failed".into())))
+    Err(last.unwrap_or_else(|| DownloadError::Http("download failed".into())))
 }
 
 pub async fn place(
@@ -247,7 +250,7 @@ async fn cache_blob(source: &Path, destination: &Path) -> Result<()> {
 
 pub async fn check_file(path: PathBuf, expected: String) -> Result<()> {
     if !task::spawn_blocking(move || files::matches(&path, &expected)).await? {
-        return Err(ModloaderError::Invalid(
+        return Err(DownloadError::Invalid(
             "runtime file missing or corrupt; repair installation".into(),
         ));
     }
