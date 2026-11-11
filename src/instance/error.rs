@@ -1,7 +1,12 @@
 use crate::{
     data::db::DbError,
-    instance::{launch::LaunchError, model::InstanceId},
+    instance::{
+        download::error::DownloadError, init::error::InitError, launch::LaunchError,
+        model::InstanceId,
+    },
     java::error::JavaError,
+    modloader::error::ModloaderError,
+    utils::files::FileError,
     version::error::VersionError,
 };
 use thiserror::Error;
@@ -72,7 +77,16 @@ pub enum InstanceError {
     DB(#[from] DbError),
 
     #[error(transparent)]
-    Modloader(#[from] crate::modloader::error::ModloaderError),
+    Modloader(#[from] ModloaderError),
+
+    #[error(transparent)]
+    File(#[from] FileError),
+
+    #[error(transparent)]
+    Download(#[from] DownloadError),
+
+    #[error(transparent)]
+    Init(#[from] InitError),
 }
 
 pub type Result<T> = std::result::Result<T, InstanceError>;

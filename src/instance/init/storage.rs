@@ -1,9 +1,7 @@
 use crate::{
     data::db::{Database, DbError},
-    instance::model::InstanceId,
+    instance::{init::model::InstalledProfile, model::InstanceId},
 };
-
-use super::model::InstalledProfile;
 
 pub async fn load(
     db: &Database,

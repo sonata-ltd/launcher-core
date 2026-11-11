@@ -1,8 +1,6 @@
-use std::{collections::HashSet, fmt, path::PathBuf};
+use std::{collections::HashSet, fmt};
 
 use serde::{Deserialize, Serialize};
-
-use crate::modloader::artifacts::Wanted;
 
 use super::error::{ModloaderError, Result};
 
@@ -128,24 +126,4 @@ impl JavaPolicy {
 pub struct MetadataPin {
     pub url: String,
     pub sha256: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstalledArtifact {
-    pub path: PathBuf,
-    pub sha1: String,
-    pub classpath: bool,
-    pub native: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InstalledProfile {
-    pub format_version: u32,
-    pub minecraft: String,
-    pub loader: LoaderSpec,
-    pub manifest: serde_json::Value,
-    pub java: JavaPolicy,
-    pub libraries_root: PathBuf,
-    pub artifacts: Vec<InstalledArtifact>,
-    pub metadata: Vec<MetadataPin>,
 }

@@ -1,8 +1,5 @@
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
-#[cfg(test)]
-mod tests;
-
 use crate::{
     data::{
         db::Database,
@@ -17,20 +14,28 @@ use crate::{
     },
     instance::{
         self,
-        download::{assets::AssetsData, manifest::get_assets_manifest},
+        download::{
+            artifacts::{self, Wanted},
+            assets::AssetsData,
+            manifest::get_assets_manifest,
+            transfer::Cancel,
+        },
+        init::{
+            self,
+            error::{InitError, Result},
+            model::InstalledProfile,
+            workspace::InstallWorkspace,
+        },
         model::InstanceId,
-        workspace::InstallWorkspace,
     },
     java::model::JavaRuntime,
     modloader::{
         self,
-        artifacts::{self, Wanted},
         catalog::ModloaderCatalog,
-        components,
-        error::{ModloaderError, Result},
-        loaders::{cleanroom, fabric_quilt, forge},
-        model::{InstalledProfile, JavaPolicy, LoaderKind, LoaderSpec, MetadataPin},
-        transfer::Cancel,
+        cleanroom, components,
+        error::ModloaderError,
+        fabric_quilt, forge,
+        model::{JavaPolicy, LoaderKind, LoaderSpec, MetadataPin},
     },
     version::provider::MetaProvider,
 };
@@ -100,13 +105,11 @@ pub(crate) async fn execute<'a>(
 
         context.cancel.check()?;
 
-        modloader::storage::publish(&context.db, request.instance_id, &profile)
-            .await
-            .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
+        init::storage::publish(&context.db, request.instance_id, &profile).await?;
 
         complete(context.op, OperationStage::VerifyFiles, started);
 
-        Ok::<InstalledProfile, ModloaderError>(profile)
+        Ok::<InstalledProfile, InitError>(profile)
     }
     .await;
 
@@ -125,7 +128,7 @@ pub(crate) async fn execute<'a>(
             if let Err(cleanup_error) = workspace.cleanup_failed().await {
                 tracing::warn!(
                     error = %cleanup_error,
-                    "Failed to remove unfinished installation work files"
+                    "Failed to remove unfinished installation"
                 );
             }
 
@@ -135,14 +138,14 @@ pub(crate) async fn execute<'a>(
 }
 
 pub(crate) struct UnvalidatedProfile {
-    pub format_version: u32,
-    pub minecraft: String,
-    pub loader: LoaderSpec,
-    pub manifest: serde_json::Value,
-    pub java: JavaPolicy,
-    pub libraries_root: PathBuf,
-    pub wanted: Vec<Wanted>,
-    pub metadata: Vec<MetadataPin>,
+    format_version: u32,
+    minecraft: String,
+    loader: LoaderSpec,
+    manifest: serde_json::Value,
+    java: JavaPolicy,
+    libraries_root: PathBuf,
+    wanted: Vec<Wanted>,
+    metadata: Vec<MetadataPin>,
 }
 
 async fn install<'a>(
@@ -154,9 +157,7 @@ async fn install<'a>(
 
     let loader_spec = request.loader.clone();
 
-    let previous_installation = modloader::storage::load(&context.db, request.instance_id)
-        .await
-        .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
+    let previous_installation = init::storage::load(&context.db, request.instance_id).await?;
 
     let pinned_repo = context.catalog.repository.pinned(
         previous_installation
@@ -272,7 +273,7 @@ async fn install<'a>(
     context.op.start_stage(OperationStage::CreateStructure);
 
     if let Some(prepared) = forge_installer {
-        modloader::loaders::forge::finalize(
+        modloader::forge::finalize(
             forge::FinalizeRequest {
                 game_dir: &context
                     .paths
@@ -299,12 +300,9 @@ async fn install<'a>(
         &game_components.manifest,
         context.paths.assets().join("indexes"),
     )
-    .await
-    .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
+    .await?;
 
-    AssetsData::sync(&assets, context.paths, Arc::clone(&context.db), context.op)
-        .await
-        .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
+    AssetsData::sync(&assets, context.paths, Arc::clone(&context.db), context.op).await?;
 
     let profile = UnvalidatedProfile {
         format_version: 1,
