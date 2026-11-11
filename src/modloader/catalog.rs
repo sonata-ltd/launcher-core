@@ -1,3 +1,5 @@
+use crate::utils::{files, url};
+
 use super::error::{ModloaderError, Result};
 use serde::Deserialize;
 
@@ -93,7 +95,7 @@ impl ModloaderCatalog {
                     "net.neoforged"
                 };
 
-                let url = super::repository::url(
+                let url = url::append_segments(
                     "https://meta.prismlauncher.org/v1/",
                     &[uid, "index.json"],
                 )?;
@@ -105,14 +107,14 @@ impl ModloaderCatalog {
                     .into_iter()
                     .map(|entry| {
                         if !seen.insert(entry.version.clone())
-                            || !super::files::hash_valid(&entry.sha256, 64)
+                            || !files::hash_valid(&entry.sha256, 64)
                         {
                             return Err(ModloaderError::Invalid(
                                 "invalid/duplicate component version".into(),
                             ));
                         }
 
-                        let url = super::repository::url(
+                        let url = url::append_segments(
                             "https://meta.prismlauncher.org/v1/",
                             &[uid, &format!("{}.json", entry.version)],
                         )?;
@@ -128,7 +130,7 @@ impl ModloaderCatalog {
                     })
                     .collect()
             }
-            K::Cleanroom => Ok(super::cleanroom::releases(&self.repository)
+            K::Cleanroom => Ok(super::cleanroom::get_releases(&self.repository)
                 .await?
                 .into_iter()
                 .filter(|v| v.minecraft == mc)

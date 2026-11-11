@@ -1,8 +1,5 @@
-use super::{
-    error::{ModloaderError, Result},
-    transfer::Cancel,
-};
-use crate::instance::model::InstanceId;
+use super::error::{ModloaderError, Result};
+use crate::instance::{download::transfer::Cancel, model::InstanceId};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

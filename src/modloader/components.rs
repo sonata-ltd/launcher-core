@@ -1,8 +1,9 @@
+use crate::utils::{files, maven::MavenCoordinate, url};
+
 use super::{
     error::{ModloaderError, Result},
-    maven::MavenCoordinate,
     model::MetadataPin,
-    repository::{self, Repository},
+    repository::Repository,
 };
 
 use serde_json::{json, Value};
@@ -225,11 +226,12 @@ pub async fn prism(
                 let component = if let Some(local) = locals.get(&uid) {
                     local.clone()
                 } else {
-                    let url = repository::url(base_url, &[&uid, &format!("{requested}.json")])?;
+                    let url =
+                        url::append_segments(base_url, &[&uid, &format!("{requested}.json")])?;
                     let bytes = repo.bytes(&url, None).await?;
                     result.pins.push(MetadataPin {
                         url,
-                        sha256: super::files::sha256(&bytes),
+                        sha256: files::sha256(&bytes),
                     });
                     serde_json::from_slice(&bytes)?
                 };

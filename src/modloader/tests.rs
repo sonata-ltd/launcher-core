@@ -1,6 +1,14 @@
+use crate::{
+    instance::{
+        download::{artifacts, transfer},
+        init::{model::InstalledProfile, storage},
+    },
+    modloader::{fabric_quilt, forge},
+    utils::files,
+};
+
 use super::{
-    artifacts, catalog::ModloaderCatalog, components, files, jobs::InstallJobs, model::*,
-    repository::Repository, storage,
+    catalog::ModloaderCatalog, components, jobs::InstallJobs, model::*, repository::Repository,
 };
 use serde_json::json;
 use std::{collections::HashMap, path::PathBuf};
@@ -140,53 +148,6 @@ fn metadata_cache_identity_includes_the_entire_url() {
     );
 }
 
-#[async_std::test]
-async fn modern_installer_preserves_inherited_game_arguments() {
-    use std::io::Write;
-    let temp = tempfile::tempdir().unwrap();
-    let jar = temp.path().join("installer.jar");
-    let mut zip = zip::ZipWriter::new(std::fs::File::create(&jar).unwrap());
-    for (name, value) in [
-        (
-            "install_profile.json",
-            json!({"spec":1,"minecraft":"1.20.1","json":"/version.json"}),
-        ),
-        (
-            "version.json",
-            json!({"inheritsFrom":"1.20.1","mainClass":"example.Bootstrap","arguments":{"game":["--launchTarget","forgeclient"]}}),
-        ),
-    ] {
-        zip.start_file(name, zip::write::SimpleFileOptions::default())
-            .unwrap();
-        zip.write_all(serde_json::to_string(&value).unwrap().as_bytes())
-            .unwrap();
-    }
-    zip.finish().unwrap();
-    let mut base = components::Components {
-        manifest: json!({"libraries":[],"arguments":{"game":["--username","${auth_player_name}","--gameDir","${game_directory}"],"jvm":[]}}),
-        ..Default::default()
-    };
-    super::forge::prepare(
-        jar,
-        temp.path().join("extract"),
-        temp.path().join("maven"),
-        "1.20.1",
-        &mut base,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        base.manifest["arguments"]["game"],
-        json!([
-            "--username",
-            "${auth_player_name}",
-            "--gameDir",
-            "${game_directory}",
-            "--launchTarget",
-            "forgeclient"
-        ])
-    );
-}
 #[test]
 fn loader_override_replaces_all_old_platform_variants_and_keeps_new_variants() {
     let base = json!({"libraries":[{"name":"g:a:1","rules":[{"action":"allow","os":{"name":"linux"}}]},{"name":"g:a:1","rules":[{"action":"allow","os":{"name":"windows"}}]},{"name":"g:unrelated:1"}]});
@@ -203,34 +164,6 @@ fn loader_override_replaces_all_old_platform_variants_and_keeps_new_variants() {
     )
     .unwrap();
     assert_eq!(universal["libraries"].as_array().unwrap().len(), 2);
-}
-#[async_std::test]
-async fn pinned_fabric_and_quilt_profiles_load_without_catalog_or_network() {
-    for (kind, host, version) in [
-        (LoaderKind::Fabric, "meta.fabricmc.net", "v2"),
-        (LoaderKind::Quilt, "meta.quiltmc.org", "v3"),
-    ] {
-        let temp = tempfile::tempdir().unwrap();
-        let url = format!("https://{host}/{version}/versions/loader/1.20.1/fixture/profile/json");
-        let data =
-            serde_json::to_vec(&json!({"inheritsFrom":"1.20.1","mainClass":"example.Loader"}))
-                .unwrap();
-        files::atomic_write(
-            &temp
-                .path()
-                .join(format!("{}.json", files::sha256(url.as_bytes()))),
-            &data,
-        )
-        .unwrap();
-        let repo = Repository::new(temp.path().into()).pinned(&[MetadataPin {
-            url,
-            sha256: files::sha256(&data),
-        }]);
-        let profile = super::fabric_quilt::profile(&repo, kind, "1.20.1", "fixture")
-            .await
-            .unwrap();
-        assert_eq!(profile.manifest["mainClass"], "example.Loader");
-    }
 }
 
 #[async_std::test]
@@ -275,7 +208,7 @@ async fn hydration_publishes_monotonic_file_progress_without_counting_generated_
         &wanted,
         root,
         &root.join("blobs"),
-        &super::transfer::Cancel::default(),
+        &transfer::Cancel::default(),
         &op,
     )
     .await

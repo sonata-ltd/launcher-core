@@ -1,7 +1,6 @@
-use super::{
-    error::{ModloaderError, Result},
-    files,
-};
+use crate::utils::files;
+
+use super::error::{ModloaderError, Result};
 use std::{
     collections::HashSet,
     fs,

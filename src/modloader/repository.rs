@@ -1,10 +1,9 @@
-use super::{
-    error::{ModloaderError, Result},
-    files, http,
-};
+use crate::{instance::download::http, utils::files};
+
+use super::error::{ModloaderError, Result};
 use serde_json::Value;
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime},
 };
 
@@ -79,7 +78,7 @@ impl Repository {
             }
             Err(error) => match cached {
                 Some(bytes) if valid(&bytes) => Ok(bytes),
-                _ => Err(error),
+                _ => Err(error.into()),
             },
         }
     }
@@ -87,36 +86,4 @@ impl Repository {
     pub async fn json(&self, url: &str, expected: Option<&str>) -> Result<Value> {
         Ok(serde_json::from_slice(&self.bytes(url, expected).await?)?)
     }
-}
-
-pub fn url(base: &str, segments: &[&str]) -> Result<String> {
-    let mut url =
-        http_types::Url::parse(base).map_err(|e| ModloaderError::Invalid(e.to_string()))?;
-
-    {
-        let mut path = url
-            .path_segments_mut()
-            .map_err(|_| ModloaderError::Invalid("non-base URL".into()))?;
-        path.pop_if_empty();
-
-        for segment in segments {
-            if matches!(*segment, "." | "..") || segment.contains(['/', '\\']) {
-                return Err(ModloaderError::Invalid("invalid URL segment".into()));
-            }
-
-            path.push(segment);
-        }
-    }
-
-    Ok(url.to_string())
-}
-
-pub fn relative_url(base: &str, path: &Path) -> Result<String> {
-    files::relative(path)?;
-
-    let parts: Vec<String> = path
-        .components()
-        .map(|p| p.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    url(base, &parts.iter().map(String::as_str).collect::<Vec<_>>())
 }

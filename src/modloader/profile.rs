@@ -1,7 +1,6 @@
-use super::{
-    error::{ModloaderError, Result},
-    maven::MavenCoordinate,
-};
+use crate::utils::maven::MavenCoordinate;
+
+use super::error::{ModloaderError, Result};
 use serde_json::{json, Value};
 
 fn args(profile: &Value, side: &str) -> Result<Vec<Value>> {
