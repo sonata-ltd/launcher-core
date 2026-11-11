@@ -229,7 +229,7 @@ async fn pinned_fabric_and_quilt_profiles_load_without_catalog_or_network() {
         let profile = super::fabric_quilt::profile(&repo, kind, "1.20.1", "fixture")
             .await
             .unwrap();
-        assert_eq!(profile["mainClass"], "example.Loader");
+        assert_eq!(profile.manifest["mainClass"], "example.Loader");
     }
 }
 

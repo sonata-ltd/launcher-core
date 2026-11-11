@@ -170,7 +170,8 @@ pub async fn install(
         let url = super::repository::url(endpoint, &[&rec.version, version, "profile", "json"])?;
         let bytes = repo.bytes(&url, None).await?;
 
-        base.manifest = super::profile::merge_official(&base.manifest, &patch, &rec.version)?;
+        base.manifest =
+            super::profile::merge_official(&base.manifest, &patch.manifest, &rec.version)?;
         base.pins.push(MetadataPin {
             url,
             sha256: files::sha256(&bytes),
