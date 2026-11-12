@@ -155,7 +155,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
         db: Arc<Database>,
         op: &OperationHandle,
     ) -> Result<LibsOutcome, LibsSyncError> {
-        op.start_stage(STAGE_TYPE);
+        op.start_stage_determinable(STAGE_TYPE);
         let started = Instant::now();
 
         let mut unique = HashMap::new();

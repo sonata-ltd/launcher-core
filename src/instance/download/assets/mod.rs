@@ -83,7 +83,7 @@ impl AssetsData {
         db: Arc<Database>,
         op: &OperationHandle,
     ) -> Result<AssetsOutcome, AssetSyncError> {
-        op.start_stage(STAGE_TYPE);
+        op.start_stage_determinable(STAGE_TYPE);
         let started = Instant::now();
 
         let objects_dir = paths.assets().join("objects");
