@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use strum::Display;
 use ts_rs::TS;
 
-use crate::data::registry::operation::message::status::Outcome;
+use crate::data::registry::operation::message::status::{Outcome, Progress};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
 pub enum OperationStage {
@@ -10,8 +10,26 @@ pub enum OperationStage {
     DownloadLibs,
     DownloadAssets,
     VerifyFiles,
-    CreateStructure,
+    RunModloaderProcessors,
     ScanInstances,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StageStatus {
+    Pending,
+    Running,
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageSnapshot {
+    pub stage: OperationStage,
+    pub status: StageStatus,
+    pub progress: Progress,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

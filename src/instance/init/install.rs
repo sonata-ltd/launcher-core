@@ -68,6 +68,19 @@ pub(crate) struct InstallContext<'a> {
     pub(crate) cancel: &'a Cancel,
 }
 
+pub(crate) fn resolve_install_sequence(loader: &LoaderSpec) -> Vec<OperationStage> {
+    let mut stages = vec![OperationStage::FetchManifest, OperationStage::DownloadLibs];
+
+    match loader.kind {
+        LoaderKind::Forge | LoaderKind::NeoForge => stages.extend(forge::install_sequence()),
+        _ => {}
+    }
+
+    stages.extend([OperationStage::DownloadAssets, OperationStage::VerifyFiles]);
+
+    stages
+}
+
 pub(crate) async fn execute<'a>(
     request: &InstallRequest,
     context: &InstallContext<'a>,
@@ -83,7 +96,9 @@ pub(crate) async fn execute<'a>(
         context.cancel.check()?;
 
         let started = Instant::now();
-        context.op.start_stage(OperationStage::VerifyFiles);
+        context
+            .op
+            .start_stage_determinable(OperationStage::VerifyFiles);
 
         let artifacts = artifacts::finish(
             unvalidated_profile.wanted,
@@ -171,7 +186,9 @@ async fn install<'a>(
     let blobs_path = context.paths.libraries().join("blobs");
 
     let started = Instant::now();
-    context.op.start_stage(OperationStage::FetchManifest);
+    context
+        .op
+        .start_stage_indeterminable(OperationStage::FetchManifest);
 
     let mut game_components = if loader_spec.kind == LoaderKind::Cleanroom {
         cleanroom::prepare(
@@ -239,6 +256,7 @@ async fn install<'a>(
                 catalog: context.catalog,
                 maven_dir: workspace.maven_dir(),
                 work_dir: workspace.work_dir(),
+                op: context.op,
                 cancel: context.cancel,
             },
             game_components,
@@ -246,7 +264,7 @@ async fn install<'a>(
         .await?;
 
         game_components = prepared.components;
-        forge_installer = prepared.installer;
+        forge_installer = prepared.pending_processors;
     }
 
     let java_runtime_policy = components::policy(&game_components.manifest)?;
@@ -256,7 +274,9 @@ async fn install<'a>(
     let wanted = artifacts::parse(&mut game_components.manifest, &game_components.maven_files)?;
 
     let started = Instant::now();
-    context.op.start_stage(OperationStage::DownloadLibs);
+    context
+        .op
+        .start_stage_determinable(OperationStage::DownloadLibs);
 
     artifacts::hydrate(
         &wanted,
@@ -268,9 +288,6 @@ async fn install<'a>(
     .await?;
 
     complete(context.op, OperationStage::DownloadLibs, started);
-
-    let started = Instant::now();
-    context.op.start_stage(OperationStage::CreateStructure);
 
     if let Some(prepared) = forge_installer {
         modloader::forge::finalize(
@@ -293,7 +310,6 @@ async fn install<'a>(
         .await?;
     }
 
-    complete(context.op, OperationStage::CreateStructure, started);
     context.cancel.check()?;
 
     let (assets, _) = get_assets_manifest(

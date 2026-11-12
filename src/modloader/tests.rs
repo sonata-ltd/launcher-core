@@ -3,7 +3,6 @@ use crate::{
         download::{artifacts, transfer},
         init::{model::InstalledProfile, storage},
     },
-    modloader::{fabric_quilt, forge},
     utils::files,
 };
 

@@ -7,10 +7,7 @@ use crate::{
     data::{
         db::Database,
         layout::LauncherPaths,
-        registry::operation::{
-            message::{stage::OperationStage, status::Outcome},
-            OperationRegistry,
-        },
+        registry::operation::{message::status::Outcome, OperationRegistry},
     },
     instance::{
         self,
@@ -175,40 +172,46 @@ impl InstanceService {
     ) -> Result<()> {
         let rec = self.get_instance(id).await?;
 
-        self.java_service.wait_discovery().await;
-        let java = self.java.list_all().await?;
-
-        let catalog = crate::modloader::catalog::ModloaderCatalog::new(
-            self.paths.meta().join("modloader-catalog"),
-        );
-
         let loader_kind = LoaderKind::ALL
             .into_iter()
             .find(|kind| kind.as_str() == rec.loader)
             .ok_or_else(|| ModloaderError::Invalid("unknown loader".into()))?;
+
+        let loader = LoaderSpec {
+            kind: loader_kind,
+            version: rec.loader_version.clone(),
+        };
+
+        loader.validate(&rec.version)?;
+
+        let meta_provider = MetaProvider::from_str(&rec.meta_provider)?;
+
+        let op = self.operations.begin(
+            "instance.install".into(),
+            instance::init::install::resolve_install_sequence(&loader),
+        );
+
+        self.java_service.wait_discovery().await;
+        let java = match self.java.list_all().await {
+            Ok(java) => java,
+            Err(e) => {
+                op.finish(Outcome::Failed);
+                return Err(e.into());
+            }
+        };
+
+        let catalog = crate::modloader::catalog::ModloaderCatalog::new(
+            self.paths.meta().join("modloader-catalog"),
+        );
 
         let request = InstallRequest {
             instance_id: rec.id,
             instance_dir_name: rec.dir.clone(),
             game_version: rec.version.clone(),
             manifest_url: rec.manifest_url.clone(),
-            meta_provider: MetaProvider::from_str(&rec.meta_provider)?,
-            loader: LoaderSpec {
-                kind: loader_kind,
-                version: rec.loader_version.clone(),
-            },
+            meta_provider,
+            loader,
         };
-
-        let op = self.operations.begin(
-            "instance.install".into(),
-            vec![
-                OperationStage::FetchManifest,
-                OperationStage::DownloadLibs,
-                OperationStage::CreateStructure,
-                OperationStage::DownloadAssets,
-                OperationStage::VerifyFiles,
-            ],
-        );
 
         let context = InstallContext {
             paths: &self.paths,
@@ -224,7 +227,7 @@ impl InstanceService {
         match result {
             Ok(profile) => {
                 op.finish(Outcome::Completed);
-                self.auto_select(
+                self.auto_select_runtime(
                     &rec,
                     &JavaRequirement {
                         majors: profile.java.majors,
@@ -288,7 +291,7 @@ impl InstanceService {
                 }
             };
 
-            if let Err(e) = self.auto_select(&rec, &requirement, false).await {
+            if let Err(e) = self.auto_select_runtime(&rec, &requirement, false).await {
                 tracing::warn!(instance = %rec.id, error = %e, "java auto-select failed");
             }
         }
@@ -297,7 +300,7 @@ impl InstanceService {
     /// Writes the best registered runtime into the instance's own settings,
     /// unless it has one already. Publishes `AutoSelected`, or with `notify`
     /// `NoSuitableRuntime` when nothing fits.
-    async fn auto_select(
+    async fn auto_select_runtime(
         &self,
         rec: &InstanceRecord,
         requirement: &JavaRequirement,

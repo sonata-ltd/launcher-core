@@ -64,7 +64,19 @@ impl OperationHandle {
         self.emit(OperationStart { stages });
     }
 
-    pub fn start_stage(&self, stage: OperationStage) {
+    pub fn start_stage_determinable(&self, stage: OperationStage) {
+        self.emit(OperationUpdate::Progress {
+            stage,
+            status: super::message::status::LifeCycle::Started,
+            target: None,
+            progress: super::message::status::Progress::Determinable {
+                current: 0,
+                total: 1,
+            },
+        });
+    }
+
+    pub fn start_stage_indeterminable(&self, stage: OperationStage) {
         self.emit(OperationUpdate::Progress {
             stage,
             status: super::message::status::LifeCycle::Started,
@@ -86,6 +98,10 @@ impl OperationHandle {
             target,
             progress: Progress::Determinable { current, total },
         });
+    }
+
+    pub fn skip_stage(&self, stage: OperationStage, reason: Option<String>) {
+        self.emit(OperationUpdate::Skipped { stage, reason });
     }
 
     pub fn complete_stage(&self, res: StageResult) {

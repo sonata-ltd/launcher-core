@@ -105,6 +105,17 @@ fn render(event: CoreEvent, last: &mut Instant) {
             );
         }
 
+        OperationEvent::Update(OperationUpdate::Skipped { stage, reason }) => {
+            eprintln!(
+                "{stage}: skipped, {}",
+                if let Some(msg) = reason {
+                    msg
+                } else {
+                    String::from("reason not defined")
+                }
+            );
+        }
+
         OperationEvent::Finish(finish) => {
             eprintln!("finished: {:?}", finish.outcome);
         }

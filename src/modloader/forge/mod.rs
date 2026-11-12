@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::Value;
 
 use crate::data::registry::operation::handle::OperationHandle;
+use crate::data::registry::operation::message::stage::{OperationStage, StageResult};
+use crate::data::registry::operation::message::status::Outcome;
 use crate::instance::download::transfer::Cancel;
 use crate::java;
 use crate::java::model::JavaRuntime;
@@ -25,6 +28,9 @@ mod model;
 mod processor;
 mod tokens;
 
+#[cfg(test)]
+mod tests;
+
 pub struct PrepareRequest {
     pub game_version: String,
     pub loader_kind: LoaderKind,
@@ -36,12 +42,17 @@ pub struct PrepareContext<'a> {
     pub catalog: &'a ModloaderCatalog,
     pub maven_dir: &'a Path,
     pub work_dir: &'a Path,
+    pub op: &'a OperationHandle,
     pub cancel: &'a Cancel,
 }
 
 pub struct PreparedForge {
     pub components: components::Components,
-    pub installer: Option<Prepared>,
+    pub pending_processors: Option<Prepared>,
+}
+
+pub fn install_sequence() -> [OperationStage; 1] {
+    [OperationStage::RunModloaderProcessors]
 }
 
 pub async fn prepare<'a>(
@@ -115,9 +126,20 @@ pub async fn prepare<'a>(
         )
         .await?;
 
+        let pending_processors = if prepared.has_client_processors() {
+            Some(prepared)
+        } else {
+            context.op.skip_stage(
+                OperationStage::RunModloaderProcessors,
+                Some("no client processors".into()),
+            );
+
+            None
+        };
+
         Ok(PreparedForge {
             components: game_components,
-            installer: Some(prepared),
+            pending_processors,
         })
     } else {
         if spec.kind == LoaderKind::NeoForge {
@@ -128,9 +150,14 @@ pub async fn prepare<'a>(
 
         components::apply(&mut game_components, &modloader_manifest_value)?;
 
+        context.op.skip_stage(
+            OperationStage::RunModloaderProcessors,
+            Some("no client processors".into()),
+        );
+
         Ok(PreparedForge {
             components: game_components,
-            installer: None,
+            pending_processors: None,
         })
     }
 }
@@ -168,6 +195,11 @@ pub async fn finalize<'a>(
             ModloaderError::Invalid("register a Java runtime for installer processors".into())
         })?;
 
+    let stage_start_point = Instant::now();
+    context
+        .op
+        .start_stage_determinable(OperationStage::RunModloaderProcessors);
+
     let client = game_components
         .manifest
         .get("mainJar")
@@ -194,6 +226,13 @@ pub async fn finalize<'a>(
         context.op,
     )
     .await?;
+
+    context.op.complete_stage(StageResult {
+        status: Outcome::Completed,
+        stage: OperationStage::RunModloaderProcessors,
+        duration_secs: stage_start_point.elapsed().as_secs_f64(),
+        error: None,
+    });
 
     Ok(())
 }

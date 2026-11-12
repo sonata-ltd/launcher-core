@@ -28,6 +28,10 @@ pub enum OperationUpdate {
         progress: Progress,
     },
     Completed(StageResult),
+    Skipped {
+        stage: OperationStage,
+        reason: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

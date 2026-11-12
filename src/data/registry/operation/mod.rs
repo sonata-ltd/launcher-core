@@ -45,6 +45,7 @@ impl OperationRegistry {
             id,
             name,
             stage: None,
+            stages: Vec::new(),
             status: LifeCycle::Started,
             progress: Progress::Indeterminable,
             message: None,

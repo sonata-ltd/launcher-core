@@ -70,6 +70,15 @@ pub struct Prepared {
     pub extracted: PathBuf,
 }
 
+impl Prepared {
+    pub fn has_client_processors(&self) -> bool {
+        self.profile
+            .processors
+            .iter()
+            .any(|processor| processor.applies_to_client())
+    }
+}
+
 pub async fn prepare(
     installer: PathBuf,
     extracted: PathBuf,
@@ -92,9 +101,7 @@ pub async fn prepare(
 
     if value.get("install").is_some() || value.get("versionInfo").is_some() {
         return Err(ModloaderError::Unsupported(
-            "
-            legacy installer; use legacy Prism component"
-                .into(),
+            "legacy installer; use legacy Prism component".into(),
         ));
     }
 
@@ -241,7 +248,7 @@ pub async fn run(
         .count();
 
     let mut completed = 0;
-    op.update_stage(OperationStage::CreateStructure, 0, total, None);
+    op.update_stage(OperationStage::RunModloaderProcessors, 0, total, None);
 
     for (index, step) in prepared.profile.processors.into_iter().enumerate() {
         if !step.applies_to_client() {
@@ -298,7 +305,12 @@ pub async fn run(
         .await?;
 
         completed += 1;
-        op.update_stage(OperationStage::CreateStructure, completed, total, None);
+        op.update_stage(
+            OperationStage::RunModloaderProcessors,
+            completed,
+            total,
+            None,
+        );
     }
 
     Ok(())
