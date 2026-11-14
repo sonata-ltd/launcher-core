@@ -80,6 +80,7 @@ impl OperationSnapshot {
                     entry.reason = reason.clone();
                 }
             }
+            OperationEvent::Update(OperationUpdate::Output(_)) => {}
             OperationEvent::Finish(_) => {}
         }
     }

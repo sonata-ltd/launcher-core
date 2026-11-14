@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::data::registry::operation::message::{
+    output::ProcessorOutput,
     stage::{OperationStage, StageResult},
     status::{LifeCycle, Outcome, Progress},
     target::ProcessTarget,
@@ -27,6 +28,7 @@ pub enum OperationUpdate {
         target: Option<ProcessTarget>,
         progress: Progress,
     },
+    Output(ProcessorOutput),
     Completed(StageResult),
     Skipped {
         stage: OperationStage,

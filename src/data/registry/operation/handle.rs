@@ -8,6 +8,7 @@ use crate::{
     data::registry::operation::{
         message::{
             event::{OperationEvent, OperationFinish, OperationStart, OperationUpdate},
+            output::ProcessorOutput,
             stage::{OperationStage, StageResult},
             status::{Outcome, Progress},
             target::ProcessTarget,
@@ -102,6 +103,10 @@ impl OperationHandle {
 
     pub fn skip_stage(&self, stage: OperationStage, reason: Option<String>) {
         self.emit(OperationUpdate::Skipped { stage, reason });
+    }
+
+    pub fn output(&self, output: ProcessorOutput) {
+        self.publish(OperationUpdate::Output(output));
     }
 
     pub fn complete_stage(&self, res: StageResult) {

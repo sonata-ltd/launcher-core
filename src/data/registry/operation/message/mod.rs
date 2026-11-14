@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::data::registry::operation::message::event::OperationEvent;
 
 pub mod event;
+pub mod output;
 pub mod process;
 pub mod stage;
 pub mod status;

@@ -116,6 +116,9 @@ fn render(event: CoreEvent, last: &mut Instant) {
             );
         }
 
+        // Live tail snapshots belong to the GUI preview; keep CLI progress terse.
+        OperationEvent::Update(OperationUpdate::Output(_)) => {}
+
         OperationEvent::Finish(finish) => {
             eprintln!("finished: {:?}", finish.outcome);
         }
