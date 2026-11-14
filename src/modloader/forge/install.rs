@@ -1,3 +1,4 @@
+use crate::data::registry::operation::message::output::ProcessorOutput;
 use crate::{
     data::registry::operation::message::stage::OperationStage,
     instance::download::transfer::{self, Cancel},
@@ -240,15 +241,16 @@ pub async fn run(
         tokens.insert(key.clone(), value);
     }
 
-    let total = prepared
-        .profile
-        .processors
-        .iter()
-        .filter(|step| step.applies_to_client())
-        .count();
+    // let total = prepared
+    //     .profile
+    //     .processors
+    //     .iter()
+    //     .filter(|step| step.applies_to_client())
+    //     .count();
 
-    let mut completed = 0;
-    op.update_stage(OperationStage::RunModloaderProcessors, 0, total, None);
+    // let mut completed = 0;
+    let mut output_revision = 0_u64;
+    // op.update_stage(OperationStage::RunModloaderProcessors, 0, total, None);
 
     for (index, step) in prepared.profile.processors.into_iter().enumerate() {
         if !step.applies_to_client() {
@@ -290,6 +292,17 @@ pub async fn run(
             outputs.push((path, tokens::expand_tokens(&hash, &tokens)?));
         }
 
+        let mut publish_output = |lines| {
+            output_revision += 1;
+            op.output(ProcessorOutput {
+                stage: OperationStage::RunModloaderProcessors,
+                processor_index: index,
+                revision: output_revision,
+                lines,
+            });
+        };
+        publish_output(Vec::new());
+
         processor::run(
             ProcessorCommand {
                 java: java.clone(),
@@ -301,16 +314,17 @@ pub async fn run(
                 outputs,
             },
             &cancel.0,
+            &mut publish_output,
         )
         .await?;
 
-        completed += 1;
-        op.update_stage(
-            OperationStage::RunModloaderProcessors,
-            completed,
-            total,
-            None,
-        );
+        // completed += 1;
+        // op.update_stage(
+        //     OperationStage::RunModloaderProcessors,
+        //     completed,
+        //     total,
+        //     None,
+        // );
     }
 
     Ok(())
@@ -321,6 +335,97 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn processor_events_keep_revision_across_client_steps_and_publish_boundaries() {
+        use crate::{
+            bus::{event::CoreEvent, EventBus},
+            data::registry::operation::{
+                message::event::{OperationEvent, OperationUpdate},
+                OperationRegistry,
+            },
+        };
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let libraries = temp.path().join("libraries");
+        let jar = libraries.join(MavenCoordinate::parse("g:processor:1").unwrap().path());
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(jar).unwrap());
+        zip.start_file(
+            "META-INF/MANIFEST.MF",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"Manifest-Version: 1.0\nMain-Class: example.Processor\n\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        let java = temp.path().join("fake-java");
+        std::fs::write(&java, "#!/bin/sh\nprintf 'processor output\\n'\n").unwrap();
+        std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let prepared = Prepared {
+            profile: serde_json::from_value(json!({
+                "minecraft": "1.20.1", "json": "/version.json",
+                "processors": [
+                    {"jar": "g:processor:1", "sides": ["client"]},
+                    {"jar": "g:processor:1", "sides": ["server"]},
+                    {"jar": "g:processor:1", "sides": ["client"]},
+                ]
+            }))
+            .unwrap(),
+            installer: temp.path().join("installer.jar"),
+            extracted: temp.path().join("work"),
+        };
+        let bus = EventBus::new(32);
+        let mut receiver = bus.subscribe();
+        let registry = OperationRegistry::new(bus);
+        let op = registry.begin(
+            "Install".into(),
+            vec![OperationStage::RunModloaderProcessors],
+        );
+        run(
+            prepared,
+            libraries,
+            temp.path().join("minecraft.jar"),
+            temp.path().into(),
+            java,
+            &Cancel::default(),
+            &op,
+        )
+        .await
+        .unwrap();
+
+        let mut snapshots = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let CoreEvent::Operation(message) = event {
+                if let OperationEvent::Update(OperationUpdate::Output(output)) = message.data {
+                    snapshots.push(output);
+                }
+            }
+        }
+        assert_eq!(snapshots.len(), 4);
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|output| output.revision)
+                .collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|output| output.processor_index)
+                .collect::<Vec<_>>(),
+            [0, 0, 2, 2]
+        );
+        assert!(snapshots[0].lines.is_empty());
+        assert!(snapshots[2].lines.is_empty());
+        assert_eq!(snapshots[1].lines[0].text, "processor output");
+        assert_eq!(snapshots[3].lines[0].text, "processor output");
+    }
 
     #[async_std::test]
     async fn modern_installer_preserves_inherited_game_arguments() {

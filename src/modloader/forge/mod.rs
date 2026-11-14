@@ -25,6 +25,7 @@ use crate::utils::maven::MavenCoordinate;
 
 mod install;
 mod model;
+mod output;
 mod processor;
 mod tokens;
 
@@ -198,7 +199,7 @@ pub async fn finalize<'a>(
     let stage_start_point = Instant::now();
     context
         .op
-        .start_stage_determinable(OperationStage::RunModloaderProcessors);
+        .start_stage_indeterminable(OperationStage::RunModloaderProcessors);
 
     let client = game_components
         .manifest
