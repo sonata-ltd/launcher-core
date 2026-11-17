@@ -151,6 +151,8 @@ impl InstanceContentService {
     ) -> Result<InstallPreview> {
         storage::ensure_no_pending(&self.db, instance).await?;
         let (root, compatibility) = self.context(instance).await?;
+        let snapshot = super::inventory::snapshot(root.clone()).await?;
+        let registered = storage::registered_mods(&self.db, instance).await?;
         let all_releases = async_std::future::timeout(
             Duration::from_secs(90),
             catalog_plan::resolve(&self.catalog, &roots, &compatibility),
@@ -190,10 +192,10 @@ impl InstanceContentService {
             } else {
                 false
             };
-            let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_content i JOIN content_provider_files p ON p.id=i.preferred_provider_file_id WHERE i.instance_id=? AND p.provider=? AND p.project_id=?")
-                .bind(instance.get()).bind(match release.key.project.provider { Provider::Modrinth => "modrinth", Provider::CurseForge => "curseforge" })
-                .bind(&release.key.project.project_id).fetch_one(&self.db.pool).await?;
-            if existing > 0 && !already_installed {
+            let existing = registered
+                .iter()
+                .any(|entry| entry.matches(&release.key.project, &snapshot));
+            if existing && !already_installed {
                 return Err(ContentError::Invalid(
                     "Уже установлена другая версия проекта; обновление требует отдельного плана"
                         .into(),
@@ -211,7 +213,12 @@ impl InstanceContentService {
                 releases.push(release);
             }
         }
-        let signature = super::inventory::signature(root).await?;
+        if super::inventory::signature(root).await? != snapshot.signature {
+            return Err(ContentError::Invalid(
+                "Папка mods изменилась при подготовке плана".into(),
+            ));
+        }
+        let signature = snapshot.signature;
         let preview = InstallPreview {
             id: Uuid::new_v4(),
             instance_id: instance,

@@ -135,29 +135,58 @@ pub fn inventory_scope(instance_root: &Path, kind: ContentKind) -> io::Result<In
     })
 }
 
-use sha2::Digest;
-
-pub(crate) async fn signature(
-    root: std::path::PathBuf,
-) -> crate::instance::content::error::Result<String> {
-    async_std::task::spawn_blocking(move || -> crate::instance::content::error::Result<_> {
-        let snapshot = inventory_scope(&root, ContentKind::Mod)?;
-        let mut entries: Vec<_> = snapshot
+/// Hashes the contents and identity of every mod archive considered by a plan.
+pub(super) async fn snapshot(
+    root: PathBuf,
+) -> crate::instance::content::error::Result<ModSnapshot> {
+    async_std::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        let mut inventory = inventory_scope(&root, ContentKind::Mod)?;
+        inventory
             .entries
-            .into_iter()
-            .map(|entry| {
-                let metadata = std::fs::symlink_metadata(root.join(&entry.relative_path))?;
-                Ok((entry.name, metadata.len(), metadata.modified().ok()))
-            })
-            .collect::<std::io::Result<_>>()?;
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut digest = sha2::Sha256::new();
-        for (name, size, modified) in entries {
-            digest.update(name.as_encoded_bytes());
-            digest.update(size.to_le_bytes());
-            digest.update(format!("{modified:?}").as_bytes());
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        let mut digest = Sha256::new();
+        let mut archives = std::collections::HashMap::new();
+        for entry in inventory.entries {
+            let name = entry.name.as_encoded_bytes();
+            digest.update((name.len() as u64).to_le_bytes());
+            digest.update(name);
+            let path = root.join(&entry.relative_path);
+            match entry.entry_type {
+                ObservedType::Archive(stamp) => {
+                    let sha256 = crate::utils::files::sha256_file(&path)?;
+                    let after = fs::symlink_metadata(&path)?;
+                    if !after.is_file() || stamp != FileStamp::from_metadata(&after) {
+                        return Err(io::Error::other("mod changed while planning").into());
+                    }
+                    digest.update([0]);
+                    digest.update(sha256.as_bytes());
+                    archives.insert(entry.relative_path, sha256);
+                }
+                ObservedType::SymbolicLink => {
+                    digest.update([1]);
+                    let target = fs::read_link(&path)?;
+                    let bytes = target.as_os_str().as_encoded_bytes();
+                    digest.update((bytes.len() as u64).to_le_bytes());
+                    digest.update(bytes);
+                }
+                ObservedType::LocalDirectory => digest.update([2]),
+            };
         }
-        Ok(format!("{:x}", digest.finalize()))
+
+        Ok(ModSnapshot {
+            signature: format!("{:x}", digest.finalize()),
+            archives,
+        })
     })
     .await
+}
+
+pub(super) struct ModSnapshot {
+    pub signature: String,
+    pub archives: std::collections::HashMap<PathBuf, String>,
+}
+
+pub(super) async fn signature(root: PathBuf) -> crate::instance::content::error::Result<String> {
+    Ok(snapshot(root).await?.signature)
 }

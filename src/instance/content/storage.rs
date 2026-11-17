@@ -94,7 +94,16 @@ pub(crate) async fn complete(
         ).bind(file.object_id).bind(&file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name)
             .fetch_one(&mut *transaction).await?;
         sqlx::query("INSERT INTO instance_content(instance_id,object_id,kind,relative_path,path_key,mod_enabled,placement,preferred_provider_file_id)
-                     VALUES(?,?,'mod',?,?,1,?,?)")
+                     VALUES(?,?,'mod',?,?,1,?,?)
+                     ON CONFLICT(instance_id,path_key) DO UPDATE SET
+                         object_id=excluded.object_id, kind=excluded.kind,
+                         relative_path=excluded.relative_path, mod_enabled=excluded.mod_enabled,
+                         placement=excluded.placement, presence='present',
+                         observed_size=NULL, observed_modified=NULL, observed_identity=NULL,
+                         indexed_fingerprint=NULL,
+                         pinned=CASE WHEN instance_content.object_id=excluded.object_id
+                                     THEN instance_content.pinned ELSE 0 END,
+                         preferred_provider_file_id=excluded.preferred_provider_file_id")
             .bind(instance.get()).bind(file.object_id).bind(&relative).bind(crate::utils::files::path_key(std::path::Path::new(&relative)))
             .bind(&file.placement).bind(provider_id).execute(&mut *transaction).await?;
     }
@@ -195,4 +204,44 @@ pub(super) async fn abandon(db: &Database, instance: InstanceId, operation: &str
         return Err(ContentError::InvalidJournalId(operation.to_owned()));
     }
     Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+pub(super) struct RegisteredMod {
+    pub relative_path: String,
+    pub object_sha256: String,
+    pub provider: super::model::Provider,
+    pub project_id: String,
+}
+
+impl RegisteredMod {
+    pub(super) fn matches(
+        &self,
+        project: &super::model::ProjectKey,
+        snapshot: &super::inventory::ModSnapshot,
+    ) -> bool {
+        self.provider == project.provider
+            && self.project_id == project.project_id
+            && snapshot
+                .archives
+                .get(std::path::Path::new(&self.relative_path))
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(&self.object_sha256))
+    }
+}
+
+pub(super) async fn registered_mods(
+    db: &Database,
+    instance: InstanceId,
+) -> Result<Vec<RegisteredMod>> {
+    Ok(sqlx::query_as(
+        "SELECT i.relative_path, o.sha256 AS object_sha256, p.provider, p.project_id
+         FROM instance_content AS i
+         JOIN content_objects AS o ON o.id=i.object_id
+         JOIN content_provider_files AS p ON p.id=i.preferred_provider_file_id
+          AND p.object_id=i.object_id
+         WHERE i.instance_id=? AND i.kind='mod'",
+    )
+    .bind(instance.get())
+    .fetch_all(&db.pool)
+    .await?)
 }

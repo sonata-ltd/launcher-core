@@ -523,3 +523,76 @@ async fn database_enforces_publication_journal_state_transitions() {
         .is_err());
     assert!(storage::operation_completed(&fixture.db, id).await.unwrap());
 }
+
+#[async_std::test]
+async fn removed_registered_mod_does_not_block_publication_at_the_same_path() {
+    let fixture = fixture().await;
+    let (id, files) = prepared(&fixture).await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"verified bytes").unwrap();
+    storage::complete(&fixture.db, id, fixture.id, &files)
+        .await
+        .unwrap();
+
+    let project = super::model::ProjectKey {
+        provider: super::model::Provider::Modrinth,
+        project_id: files[0].project_id.clone(),
+    };
+    let registered = storage::registered_mods(&fixture.db, fixture.id)
+        .await
+        .unwrap();
+    let present = super::inventory::snapshot(fixture.root.clone())
+        .await
+        .unwrap();
+    assert!(registered[0].matches(&project, &present));
+    std::fs::remove_file(&target).unwrap();
+    let missing = super::inventory::snapshot(fixture.root.clone())
+        .await
+        .unwrap();
+    assert!(!registered[0].matches(&project, &missing));
+
+    let replacement = uuid::Uuid::new_v4();
+    storage::prepare(&fixture.db, replacement, fixture.id, &files)
+        .await
+        .unwrap();
+    assert!(recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    assert_eq!(std::fs::read(&target).unwrap(), b"verified bytes");
+    assert!(storage::operation_completed(&fixture.db, replacement)
+        .await
+        .unwrap());
+}
+
+#[async_std::test]
+async fn snapshot_detects_changed_bytes_even_with_the_same_size_and_modified_time() {
+    let fixture = fixture().await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"aaaa").unwrap();
+    let modified = std::fs::metadata(&target).unwrap().modified().unwrap();
+    let before = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+
+    std::fs::write(&target, b"bbbb").unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&target)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(modified))
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().modified().unwrap(),
+        modified
+    );
+    let after = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    assert_ne!(before, after);
+}
