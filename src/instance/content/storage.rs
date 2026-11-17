@@ -1,11 +1,10 @@
 //! SQL привязок и журнала; файловые изменения находятся в install/recovery.
-use super::api::PublishedFile;
+use super::journal::{self, PublishedFile};
 use crate::{
     data::db::Database,
     instance::content::error::{ContentError, Result},
     instance::model::InstanceId,
 };
-use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn ensure_no_pending(db: &Database, instance: InstanceId) -> Result<()> {
@@ -37,7 +36,7 @@ pub(crate) async fn prepare(
 ) -> Result<()> {
     let mut transaction = db.pool.begin().await?;
     sqlx::query("INSERT INTO content_operations(id,instance_id,state,plan_json,recovery_json) VALUES(?,?,'publishing','{}',?)")
-        .bind(id.to_string()).bind(instance.get()).bind(serde_json::to_string(files)?)
+        .bind(id.to_string()).bind(instance.get()).bind(journal::encode(files)?)
         .execute(&mut *transaction).await?;
     for file in files {
         sqlx::query(
@@ -59,6 +58,17 @@ pub(crate) async fn complete(
     files: &[PublishedFile],
 ) -> Result<()> {
     let mut transaction = db.pool.begin().await?;
+    let transition = sqlx::query(
+        "UPDATE content_operations SET state='completed'
+         WHERE id=? AND instance_id=? AND state='publishing'",
+    )
+    .bind(id.to_string())
+    .bind(instance.get())
+    .execute(&mut *transaction)
+    .await?;
+    if transition.rows_affected() != 1 {
+        return Err(ContentError::InvalidJournalId(id.to_string()));
+    }
     for file in files {
         let relative = format!("mods/{}", file.name);
         let provider_id: i64 = sqlx::query_scalar(
@@ -72,10 +82,6 @@ pub(crate) async fn complete(
             .bind(instance.get()).bind(file.object_id).bind(&relative).bind(crate::utils::files::path_key(std::path::Path::new(&relative)))
             .bind(&file.placement).bind(provider_id).execute(&mut *transaction).await?;
     }
-    sqlx::query("UPDATE content_operations SET state='completed' WHERE id=?")
-        .bind(id.to_string())
-        .execute(&mut *transaction)
-        .await?;
     sqlx::query("DELETE FROM content_object_leases WHERE operation_id=?")
         .bind(id.to_string())
         .execute(&mut *transaction)
@@ -84,25 +90,40 @@ pub(crate) async fn complete(
     Ok(())
 }
 
-pub(crate) async fn pending(
+#[derive(sqlx::FromRow)]
+pub(super) struct PendingPublication {
+    pub id: String,
+    pub instance_id: InstanceId,
+    pub recovery_json: String,
+}
+
+pub(super) async fn pending(
     db: &Database,
-) -> Result<Vec<(String, InstanceId, Vec<PublishedFile>)>> {
-    let mut operations = Vec::new();
-    for row in sqlx::query(
-        "SELECT id,instance_id,recovery_json FROM content_operations WHERE state='publishing'",
+    instance: Option<InstanceId>,
+) -> Result<Vec<PendingPublication>> {
+    Ok(sqlx::query_as(
+        "SELECT id, instance_id, recovery_json FROM content_operations
+         WHERE state='publishing' AND (?1 IS NULL OR instance_id=?1)
+         ORDER BY instance_id, created_at, rowid",
     )
+    .bind(instance.map(InstanceId::get))
     .fetch_all(&db.pool)
-    .await?
-    {
-        let instance: i64 = row.try_get("instance_id")?;
-        let json: String = row.try_get("recovery_json")?;
-        operations.push((
-            row.try_get("id")?,
-            instance.into(),
-            serde_json::from_str(&json)?,
-        ));
-    }
-    Ok(operations)
+    .await?)
+}
+
+pub(super) async fn leased_objects(
+    db: &Database,
+    operation: Uuid,
+) -> Result<std::collections::HashMap<i64, String>> {
+    let rows = sqlx::query_as(
+        "SELECT objects.id, objects.sha256 FROM content_object_leases AS leases
+         JOIN content_objects AS objects ON objects.id = leases.object_id
+         WHERE leases.operation_id = ?",
+    )
+    .bind(operation.to_string())
+    .fetch_all(&db.pool)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 pub(crate) async fn operation_completed(db: &Database, id: Uuid) -> Result<bool> {
@@ -127,5 +148,16 @@ pub(crate) async fn clear_completed(db: &Database, id: Option<Uuid>) -> Result<(
             .execute(&db.pool)
             .await?;
     }
+    Ok(())
+}
+
+pub(super) async fn clear_completed_for_instance(
+    db: &Database,
+    instance: InstanceId,
+) -> Result<()> {
+    sqlx::query("DELETE FROM content_operations WHERE instance_id=? AND state='completed'")
+        .bind(instance.get())
+        .execute(&db.pool)
+        .await?;
     Ok(())
 }

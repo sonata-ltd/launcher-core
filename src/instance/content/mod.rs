@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod error;
 pub mod install;
 pub mod inventory;
+mod journal;
 pub mod model;
 pub mod recovery;
 pub mod resolve;

@@ -67,10 +67,18 @@ impl InstanceContentService {
         root_lock.try_lock().map_err(|_| {
             ContentError::Invalid("Другой процесс лаунчера уже использует этот корень".into())
         })?;
-        if let Err(error) = recovery::recover(&db, &paths, &instances, None).await {
-            // Один конфликтующий экземпляр не должен закрывать весь лаунчер.
-            // Его незавершённый журнал продолжает запрещать launch/install.
-            tracing::error!(error = %error, "content recovery requires attention");
+        match recovery::recover(&db, &paths, &instances, None).await {
+            Ok(failures) => {
+                for failure in failures {
+                    tracing::error!(
+                        instance = %failure.instance,
+                        operation = %failure.operation,
+                        error = %failure.error,
+                        "content recovery requires attention"
+                    );
+                }
+            }
+            Err(error) => tracing::error!(%error, "could not load pending content publications"),
         }
         storage::clear_completed(&db, None).await?;
         Ok(Self {
@@ -303,8 +311,10 @@ impl InstanceContentService {
                 )
                 .await
                 {
-                    Ok(()) => {
-                        if storage::operation_completed(&service.db, id)
+                    Ok(failures) => {
+                        if let Some(failure) = failures.into_iter().next() {
+                            error = Some(failure.error);
+                        } else if storage::operation_completed(&service.db, id)
                             .await
                             .unwrap_or(false)
                         {
@@ -433,6 +443,42 @@ impl InstanceContentService {
             });
         }
         result
+    }
+
+    /// Lists publications that must be recovered before launch or reinstall.
+    pub async fn pending_recovery(&self, instance: InstanceId) -> Result<Vec<String>> {
+        Ok(storage::pending(&self.db, Some(instance))
+            .await?
+            .into_iter()
+            .map(|pending| pending.id)
+            .collect())
+    }
+
+    /// Tries recovery again after the user resolves a conflicting local file.
+    pub async fn retry_recovery(self: &Arc<Self>, instance: InstanceId) -> Result<()> {
+        let activity = self
+            .instances
+            .reserve_content_change(instance)
+            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+        let service = Arc::clone(self);
+
+        // A caller dropping its future must not release the lease mid-publication.
+        async_std::task::spawn(async move {
+            let _activity = activity;
+            let failures = recovery::recover(
+                &service.db,
+                &service.paths,
+                &service.instances,
+                Some(instance),
+            )
+            .await?;
+            storage::clear_completed_for_instance(&service.db, instance).await?;
+            match failures.into_iter().next() {
+                Some(failure) => Err(failure.error),
+                None => Ok(()),
+            }
+        })
+        .await
     }
 
     pub fn cancel(&self, id: Uuid) -> Result<()> {

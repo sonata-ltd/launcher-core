@@ -1,5 +1,5 @@
 //! Исполнение готового плана. Никакого выбора релизов или wire-DTO API.
-use super::{api::PublishedFile, storage};
+use super::{journal::PublishedFile, storage};
 use crate::{
     data::db::Database,
     instance::content::{

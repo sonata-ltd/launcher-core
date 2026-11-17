@@ -1,6 +1,5 @@
 //! DTO сценариев экземпляра. Здесь нет сетевых DTO провайдеров.
 use crate::{instance::content::model::ProjectKey, instance::model::InstanceId};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -48,15 +47,4 @@ impl ContentJobSnapshot {
             ContentPhase::Downloading | ContentPhase::Publishing
         )
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PublishedFile {
-    pub name: String,
-    pub sha256: String,
-    pub object_id: i64,
-    pub provider: String,
-    pub project_id: String,
-    pub release_id: String,
-    pub placement: String,
 }

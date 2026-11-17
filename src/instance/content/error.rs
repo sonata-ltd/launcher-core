@@ -4,6 +4,12 @@ use thiserror::Error;
 pub enum ContentError {
     #[error("{0}")]
     Invalid(String),
+    #[error("unsupported content journal version {0}")]
+    UnsupportedJournalVersion(u32),
+    #[error("RecoveryConflict: {name} differs from the unfinished publication")]
+    RecoveryConflict { name: String },
+    #[error("invalid content journal operation id {0:?}")]
+    InvalidJournalId(String),
     #[error("CurseForge недоступен: задайте CURSEFORGE_API_KEY в окружении лаунчера")]
     MissingCurseForgeKey,
     #[error("Каталог вернул HTTP {0}; повторите запрос позднее")]

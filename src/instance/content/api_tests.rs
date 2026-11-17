@@ -1,6 +1,6 @@
 //! Интеграционные проверки локального протокола: реальные SQLite и файлы,
 //! но без HTTP/запуска JVM. Каждый тест владеет отдельным временным корнем.
-use super::{api::PublishedFile, recovery, service::InstanceContentService, storage};
+use super::{journal::PublishedFile, recovery, service::InstanceContentService, storage};
 use crate::{
     bus::EventBus,
     data::{
@@ -133,6 +133,12 @@ async fn mutation_lease_prevents_launch_and_loader_install() {
 async fn unfinished_publication_blocks_launch_and_install_until_recovery() {
     let fixture = fixture().await;
     let (operation, files) = prepared(&fixture).await;
+    sqlx::query("UPDATE content_operations SET recovery_json=? WHERE id=?")
+        .bind(serde_json::to_string(&files).unwrap())
+        .bind(operation.to_string())
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
     assert!(storage::ensure_no_pending(&fixture.db, fixture.id)
         .await
         .is_err());
@@ -196,10 +202,13 @@ async fn recovery_never_overwrites_a_changed_user_file() {
     prepared(&fixture).await;
     let target = fixture.root.join("mods/mod.jar");
     std::fs::write(&target, b"user changes").unwrap();
-    let error = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
+    let failures = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("RecoveryConflict"));
+        .unwrap();
+    assert!(matches!(
+        failures.as_slice(),
+        [failure] if matches!(&failure.error, super::error::ContentError::RecoveryConflict { name } if name == "mod.jar")
+    ));
     assert_eq!(std::fs::read(target).unwrap(), b"user changes");
     assert!(storage::ensure_no_pending(&fixture.db, fixture.id)
         .await
@@ -245,4 +254,139 @@ fn transfer_and_filesystem_steps_observe_the_same_cancellation_flag() {
     let file_token = Cancellation::from_flag(token.0.clone());
     token.cancel();
     assert!(file_token.check().is_err());
+}
+
+#[async_std::test]
+async fn unreadable_journal_does_not_prevent_other_instances_from_recovering() {
+    let fixture = fixture().await;
+    let (broken, files) = prepared(&fixture).await;
+    let other = fixture
+        .instances
+        .create(
+            "Other".into(),
+            "1.21.1".into(),
+            "https://example.invalid/unused".into(),
+            "prism".into(),
+        )
+        .await
+        .unwrap();
+    let update = "UPDATE content_operations SET recovery_json=? WHERE id=?";
+    sqlx::query(update)
+        .bind(r#"{"version":42,"files":{"future":"format"}}"#)
+        .bind(broken.to_string())
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    let valid = uuid::Uuid::new_v4();
+    storage::prepare(&fixture.db, valid, other.id, &files)
+        .await
+        .unwrap();
+
+    let failures = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
+        .await
+        .unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].operation, broken.to_string());
+    assert!(matches!(
+        failures[0].error,
+        super::error::ContentError::UnsupportedJournalVersion(42)
+    ));
+    assert!(storage::operation_completed(&fixture.db, valid)
+        .await
+        .unwrap());
+    assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+
+    let valid_again = uuid::Uuid::new_v4();
+    sqlx::query("DELETE FROM instance_content WHERE instance_id=?")
+        .bind(other.id.get())
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    storage::prepare(&fixture.db, valid_again, other.id, &files)
+        .await
+        .unwrap();
+    sqlx::query(update)
+        .bind("{")
+        .bind(broken.to_string())
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    let failures = recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances,
+        Some(other.id),
+    )
+    .await
+    .unwrap();
+    assert!(failures.is_empty());
+    assert!(storage::operation_completed(&fixture.db, valid_again)
+        .await
+        .unwrap());
+    let placement: String =
+        sqlx::query_scalar("SELECT placement FROM instance_content WHERE instance_id=?")
+            .bind(other.id.get())
+            .fetch_one(&fixture.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(placement, "external");
+}
+
+#[async_std::test]
+async fn user_can_retry_recovery_after_resolving_a_conflict() {
+    let fixture = fixture().await;
+    let (id, _) = prepared(&fixture).await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"user changes").unwrap();
+
+    let service = Arc::new(
+        InstanceContentService::new(
+            fixture.db.clone(),
+            fixture.paths.clone(),
+            fixture.instances.clone(),
+            None,
+            fixture.operations.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(
+        service.pending_recovery(fixture.id).await.unwrap(),
+        [id.to_string()]
+    );
+    assert!(matches!(
+        service.retry_recovery(fixture.id).await,
+        Err(super::error::ContentError::RecoveryConflict { .. })
+    ));
+    assert_eq!(std::fs::read(&target).unwrap(), b"user changes");
+
+    std::fs::rename(&target, fixture.root.join("preserved.jar")).unwrap();
+    service.retry_recovery(fixture.id).await.unwrap();
+    assert!(service
+        .pending_recovery(fixture.id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(std::fs::read(target).unwrap(), b"verified bytes");
+}
+
+#[async_std::test]
+async fn journal_with_mismatched_object_is_rejected_before_publication() {
+    let fixture = fixture().await;
+    let (id, mut files) = prepared(&fixture).await;
+    files[0].object_id += 1;
+    sqlx::query("UPDATE content_operations SET recovery_json=? WHERE id=?")
+        .bind(super::journal::encode(&files).unwrap())
+        .bind(id.to_string())
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+
+    let failures = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
+        .await
+        .unwrap();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].operation, id.to_string());
+    assert!(!fixture.root.join("mods/mod.jar").exists());
+    assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
 }
