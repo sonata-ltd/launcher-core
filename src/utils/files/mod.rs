@@ -2,7 +2,7 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::{
     fs,
-    io::{Read, Write},
+    io::Write,
     path::{Component, Path, PathBuf},
 };
 use thiserror::Error;
@@ -109,17 +109,10 @@ where
     }
     let mut input = fs::File::open(path)?;
     let mut digest = D::new();
-    let mut buf = [0; 64 * 1024];
-    loop {
-        if let Some(cancel) = cancel {
-            cancel.check()?;
-        }
-        let count = input.read(&mut buf)?;
-        if count == 0 {
-            break;
-        }
-        digest.update(&buf[..count]);
-    }
+    digest::read_chunks(&mut input, cancel, |chunk, _| {
+        digest.update(chunk);
+        Ok(())
+    })?;
     Ok(format!("{:x}", digest.finalize()))
 }
 

@@ -1,5 +1,5 @@
 //! Регрессии CAS, графа и inventory из раннего reference перенесены на реальные модули ядра.
-use std::{collections::HashMap, fs, sync::Arc};
+use std::{collections::HashMap, fs, io, sync::Arc};
 
 use crate::{
     instance::content::scan_policy::{
@@ -303,6 +303,36 @@ fn import_rejects_changed_preview_and_corrupt_existing_object() {
         .is_err());
     fs::write(&object.path, b"corrupted").unwrap();
     assert!(store.import_file(&source, None, &cancellation).is_err());
+}
+
+#[test]
+fn import_validates_digests_of_the_staged_bytes_before_publishing() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.jar");
+    let data = vec![3; 128 * 1024 + 1];
+    fs::write(&source, &data).unwrap();
+    let root = directory.path().join("store");
+    let store = crate::instance::content::store::ObjectStore::new(root.clone());
+    let cancel = Cancellation::default();
+    let (expected, _) = digest_file(&source, &cancel, |_| {}).unwrap();
+
+    let error = store
+        .import_checked(&source, &cancel, |digests| {
+            assert_eq!(digests, &expected);
+            Err(io::Error::other("provider digest rejected"))
+        })
+        .unwrap_err();
+    assert_eq!(error.to_string(), "provider digest rejected");
+    assert!(!store.path_for(&expected.sha256).unwrap().exists());
+    assert_eq!(fs::read_dir(root.join("staging")).unwrap().count(), 0);
+
+    let object = store
+        .import_checked(&source, &cancel, |digests| {
+            assert_eq!(digests, &expected);
+            Ok::<_, io::Error>(())
+        })
+        .unwrap();
+    assert_eq!(fs::read(object.path).unwrap(), data);
 }
 
 #[test]

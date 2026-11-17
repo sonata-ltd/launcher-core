@@ -1,12 +1,10 @@
 use super::output::OutputTail;
 use crate::data::registry::operation::message::output::OutputLine;
 use crate::modloader::error::{ModloaderError, Result};
-use crate::utils::cancellation::Cancellation;
+use crate::utils::{cancellation::Cancellation, files};
 use async_std::{process::Command, task};
-use sha1::{Digest, Sha1};
 use std::{
     fs::{self, File},
-    io::{BufReader, Read},
     path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
@@ -22,43 +20,27 @@ pub struct ProcessorCommand {
     pub outputs: Vec<(PathBuf, String)>,
 }
 
-fn output_matches(path: &std::path::Path, expected: &str) -> Result<bool> {
-    if expected.len() != 40 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+fn output_matches(path: &std::path::Path, expected: &str, cancel: &Cancellation) -> Result<bool> {
+    if !files::hash_valid(expected, 40) {
         return Err(ModloaderError::Invalid(
             "invalid processor output SHA-1".into(),
         ));
     }
 
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e.into()),
-    };
-
-    let mut reader = BufReader::new(file);
-    let mut digest = Sha1::new();
-    let mut buffer = [0u8; 64 * 1024];
-
-    loop {
-        let read = reader.read(&mut buffer)?;
-
-        if read == 0 {
-            break;
-        }
-
-        digest.update(&buffer[..read]);
+    let matches = files::matches_cancellable(path, expected, cancel);
+    if cancel.is_cancelled() {
+        return Err(ModloaderError::Cancelled);
     }
-
-    Ok(format!("{:x}", digest.finalize()).eq_ignore_ascii_case(expected))
+    Ok(matches?)
 }
 
-fn all_outputs_match(outputs: &[(PathBuf, String)]) -> Result<bool> {
+fn all_outputs_match(outputs: &[(PathBuf, String)], cancel: &Cancellation) -> Result<bool> {
     if outputs.is_empty() {
         return Ok(false);
     }
 
     for (path, hash) in outputs {
-        if !output_matches(path, hash)? {
+        if !output_matches(path, hash, cancel)? {
             return Ok(false);
         }
     }
@@ -77,7 +59,8 @@ pub async fn run(
 
     let outputs = command.outputs.clone();
 
-    if task::spawn_blocking(move || all_outputs_match(&outputs)).await? {
+    let token = cancel.clone();
+    if task::spawn_blocking(move || all_outputs_match(&outputs, &token)).await? {
         return Ok(());
     }
 
@@ -149,7 +132,8 @@ pub async fn run(
 
     let outputs = command.outputs;
     let has_outputs = !outputs.is_empty();
-    if has_outputs && !task::spawn_blocking(move || all_outputs_match(&outputs)).await? {
+    let token = cancel.clone();
+    if has_outputs && !task::spawn_blocking(move || all_outputs_match(&outputs, &token)).await? {
         return Err(ModloaderError::Processor("output checksum mismatch".into()));
     }
 

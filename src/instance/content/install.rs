@@ -103,18 +103,19 @@ pub(super) async fn execute(
             } else {
                 let download = download_stage.path().join(format!("{index}.jar"));
                 transfer::download(&file.url, &download, file.sha1.as_deref(), cancel).await?;
-                let source = download.clone();
+                let source = download;
                 let token = cancel.clone();
                 let expected = file.clone();
                 let store_copy = store.clone();
                 let object = async_std::task::spawn_blocking(move || -> Result<_> {
-                    let (hashes, _) = digest_file(&source, &token, |_| {})?;
-                    if !expected.matches(&hashes) {
-                        return Err(ContentError::Invalid(
-                            "Размер или SHA-512 скачанного файла не совпадает с API".into(),
-                        ));
-                    }
-                    Ok(store_copy.import_file(&source, Some(&hashes.sha256), &token)?)
+                    store_copy.import_checked(&source, &token, |hashes| {
+                        if !expected.matches(hashes) {
+                            return Err(ContentError::Invalid(
+                                "Размер или хеш скачанного файла не совпадает с API".into(),
+                            ));
+                        }
+                        Ok(())
+                    })
                 })
                 .await?;
                 object

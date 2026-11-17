@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, Write},
     path::Path,
 };
 
@@ -103,14 +103,8 @@ fn copy_contents(
     output: &mut File,
     cancellation: &Cancellation,
 ) -> io::Result<()> {
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        cancellation.check()?;
-        let count = input.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        output.write_all(&buffer[..count])?;
-    }
+    super::digest::read_chunks(input, Some(cancellation), |bytes, _| {
+        output.write_all(bytes)
+    })?;
     output.sync_all()
 }
