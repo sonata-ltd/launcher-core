@@ -152,6 +152,31 @@ fn item(name: &str, url: String, body: &[u8]) -> TestItem {
     }
 }
 
+#[async_std::test]
+async fn cancelled_sync_never_opens_a_download_or_registers_files() {
+    let harness = Harness::new();
+    let (op, _events) = harness.operation();
+    let store = FakeStore::default();
+    let cancel = Cancellation::new();
+    cancel.cancel();
+    let result = syncer()
+        .run_with_cancellation(
+            vec![item(
+                "asset",
+                "https://example.invalid/file".into(),
+                b"asset",
+            )],
+            |_| panic!("cancelled sync must not schedule a download"),
+            &store,
+            &op,
+            STAGE,
+            &cancel,
+        )
+        .await;
+    assert!(matches!(result, Err(SyncError::Cancelled(_))));
+    assert_eq!(store.register_calls(), 0);
+}
+
 async fn serve<'a>(server: &'a MockServer, path: &str, status: u16, body: &[u8]) -> Mock<'a> {
     let path = path.to_string();
     let body = body.to_vec();

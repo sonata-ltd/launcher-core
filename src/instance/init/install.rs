@@ -100,10 +100,11 @@ pub(crate) async fn execute<'a>(
             .op
             .start_stage_determinable(OperationStage::VerifyFiles);
 
-        let artifacts = artifacts::finish(
+        let artifacts = artifacts::finish_with_cancellation(
             unvalidated_profile.wanted,
             workspace.maven_dir().to_path_buf(),
             context.op,
+            context.cancel,
         )
         .await?;
 
@@ -318,7 +319,14 @@ async fn install<'a>(
     )
     .await?;
 
-    AssetsData::sync(&assets, context.paths, Arc::clone(&context.db), context.op).await?;
+    AssetsData::sync_with_cancellation(
+        &assets,
+        context.paths,
+        Arc::clone(&context.db),
+        context.op,
+        context.cancel,
+    )
+    .await?;
 
     let profile = UnvalidatedProfile {
         format_version: 1,

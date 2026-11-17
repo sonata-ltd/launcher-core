@@ -21,7 +21,10 @@ use crate::{
             },
         },
     },
-    utils::download::{buffer::BufferPool, error::DownloadError, Download, Downloadable},
+    utils::{
+        cancellation::{Cancellation, Cancelled},
+        download::{buffer::BufferPool, error::DownloadError, Download, Downloadable},
+    },
 };
 
 pub const DEFAULT_CONCURRENT_TASKS_COUNT: usize = 100;
@@ -33,6 +36,9 @@ pub const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Error)]
 pub enum SyncError {
+    #[error(transparent)]
+    Cancelled(#[from] Cancelled),
+
     #[error(transparent)]
     Store(#[from] DbError),
 
@@ -95,10 +101,30 @@ impl Syncer {
         T: Downloadable + Clone + Send + Sync + 'static,
         F: Fn(&T) -> PathBuf,
     {
+        self.run_with_cancellation(wanted, save_path, store, op, stage, &Cancellation::new())
+            .await
+    }
+
+    pub(crate) async fn run_with_cancellation<T, F>(
+        &self,
+        wanted: Vec<T>,
+        save_path: F,
+        store: &dyn SyncStore<T>,
+        op: &OperationHandle,
+        stage: OperationStage,
+        cancel: &Cancellation,
+    ) -> Result<SyncOutcome<T>, SyncError>
+    where
+        T: Downloadable + Clone + Send + Sync + 'static,
+        F: Fn(&T) -> PathBuf,
+    {
+        cancel.check()?;
         let wanted = dedup_by_hash(wanted);
         let total = wanted.len();
 
-        let known = store.cached(&wanted).await?;
+        let known = store.cached(&wanted).await;
+        cancel.check()?;
+        let known = known?;
         let (cached, missing): (Vec<T>, Vec<T>) = wanted
             .into_iter()
             .partition(|item| known.contains(item.get_hash()));
@@ -110,16 +136,25 @@ impl Syncer {
         let mut downloaded: Vec<T> = Vec::with_capacity(missing.len());
         let mut failures: Vec<DownloadError> = Vec::new();
 
-        let mut queue: VecDeque<(T, usize)> = missing.into_iter().map(|item| (item, 0)).collect();
+        let mut queue: VecDeque<_> = missing
+            .into_iter()
+            .map(|item| (item, 0, Duration::ZERO))
+            .collect();
         let mut futures = FuturesUnordered::new();
 
         loop {
-            while futures.len() < self.concurrency {
-                let Some((item, attempt)) = queue.pop_front() else {
+            while !cancel.is_cancelled() && futures.len() < self.concurrency {
+                let Some((item, attempt, delay)) = queue.pop_front() else {
                     break;
                 };
 
-                futures.push(self.spawn_attempt(save_path(&item), item, attempt));
+                futures.push(self.spawn_attempt(
+                    save_path(&item),
+                    item,
+                    attempt,
+                    delay,
+                    cancel.clone(),
+                ));
             }
 
             let Some((item, attempt, error)) = futures.next().await else {
@@ -150,7 +185,8 @@ impl Syncer {
                     "download failed, retrying"
                 );
 
-                queue.push_back((item, done));
+                let delay = e.retry_delay(RETRY_BACKOFF * 2u32.pow(attempt as u32));
+                queue.push_back((item, done, delay));
                 continue;
             }
 
@@ -162,6 +198,7 @@ impl Syncer {
             store.register(&downloaded).await?;
         }
 
+        cancel.check()?;
         let failed = failures.len();
 
         if let Some(first) = failures.into_iter().next() {
@@ -180,6 +217,8 @@ impl Syncer {
         save_path: PathBuf,
         item: T,
         attempt: usize,
+        delay: Duration,
+        cancel: Cancellation,
     ) -> JoinHandle<(T, usize, Option<DownloadError>)>
     where
         T: Downloadable + Clone + Send + Sync + 'static,
@@ -188,11 +227,13 @@ impl Syncer {
         let download = Download::new(save_path, item, Arc::clone(&self.buffers));
 
         task::spawn(async move {
-            if attempt > 0 {
-                task::sleep(RETRY_BACKOFF * 2u32.pow(attempt as u32 - 1)).await;
+            if !delay.is_zero() {
+                if let Err(cancelled) = cancel.run(task::sleep(delay)).await {
+                    return (fallback, attempt, Some(cancelled.into()));
+                }
             }
 
-            match download.download_with_checksum().await {
+            match download.download_with_cancellation(&cancel).await {
                 Ok(item) => (item, attempt, None),
                 Err(e) => (fallback, attempt, Some(e)),
             }

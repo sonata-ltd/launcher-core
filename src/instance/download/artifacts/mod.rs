@@ -302,8 +302,9 @@ pub async fn hydrate(
                         .map_err(|e| ArtifactError::Invalid(e.to_string()))?;
                     checksum_url.set_path(&format!("{}.sha1", checksum_url.path()));
 
-                    http::get_bytes(checksum_url.as_str(), 4096)
-                        .await
+                    cancel
+                        .run(http::get_bytes(checksum_url.as_str(), 4096))
+                        .await?
                         .ok()
                         .and_then(|bytes| String::from_utf8(bytes).ok())
                         .and_then(|body| body.split_whitespace().next().map(str::to_owned))
@@ -348,6 +349,17 @@ pub async fn finish(
     root: PathBuf,
     op: &crate::data::registry::operation::handle::OperationHandle,
 ) -> Result<Vec<InstalledArtifact>> {
+    finish_with_cancellation(wanted, root, op, &Cancel::new()).await
+}
+
+pub(crate) async fn finish_with_cancellation(
+    wanted: Vec<Wanted>,
+    root: PathBuf,
+    op: &crate::data::registry::operation::handle::OperationHandle,
+    cancel: &Cancel,
+) -> Result<Vec<InstalledArtifact>> {
+    cancel.check()?;
+    let cancel = cancel.clone();
     op.update_stage(OperationStage::VerifyFiles, 0, wanted.len(), None);
 
     let verified = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -358,8 +370,11 @@ pub async fn finish(
         let mut result = Vec::new();
 
         for wanted in wanted {
+            cancel.check()?;
             let path = files::child(&root, &wanted.path)?;
-            let hash = files::sha1_file(&path)?;
+            let hash = files::sha1_cancellable(&path, &cancel);
+            cancel.check()?;
+            let hash = hash?;
 
             if let Some(expected) = wanted
                 .sha1

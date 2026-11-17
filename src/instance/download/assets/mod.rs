@@ -23,7 +23,7 @@ use crate::{
         assets::storage::DbAssetStore,
         sync::{SyncError, Syncer},
     },
-    utils::download::Downloadable,
+    utils::{cancellation::Cancellation, download::Downloadable},
 };
 
 mod parse;
@@ -90,20 +90,32 @@ impl AssetsData {
         db: Arc<Database>,
         op: &OperationHandle,
     ) -> Result<AssetsOutcome, AssetSyncError> {
+        Self::sync_with_cancellation(manifest, paths, db, op, &Cancellation::new()).await
+    }
+
+    pub(crate) async fn sync_with_cancellation(
+        manifest: &serde_json::Value,
+        paths: &LauncherPaths,
+        db: Arc<Database>,
+        op: &OperationHandle,
+        cancel: &Cancellation,
+    ) -> Result<AssetsOutcome, AssetSyncError> {
+        cancel.check().map_err(SyncError::from)?;
         op.start_stage_determinable(STAGE_TYPE);
         let started = Instant::now();
 
         let objects_dir = paths.assets().join("objects");
         let wanted = parse::extract_assets(manifest)?;
 
-        let store = DbAssetStore::new(db, objects_dir.clone());
+        let store = DbAssetStore::new(db, objects_dir.clone(), cancel.clone());
         let outcome = Syncer::default()
-            .run(
+            .run_with_cancellation(
                 wanted,
                 |asset| asset.object_path(&objects_dir),
                 &store,
                 op,
                 STAGE_TYPE,
+                cancel,
             )
             .await?;
 
@@ -150,7 +162,7 @@ mod tests {
         let wanted = parse::extract_assets(&json!({"objects": {"item": {"hash": hash}}})).unwrap();
         let path = wanted[0].object_path(temp.path());
         let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
-        let store = DbAssetStore::new(db, temp.path().to_owned());
+        let store = DbAssetStore::new(db, temp.path().to_owned(), Cancellation::new());
         store.register(&wanted).await.unwrap();
         assert!(store.cached(&wanted).await.unwrap().is_empty());
 

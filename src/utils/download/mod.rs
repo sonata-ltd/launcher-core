@@ -4,7 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 
-use async_std::fs::{create_dir_all, remove_file, rename, File};
+use crate::utils::cancellation::Cancellation;
+use async_std::fs::{create_dir_all, File};
 use async_std::future::timeout;
 #[cfg(test)]
 use sha1::Digest;
@@ -127,6 +128,11 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
     }
 
     pub async fn download_with_checksum(self) -> Result<T> {
+        self.download_with_cancellation(&Cancellation::new()).await
+    }
+
+    pub(crate) async fn download_with_cancellation(self, cancel: &Cancellation) -> Result<T> {
+        cancel.check()?;
         let (save_dir, file_name) = match (self.save_path.parent(), self.save_path.file_name()) {
             (Some(dir), Some(name)) => (dir, name),
             _ => {
@@ -143,31 +149,26 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
                 source: e,
             })?;
 
-        let temp_path = temp_path(save_dir, file_name);
-
-        if let Err(e) = self.fetch_to(&temp_path).await {
-            if let Err(cleanup) = remove_file(&temp_path).await {
-                tracing::warn!(path = %temp_path.display(), error = %cleanup, "failed to remove partial download");
-            }
-
-            return Err(e);
-        }
-
-        rename(&temp_path, &self.save_path)
-            .await
-            .map_err(|e| DownloadError::FileCommit {
-                from: temp_path,
-                to: self.save_path.clone(),
-                source: e,
-            })?;
-
+        let temporary = tempfile::TempPath::from_path(temp_path(save_dir, file_name));
+        self.fetch_to(&temporary, cancel).await?;
+        cancel.check()?;
+        let final_path = self.save_path;
+        async_std::task::spawn_blocking(move || {
+            temporary
+                .persist(&final_path)
+                .map_err(|error| DownloadError::FileCommit {
+                    from: error.path.to_path_buf(),
+                    to: final_path,
+                    source: error.error,
+                })
+        })
+        .await?;
         Ok(self.object)
     }
 
-    async fn fetch_to(&self, temp_path: &Path) -> Result<()> {
-        let cancel = crate::utils::cancellation::Cancellation::new();
+    async fn fetch_to(&self, temp_path: &Path, cancel: &Cancellation) -> Result<()> {
         let (mut response, url) =
-            stream::response(self.object.get_url(), false, None, &cancel).await?;
+            stream::response(self.object.get_url(), false, None, cancel).await?;
         tracing::debug!(name = %self.object.get_name(), %url, "downloading");
         let mut file =
             File::create(temp_path)
@@ -177,12 +178,12 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
                     source,
                 })?;
 
-        let mut guard = self.buffers_pool.acquire().await;
+        let mut guard = cancel.run(self.buffers_pool.acquire()).await?;
         let actual = stream::Stream {
             url: url.as_str(),
             destination: temp_path,
             length: stream::Length::UpTo(u64::MAX),
-            cancel: &cancel,
+            cancel,
         }
         .copy::<Sha1>(&mut response, &mut file, guard.as_mut_slice(), |_| {})
         .await?;

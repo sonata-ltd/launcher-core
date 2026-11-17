@@ -6,6 +6,7 @@ use sqlx::{QueryBuilder, Sqlite};
 use crate::{
     data::db::{Database, DbError},
     instance::download::{assets::AssetInfo, sync::SyncStore},
+    utils::{cancellation::Cancellation, files},
 };
 
 const INSERT_CHUNK: usize = 300;
@@ -13,11 +14,16 @@ const INSERT_CHUNK: usize = 300;
 pub struct DbAssetStore {
     db: Arc<Database>,
     objects: PathBuf,
+    cancel: Cancellation,
 }
 
 impl DbAssetStore {
-    pub fn new(db: Arc<Database>, objects: PathBuf) -> Self {
-        Self { db, objects }
+    pub fn new(db: Arc<Database>, objects: PathBuf, cancel: Cancellation) -> Self {
+        Self {
+            db,
+            objects,
+            cancel,
+        }
     }
 }
 
@@ -26,13 +32,17 @@ impl SyncStore<AssetInfo> for DbAssetStore {
     async fn cached(&self, wanted: &[AssetInfo]) -> Result<HashSet<String>, DbError> {
         let objects = self.objects.clone();
         let wanted = wanted.to_vec();
+        let cancel = self.cancel.clone();
         async_std::task::spawn_blocking(move || {
             let mut found = HashSet::new();
             for asset in wanted {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let path = asset.object_path(&objects);
                 let cached = match std::fs::symlink_metadata(&path) {
                     Ok(metadata) if metadata.is_file() => {
-                        crate::utils::files::matches(&path, asset.hash())
+                        files::matches_cancellable(&path, asset.hash(), &cancel)
                     }
                     Ok(_) => Ok(false),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),

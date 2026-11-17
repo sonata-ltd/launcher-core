@@ -14,6 +14,9 @@ pub enum DownloadError {
     #[error("HTTP request failed: {0}")]
     Http(String),
 
+    #[error(transparent)]
+    Network(#[from] Box<super::super::error::DownloadError>),
+
     #[error("download timed out during {0}")]
     Timeout(&'static str),
 
@@ -45,13 +48,22 @@ impl DownloadError {
         matches!(self, Self::Cancelled)
     }
 
-    // Preserve the existing transfer policy: HTTP, timeout and I/O failures
-    // are retried; cancellation and invalid content are terminal.
     pub(crate) fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Http(_) | Self::Timeout(_) | Self::Io(_) | Self::File(_)
-        )
+        match self {
+            Self::Network(error) => error.is_transient(),
+            Self::Timeout(_) => true,
+            Self::Io(error) | Self::File(FileError::Io(error)) => {
+                super::super::error::transient_io(error)
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retry_delay(&self, fallback: std::time::Duration) -> std::time::Duration {
+        match self {
+            Self::Network(error) => error.retry_delay(fallback),
+            _ => fallback,
+        }
     }
 }
 
@@ -76,16 +88,20 @@ mod tests {
     }
 
     #[test]
-    fn transport_and_filesystem_errors_keep_existing_retry_policy() {
+    fn only_transient_transport_and_io_errors_are_retried() {
         for error in [
-            DownloadError::Http("503".into()),
+            DownloadError::Network(Box::new(super::super::super::error::DownloadError::Http {
+                status: http_types::StatusCode::ServiceUnavailable,
+                url: "https://example.invalid/file".into(),
+            })),
             DownloadError::Timeout("response"),
-            DownloadError::Io(std::io::Error::other("write failed")),
-            DownloadError::File(FileError::Io(std::io::Error::other("commit failed"))),
+            DownloadError::Io(std::io::ErrorKind::ConnectionReset.into()),
         ] {
             assert!(error.is_retryable(), "{error:?}");
             assert!(!error.is_cancelled());
         }
+        assert!(!DownloadError::Io(std::io::ErrorKind::PermissionDenied.into()).is_retryable());
+        assert!(!DownloadError::Io(std::io::ErrorKind::StorageFull.into()).is_retryable());
         assert!(DownloadError::Cancelled.is_cancelled());
     }
 }

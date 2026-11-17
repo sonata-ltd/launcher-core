@@ -31,6 +31,13 @@ pub enum DownloadError {
     #[error("response from {url} exceeds {limit} bytes")]
     SizeLimit { url: String, limit: u64 },
 
+    #[error("got HTTP {status} when fetching {url}; retry after {}s", after.as_secs())]
+    RetryAfter {
+        status: StatusCode,
+        url: String,
+        after: Duration,
+    },
+
     #[error("malformed JSON in response from {url}")]
     MalformedJson {
         url: String,
@@ -113,17 +120,37 @@ pub enum DownloadError {
     },
 }
 
+pub(super) fn transient_status(status: StatusCode) -> bool {
+    status.is_server_error() || status == StatusCode::TooManyRequests
+}
+
+pub(super) fn transient_io(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+    )
+}
+
 impl DownloadError {
     pub fn is_transient(&self) -> bool {
         match self {
-            Self::Request { .. } | Self::BodyRead { .. } | Self::Timeout { .. } => true,
-            Self::Http { status, .. } => {
-                status.is_server_error() || *status == StatusCode::TooManyRequests
+            Self::Request { .. } | Self::Timeout { .. } => true,
+            Self::Http { status, .. } | Self::RetryAfter { status, .. } => {
+                transient_status(*status)
             }
-            Self::FileWrite { source, .. } | Self::FileCreation { source, .. } => {
-                !matches!(source.kind(), io::ErrorKind::PermissionDenied)
-            }
+            Self::BodyRead { source, .. } | Self::FileWrite { source, .. } => transient_io(source),
             _ => false,
+        }
+    }
+
+    pub(crate) fn retry_delay(&self, fallback: Duration) -> Duration {
+        match self {
+            Self::RetryAfter { after, .. } => *after,
+            _ => fallback,
         }
     }
 }

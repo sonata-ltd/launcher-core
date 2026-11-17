@@ -49,6 +49,9 @@ impl InitError {
             Self::Download(e) => e.is_cancelled(),
             Self::Loader(e) => e.is_cancelled(),
             Self::Artifact(e) => e.is_cancelled(),
+            Self::Assets(AssetSyncError::Sync(
+                crate::instance::download::sync::SyncError::Cancelled(_),
+            )) => true,
             _ => false,
         }
     }

@@ -87,7 +87,7 @@ async fn http_failure_keeps_three_attempt_limit() {
     .await
     .unwrap_err();
 
-    assert!(matches!(error, DownloadError::Http(_)));
+    assert!(matches!(error, DownloadError::Network(_)));
     mock.assert_hits(3);
     assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
 }

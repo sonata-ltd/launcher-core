@@ -39,7 +39,11 @@ pub async fn download(
         let path = destination.to_owned();
         let hash = hash.to_owned();
 
-        if task::spawn_blocking(move || files::matches(&path, &hash)).await? {
+        let token = cancel.clone();
+        let cached =
+            task::spawn_blocking(move || files::matches_cancellable(&path, &hash, &token)).await;
+        cancel.check()?;
+        if cached? {
             return Ok(expected.unwrap().to_owned());
         }
     }
@@ -50,10 +54,12 @@ pub async fn download(
 
     fs::create_dir_all(parent).await?;
 
-    let temporary = destination.with_extension(format!("{}.part", uuid::Uuid::new_v4()));
+    let file_name = destination
+        .file_name()
+        .ok_or_else(|| DownloadError::Invalid("download path has no file name".into()))?;
 
-    let mut last = None;
-    for attempt in 0..3u32 {
+    const MAX_ATTEMPTS: u32 = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
         cancel.check()?;
 
         let result = async {
@@ -62,7 +68,8 @@ pub async fn download(
                 stream::response(url, false, Some("SonataLauncher/0.1"), cancel)
                     .await
                     .map_err(map_stream_error)?;
-            let mut output = fs::File::create(&temporary).await?;
+            let temporary = tempfile::TempPath::from_path(super::temp_path(parent, file_name));
+            let mut output = fs::File::create(&temporary as &Path).await?;
             let hash = Stream {
                 url: final_url.as_str(),
                 destination: &temporary,
@@ -86,15 +93,9 @@ pub async fn download(
             drop(output);
             cancel.check()?;
 
-            let source = temporary.clone();
             let target = destination.to_owned();
-
-            task::spawn_blocking(move || {
-                tempfile::TempPath::from_path(source)
-                    .persist(target)
-                    .map_err(|error| error.error)
-            })
-            .await?;
+            task::spawn_blocking(move || temporary.persist(target).map_err(|error| error.error))
+                .await?;
 
             Ok(hash)
         }
@@ -103,22 +104,16 @@ pub async fn download(
         match result {
             Ok(hash) => return Ok(hash),
             Err(error) => {
-                let _ = fs::remove_file(&temporary).await;
-
-                if !error.is_retryable() {
+                if attempt == MAX_ATTEMPTS || !error.is_retryable() {
                     return Err(error);
                 }
-
-                last = Some(error);
+                let delay = error.retry_delay(Duration::from_millis(500 * 2u64.pow(attempt - 1)));
+                cancel.run(task::sleep(delay)).await?;
             }
         }
-
-        cancel
-            .run(task::sleep(Duration::from_millis(500 * 2u64.pow(attempt))))
-            .await?;
     }
 
-    Err(last.unwrap_or_else(|| DownloadError::Http("download failed".into())))
+    unreachable!("the final attempt always returns")
 }
 
 fn map_stream_error(error: StreamError) -> DownloadError {
@@ -130,7 +125,7 @@ fn map_stream_error(error: StreamError) -> DownloadError {
         StreamError::BodyRead { source, .. } | StreamError::FileWrite { source, .. } => {
             source.into()
         }
-        other => DownloadError::Http(other.to_string()),
+        other => DownloadError::Network(Box::new(other)),
     }
 }
 
@@ -159,7 +154,7 @@ pub async fn place(
         let digest = hash.to_owned();
         let cancellation = cancel.clone();
         let placed = task::spawn_blocking(move || -> Result<bool> {
-            if !files::matches(&blob, &digest)? {
+            if !files::matches_cancellable(&blob, &digest, &cancellation)? {
                 return Ok(false);
             }
             files::placement::copy_replace(&blob, &target, &cancellation)?;

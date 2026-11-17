@@ -83,46 +83,63 @@ pub fn child(root: &Path, path: &Path) -> Result<PathBuf> {
 }
 
 pub fn sha1_file(path: &Path) -> std::io::Result<String> {
-    let mut input = fs::File::open(path)?;
-    let mut digest = Sha1::new();
-    let mut buf = [0; 65536];
+    file_digest::<Sha1>(path, None)
+}
 
-    loop {
-        let n = input.read(&mut buf)?;
-
-        if n == 0 {
-            break;
-        }
-
-        digest.update(&buf[..n]);
-    }
-
-    Ok(format!("{:x}", digest.finalize()))
+pub(crate) fn sha1_cancellable(
+    path: &Path,
+    cancel: &super::cancellation::Cancellation,
+) -> std::io::Result<String> {
+    file_digest::<Sha1>(path, Some(cancel))
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<String> {
+    file_digest::<Sha256>(path, None)
+}
+
+fn file_digest<D: Digest>(
+    path: &Path,
+    cancel: Option<&super::cancellation::Cancellation>,
+) -> std::io::Result<String>
+where
+    sha1::digest::Output<D>: std::fmt::LowerHex,
+{
+    if let Some(cancel) = cancel {
+        cancel.check()?;
+    }
     let mut input = fs::File::open(path)?;
-    let mut digest = Sha256::new();
-    let mut buf = [0; 65536];
-
+    let mut digest = D::new();
+    let mut buf = [0; 64 * 1024];
     loop {
-        let n = input.read(&mut buf)?;
-
-        if n == 0 {
+        if let Some(cancel) = cancel {
+            cancel.check()?;
+        }
+        let count = input.read(&mut buf)?;
+        if count == 0 {
             break;
         }
-
-        digest.update(&buf[..n]);
+        digest.update(&buf[..count]);
     }
-
     Ok(format!("{:x}", digest.finalize()))
 }
 
 pub fn matches(path: &Path, sha1: &str) -> std::io::Result<bool> {
-    match sha1_file(path) {
+    matches_digest(sha1_file(path), sha1)
+}
+
+pub(crate) fn matches_cancellable(
+    path: &Path,
+    sha1: &str,
+    cancel: &super::cancellation::Cancellation,
+) -> std::io::Result<bool> {
+    matches_digest(sha1_cancellable(path, cancel), sha1)
+}
+
+fn matches_digest(result: std::io::Result<String>, sha1: &str) -> std::io::Result<bool> {
+    match result {
         Ok(actual) => Ok(actual.eq_ignore_ascii_case(sha1)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

@@ -1,13 +1,13 @@
 //! Streaming HTTP shared by artifact, asset and managed Java downloads.
 use super::{
-    error::{DownloadError, Result},
+    error::{transient_status, DownloadError, Result},
     MAX_REDIRECT_COUNT, READ_TIMEOUT, REQUEST_TIMEOUT,
 };
 use crate::utils::cancellation::Cancellation;
 use async_std::future::timeout;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use sha1::Digest;
-use std::path::Path;
+use std::{path::Path, time::Duration};
 use surf::{Response, Url};
 
 pub(crate) async fn response(
@@ -47,10 +47,7 @@ pub(crate) async fn response(
             return Ok((response, current));
         }
         if !status.is_redirection() {
-            return Err(DownloadError::Http {
-                status,
-                url: current.to_string(),
-            });
+            return Err(status_error(&current, &response));
         }
         if redirects == MAX_REDIRECT_COUNT {
             return Err(DownloadError::TooManyRedirects {
@@ -62,6 +59,40 @@ pub(crate) async fn response(
         current = redirect_target(&current, &response)?;
     }
     unreachable!("redirect loop always returns at the configured maximum")
+}
+
+fn status_error(url: &Url, response: &Response) -> DownloadError {
+    let status = response.status();
+    if transient_status(status) {
+        if let Some(after) = response
+            .header("Retry-After")
+            .and_then(|values| retry_after(values.last().as_str(), chrono::Utc::now()))
+        {
+            return DownloadError::RetryAfter {
+                status,
+                url: url.to_string(),
+                after,
+            };
+        }
+    }
+    DownloadError::Http {
+        status,
+        url: url.to_string(),
+    }
+}
+
+fn retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    const MAX_RETRY_DELAY: Duration = Duration::from_secs(120);
+    let value = value.trim();
+    let delay = match value.parse::<u64>() {
+        Ok(seconds) => Duration::from_secs(seconds),
+        Err(_) => chrono::DateTime::parse_from_rfc2822(value)
+            .ok()?
+            .signed_duration_since(now)
+            .to_std()
+            .unwrap_or_default(),
+    };
+    Some(delay.min(MAX_RETRY_DELAY))
 }
 
 fn check_scheme(url: &Url, https_only: bool) -> Result<()> {
@@ -179,6 +210,28 @@ impl Length {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_applies_to_transient_statuses_and_is_bounded() {
+        let url = Url::parse("https://example.invalid/asset").unwrap();
+        let mut response = http_types::Response::new(surf::StatusCode::NotFound);
+        response.insert_header("Retry-After", "90");
+        assert!(!status_error(&url, &response.into()).is_transient());
+
+        let mut response = http_types::Response::new(surf::StatusCode::TooManyRequests);
+        response.insert_header("Retry-After", "900");
+        let error = status_error(&url, &response.into());
+        assert!(error.is_transient());
+        assert_eq!(error.retry_delay(Duration::ZERO), Duration::from_secs(120));
+
+        let now = chrono::DateTime::parse_from_rfc2822("Sun, 06 Nov 1994 08:49:00 GMT")
+            .unwrap()
+            .to_utc();
+        assert_eq!(
+            retry_after("Sun, 06 Nov 1994 08:49:37 GMT", now),
+            Some(Duration::from_secs(37))
+        );
+    }
 
     #[test]
     fn resolves_relative_redirects_and_rejects_downgrade_for_https_only_downloads() {
