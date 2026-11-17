@@ -181,9 +181,9 @@ async fn prepare_command(
         }
     }
     let classpath = std::env::join_paths(classpath)
-        .map_err(|e| InstanceError::RunFailed(e.to_string()))?
+        .map_err(|error| LaunchError::ClasspathSeparator(error.to_string()))?
         .into_string()
-        .map_err(|_| InstanceError::RunFailed("non-Unicode classpath".into()))?;
+        .map_err(|_| LaunchError::ClasspathNotUnicode)?;
 
     let asset_index = super::super::download::manifest::asset_index_id(&profile.manifest)
         .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
