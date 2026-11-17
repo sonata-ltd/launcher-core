@@ -24,6 +24,18 @@ impl BufferPool {
                 "buffer count and size must be positive",
             ));
         }
+        const MAX_BUFFER_COUNT: usize = 4096;
+        const MAX_POOL_BYTES: usize = 64 * 1024 * 1024;
+        if capacity > MAX_BUFFER_COUNT
+            || capacity
+                .checked_mul(buf_size)
+                .is_none_or(|size| size > MAX_POOL_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "download buffer pool exceeds 4096 buffers or 64 MiB",
+            ));
+        }
         let (tx, rx) = bounded(capacity);
 
         for _ in 0..capacity {
@@ -104,5 +116,27 @@ impl Deref for BufferGuard {
 impl DerefMut for BufferGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.buf.as_mut().expect("Buffer consumed")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_oversized_and_overflowing_pools_before_allocation() {
+        for (count, size) in [
+            (0, 1),
+            (1, 0),
+            (4097, 1),
+            (2, 64 * 1024 * 1024),
+            (2, usize::MAX),
+        ] {
+            assert_eq!(
+                BufferPool::new(count, size).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert!(BufferPool::new(1, 16 * 1024).is_ok());
     }
 }
