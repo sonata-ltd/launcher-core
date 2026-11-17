@@ -13,6 +13,8 @@ pub mod storage;
 pub mod store;
 pub mod watch;
 
+pub(super) use storage::has_pending as has_pending_publication;
+
 #[cfg(test)]
 mod api_tests;
 #[cfg(test)]

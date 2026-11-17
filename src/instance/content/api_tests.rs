@@ -105,6 +105,7 @@ async fn mutation_lease_prevents_launch_and_loader_install() {
     let fixture = fixture().await;
     let lease = fixture
         .instances
+        .activity()
         .reserve_content_change(fixture.id)
         .unwrap();
     assert!(fixture
@@ -123,10 +124,15 @@ async fn mutation_lease_prevents_launch_and_loader_install() {
         .contains("content installation"));
     assert!(fixture
         .instances
+        .activity()
         .reserve_content_change(fixture.id)
         .is_err());
     drop(lease);
-    assert!(fixture.instances.reserve_content_change(fixture.id).is_ok());
+    assert!(fixture
+        .instances
+        .activity()
+        .reserve_content_change(fixture.id)
+        .is_ok());
 }
 
 #[async_std::test]
@@ -151,9 +157,18 @@ async fn unfinished_publication_blocks_launch_and_install_until_recovery() {
         fixture.instances.install(fixture.id).await,
         Err(InstanceError::ContentRecoveryPending(id)) if id == fixture.id
     ));
-    recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
-        .await
-        .unwrap();
+    assert!(matches!(
+        fixture.instances.unregister(fixture.id).await,
+        Err(InstanceError::ContentRecoveryPending(id)) if id == fixture.id
+    ));
+    recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         std::fs::read(fixture.root.join("mods/mod.jar")).unwrap(),
         b"verified bytes"
@@ -165,9 +180,14 @@ async fn unfinished_publication_blocks_launch_and_install_until_recovery() {
         .await
         .unwrap();
     // Повторный запуск recovery ничего не дублирует.
-    recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
-        .await
-        .unwrap();
+    recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None,
+    )
+    .await
+    .unwrap();
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_content")
         .fetch_one(&fixture.db.pool)
         .await
@@ -189,11 +209,8 @@ async fn unfinished_publication_blocks_launch_and_install_until_recovery() {
         .unwrap();
     // История успешно законченной операции не должна навсегда запрещать
     // удаление экземпляра внешним lifecycle-сервисом.
-    sqlx::query("DELETE FROM instances WHERE id=?")
-        .bind(fixture.id.get())
-        .execute(&fixture.db.pool)
-        .await
-        .unwrap();
+    fixture.instances.unregister(fixture.id).await.unwrap();
+    assert!(fixture.root.join("mods/mod.jar").is_file());
 }
 
 #[async_std::test]
@@ -202,9 +219,14 @@ async fn recovery_never_overwrites_a_changed_user_file() {
     prepared(&fixture).await;
     let target = fixture.root.join("mods/mod.jar");
     std::fs::write(&target, b"user changes").unwrap();
-    let failures = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
-        .await
-        .unwrap();
+    let failures = recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None,
+    )
+    .await
+    .unwrap();
     assert!(matches!(
         failures.as_slice(),
         [failure] if matches!(&failure.error, super::error::ContentError::RecoveryConflict { name } if name == "mod.jar")
@@ -282,9 +304,14 @@ async fn unreadable_journal_does_not_prevent_other_instances_from_recovering() {
         .await
         .unwrap();
 
-    let failures = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
-        .await
-        .unwrap();
+    let failures = recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].operation, broken.to_string());
     assert!(matches!(
@@ -314,7 +341,7 @@ async fn unreadable_journal_does_not_prevent_other_instances_from_recovering() {
     let failures = recovery::recover(
         &fixture.db,
         &fixture.paths,
-        &fixture.instances,
+        &fixture.instances.get_registry(),
         Some(other.id),
     )
     .await
@@ -382,9 +409,14 @@ async fn journal_with_mismatched_object_is_rejected_before_publication() {
         .await
         .unwrap();
 
-    let failures = recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
-        .await
-        .unwrap();
+    let failures = recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].operation, id.to_string());
     assert!(!fixture.root.join("mods/mod.jar").exists());
@@ -445,6 +477,7 @@ async fn abandoning_conflict_keeps_files_and_releases_only_the_selected_operatio
     assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
     let busy = fixture
         .instances
+        .activity()
         .reserve_content_change(fixture.id)
         .unwrap();
     assert!(service

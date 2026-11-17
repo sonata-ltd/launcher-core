@@ -1,3 +1,4 @@
+mod activity;
 pub mod content;
 pub mod download;
 pub mod error;

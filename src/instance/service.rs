@@ -1,8 +1,4 @@
-use std::{
-    collections::HashSet,
-    str::FromStr,
-    sync::{Arc, Mutex},
-};
+use std::{str::FromStr, sync::Arc};
 
 use slug::slugify;
 
@@ -15,6 +11,7 @@ use crate::{
     },
     instance::{
         self,
+        activity::InstanceActivity,
         download::{self, manifest::load_cached},
         error::InstanceError,
         event::InstanceEvent,
@@ -23,7 +20,7 @@ use crate::{
         model::{InstanceId, InstanceRecord, NewInstance},
         mods::resolve_mods,
         registry::InstanceRegistry,
-        running::{RunPhase, RunningInstances},
+        running::RunPhase,
         settings::{
             service::SettingsService, EffectiveSettings, GlobalSettings, InstanceSettings,
             SettingsPatch,
@@ -50,11 +47,8 @@ pub struct InstanceService {
     java_service: Arc<JavaService>,
     operations: Arc<OperationRegistry>,
     paths: Arc<LauncherPaths>,
-    running: RunningInstances,
+    activity: Arc<InstanceActivity>,
     bus: EventBus,
-    install_jobs: crate::modloader::jobs::InstallJobs,
-    lifecycle: std::sync::Mutex<()>,
-    content_jobs: Arc<Mutex<HashSet<InstanceId>>>,
 }
 
 impl InstanceService {
@@ -76,48 +70,20 @@ impl InstanceService {
             java_service,
             operations,
             paths,
-            running: RunningInstances::new(bus.clone()),
+            activity: Arc::new(InstanceActivity::new(bus.clone())),
             bus,
-            install_jobs: Default::default(),
-            lifecycle: std::sync::Mutex::new(()),
-            content_jobs: Default::default(),
         }
     }
 
-    fn content_busy(&self, id: InstanceId) -> bool {
-        self.content_jobs
-            .lock()
-            .map(|jobs| jobs.contains(&id))
-            .unwrap_or(true)
+    pub(super) fn activity(&self) -> Arc<InstanceActivity> {
+        Arc::clone(&self.activity)
     }
 
-    pub(crate) fn reserve_content_change(&self, id: InstanceId) -> Result<ContentChangeGuard> {
-        let _lifecycle = self
-            .lifecycle
-            .lock()
-            .map_err(|_| InstanceError::RunFailed("lifecycle lock poisoned".into()))?;
-
-        if self.running.phase(id).is_some() || self.install_jobs.busy(id) {
-            return Err(InstanceError::RunFailed(
-                "instance is running or being installed".into(),
-            ));
-        }
-
-        let mut jobs = self
-            .content_jobs
-            .lock()
-            .map_err(|_| InstanceError::RunFailed("content lock poisoned".into()))?;
-
-        if !jobs.insert(id) {
-            return Err(InstanceError::RunFailed(
-                "content installation is active".into(),
-            ));
-        }
-
-        Ok(ContentChangeGuard {
-            id,
-            jobs: self.content_jobs.clone(),
-        })
+    /// Removes the instance registration. Game files are kept on disk.
+    pub async fn unregister(&self, id: InstanceId) -> Result<()> {
+        let _activity = self.activity.reserve_content_change(id)?;
+        self.ensure_content_recovered(id).await?;
+        self.registry.delete(id).await
     }
 
     pub async fn create(
@@ -173,7 +139,7 @@ impl InstanceService {
     }
 
     async fn ensure_content_recovered(&self, id: InstanceId) -> Result<()> {
-        let pending = instance::content::storage::has_pending(&self.db, id)
+        let pending = instance::content::has_pending_publication(&self.db, id)
             .await
             .map_err(crate::data::db::DbError::from)?;
         if pending {
@@ -184,24 +150,7 @@ impl InstanceService {
     }
 
     pub async fn install(self: &Arc<Self>, id: InstanceId) -> Result<()> {
-        let job = {
-            let _guard = self
-                .lifecycle
-                .lock()
-                .map_err(|_| InstanceError::CreationFailed("lifecycle lock poisoned".into()))?;
-
-            if self.running.phase(id).is_some() {
-                return Err(InstanceError::AlreadyRunning(id));
-            }
-
-            if self.content_busy(id) {
-                return Err(InstanceError::RunFailed(
-                    "content installation active".into(),
-                ));
-            }
-
-            self.install_jobs.begin(id)?
-        };
+        let job = self.activity.reserve_install(id)?;
 
         self.ensure_content_recovered(id).await?;
 
@@ -221,7 +170,7 @@ impl InstanceService {
     }
 
     pub fn cancel_install(&self, id: InstanceId) {
-        self.install_jobs.cancel(id);
+        self.activity.install_jobs.cancel(id);
     }
 
     async fn install_inner(
@@ -412,23 +361,7 @@ impl InstanceService {
     }
 
     pub async fn launch(&self, id: InstanceId) -> Result<()> {
-        let reservation = {
-            let _guard = self
-                .lifecycle
-                .lock()
-                .map_err(|_| InstanceError::RunFailed("lifecycle lock poisoned".into()))?;
-
-            if self.content_busy(id) {
-                return Err(InstanceError::RunFailed(
-                    "content installation is active".into(),
-                ));
-            }
-            if self.install_jobs.busy(id) {
-                return Err(InstanceError::RunFailed("installed is active".into()));
-            }
-
-            self.running.reserve(id)?
-        };
+        let reservation = self.activity.reserve_launch(id)?;
 
         self.ensure_content_recovered(id).await?;
         let rec = self.get_instance(id).await?;
@@ -463,15 +396,15 @@ impl InstanceService {
     }
 
     pub fn running(&self) -> Vec<(InstanceId, RunPhase)> {
-        self.running.snapshot()
+        self.activity.running.snapshot()
     }
 
     pub fn run_phase(&self, id: InstanceId) -> Option<RunPhase> {
-        self.running.phase(id)
+        self.activity.running.phase(id)
     }
 
     pub fn kill(&self, id: InstanceId) -> Result<()> {
-        self.running.kill(id)
+        self.activity.running.kill(id)
     }
 
     pub async fn list(&self) -> Result<Vec<Arc<InstanceRecord>>> {
@@ -548,18 +481,5 @@ impl InstanceService {
             .get(java_id)
             .await?
             .ok_or(InstanceError::JavaRuntimeMissing(java_id))
-    }
-}
-
-pub(crate) struct ContentChangeGuard {
-    id: InstanceId,
-    jobs: Arc<Mutex<HashSet<InstanceId>>>,
-}
-
-impl Drop for ContentChangeGuard {
-    fn drop(&mut self) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            jobs.remove(&self.id);
-        }
     }
 }

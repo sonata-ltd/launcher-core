@@ -10,7 +10,7 @@ use crate::{
         error::{ContentError, Result},
         store::ObjectStore,
     },
-    instance::{model::InstanceId, service::InstanceService},
+    instance::{model::InstanceId, registry::InstanceRegistry},
     utils::{
         cancellation::Cancellation,
         files::{self, placement},
@@ -27,7 +27,7 @@ pub(super) struct RecoveryFailure {
 pub(super) async fn recover(
     db: &Database,
     paths: &LauncherPaths,
-    instances: &InstanceService,
+    instances: &InstanceRegistry,
     filter: Option<InstanceId>,
 ) -> Result<Vec<RecoveryFailure>> {
     let store = ObjectStore::new(paths.root().join("content-store"));
@@ -52,7 +52,7 @@ pub(super) async fn recover(
 async fn recover_one(
     db: &Database,
     paths: &LauncherPaths,
-    instances: &InstanceService,
+    instances: &InstanceRegistry,
     store: &ObjectStore,
     pending: &PendingPublication,
 ) -> Result<()> {
@@ -80,7 +80,6 @@ async fn recover_one(
         }
     }
     let record = instances
-        .get_registry()
         .get(instance)
         .await
         .map_err(|error| ContentError::Invalid(error.to_string()))?;

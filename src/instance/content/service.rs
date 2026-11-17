@@ -18,7 +18,10 @@ use crate::{
         resolve::catalog_plan,
         store::ObjectStore,
     },
-    instance::{model::InstanceId, service::InstanceService},
+    instance::{
+        activity::InstanceActivity, model::InstanceId, registry::InstanceRegistry,
+        service::InstanceService,
+    },
     utils::{download::transfer::Cancel, files},
 };
 use uuid::Uuid;
@@ -39,7 +42,8 @@ struct Job {
 pub struct InstanceContentService {
     operations: Arc<crate::data::registry::operation::OperationRegistry>,
     catalog: ContentCatalog,
-    instances: Arc<InstanceService>,
+    instances: Arc<InstanceRegistry>,
+    activity: Arc<InstanceActivity>,
     paths: Arc<LauncherPaths>,
     db: Arc<Database>,
     store: Arc<ObjectStore>,
@@ -67,7 +71,9 @@ impl InstanceContentService {
         root_lock.try_lock().map_err(|_| {
             ContentError::Invalid("Другой процесс лаунчера уже использует этот корень".into())
         })?;
-        match recovery::recover(&db, &paths, &instances, None).await {
+        let registry = instances.get_registry();
+        let activity = instances.activity();
+        match recovery::recover(&db, &paths, &registry, None).await {
             Ok(failures) => {
                 for failure in failures {
                     tracing::error!(
@@ -82,14 +88,15 @@ impl InstanceContentService {
         }
         storage::clear_completed(&db, None).await?;
         if let Err(error) =
-            super::store::legacy::detach_registered_links(&db, &paths, &instances).await
+            super::store::legacy::detach_registered_links(&db, &paths, &activity).await
         {
             tracing::warn!(%error, "could not migrate registered hardlinks");
         }
         Ok(Self {
             operations,
             catalog: ContentCatalog::new(curseforge_key),
-            instances,
+            instances: registry,
+            activity,
             paths: paths.clone(),
             db,
             store: Arc::new(ObjectStore::new(paths.root().join("content-store"))),
@@ -102,7 +109,6 @@ impl InstanceContentService {
     async fn context(&self, instance: InstanceId) -> Result<(PathBuf, Compatibility)> {
         let record = self
             .instances
-            .get_registry()
             .get(instance)
             .await
             .map_err(|error| ContentError::Invalid(error.to_string()))?;
@@ -254,7 +260,7 @@ impl InstanceContentService {
         }
         let instance = plan.preview.instance_id;
         let activity = self
-            .instances
+            .activity
             .reserve_content_change(instance)
             .map_err(|error| ContentError::Invalid(error.to_string()))?;
         let id = Uuid::new_v4();
@@ -462,7 +468,7 @@ impl InstanceContentService {
     /// Tries recovery again after the user resolves a conflicting local file.
     pub async fn retry_recovery(self: &Arc<Self>, instance: InstanceId) -> Result<()> {
         let activity = self
-            .instances
+            .activity
             .reserve_content_change(instance)
             .map_err(|error| ContentError::Invalid(error.to_string()))?;
         let service = Arc::clone(self);
@@ -489,7 +495,7 @@ impl InstanceContentService {
     /// Stops recovery of one pending installation and keeps all files in place.
     pub async fn abandon_recovery(&self, instance: InstanceId, operation: &str) -> Result<()> {
         let _activity = self
-            .instances
+            .activity
             .reserve_content_change(instance)
             .map_err(|error| ContentError::Invalid(error.to_string()))?;
         storage::abandon(&self.db, instance, operation).await

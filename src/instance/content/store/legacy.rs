@@ -3,7 +3,7 @@ use std::{fs, io, path::Path};
 
 use crate::{
     data::{db::Database, layout::LauncherPaths},
-    instance::{content::error::Result, model::InstanceId, service::InstanceService},
+    instance::{activity::InstanceActivity, content::error::Result, model::InstanceId},
     utils::files::{self, digest::FileStamp},
 };
 
@@ -19,7 +19,7 @@ struct Placement {
 pub(in crate::instance::content) async fn detach_registered_links(
     db: &Database,
     paths: &LauncherPaths,
-    instances: &InstanceService,
+    activity: &InstanceActivity,
 ) -> Result<()> {
     let placements: Vec<Placement> = sqlx::query_as(
         "SELECT content.id, content.instance_id, instance.dir, content.relative_path, object.sha256
@@ -32,7 +32,7 @@ pub(in crate::instance::content) async fn detach_registered_links(
     .await?;
 
     for placement in placements {
-        let _activity = match instances.reserve_content_change(placement.instance_id) {
+        let _activity = match activity.reserve_content_change(placement.instance_id) {
             Ok(guard) => guard,
             Err(error) => {
                 tracing::warn!(instance = %placement.instance_id, %error, "legacy mod copy deferred");
