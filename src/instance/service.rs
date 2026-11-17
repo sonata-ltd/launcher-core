@@ -16,7 +16,7 @@ use crate::{
         error::InstanceError,
         event::InstanceEvent,
         init::install::{InstallContext, InstallRequest},
-        launch::{execute::spawn_instance, prepare},
+        launch::{prepare, resolved},
         model::{InstanceId, InstanceRecord, NewInstance},
         mods::resolve_mods,
         registry::InstanceRegistry,
@@ -365,35 +365,24 @@ impl InstanceService {
         let settings = self.settings.effective(id).await?;
         let java = self.resolve_java(id, &settings).await?;
 
-        if let Some(profile) = instance::init::storage::load(&self.db, id).await? {
-            let root =
-                crate::utils::files::child(self.paths.instances(), std::path::Path::new(&rec.dir))?;
-            self.mod_index
-                .before_launch(&self.db, &self.activity, id, root)
-                .await
-                .map_err(|error| InstanceError::ContentInventory { id, source: error })?;
-            let command = crate::instance::launch::resolved::prepare(
-                &rec,
-                &settings,
-                &java,
-                &self.paths,
-                profile,
-            )
-            .await?;
-            reservation.commit(crate::instance::launch::resolved::spawn(command)?);
+        let root =
+            crate::utils::files::child(self.paths.instances(), std::path::Path::new(&rec.dir))?;
+        self.mod_index
+            .before_launch(&self.db, &self.activity, id, root)
+            .await
+            .map_err(|source| InstanceError::ContentInventory { id, source })?;
 
-            return Ok(());
-        }
-
-        if rec.loader != LoaderKind::Vanilla {
-            return Err(InstanceError::NotInstalled(id));
-        }
-
-        let info =
-            prepare::prepare(&rec, &settings, &java, &self.paths, Arc::clone(&self.db)).await?;
-
-        let child = spawn_instance(info).await?;
-        reservation.commit(child);
+        let command = match instance::init::storage::load(&self.db, id).await? {
+            Some(profile) => {
+                resolved::prepare(&rec, &settings, &java, &self.paths, profile).await?
+            }
+            None if rec.loader == LoaderKind::Vanilla => {
+                prepare::prepare_command(&rec, &settings, &java, &self.paths, Arc::clone(&self.db))
+                    .await?
+            }
+            None => return Err(InstanceError::NotInstalled(id)),
+        };
+        reservation.commit(resolved::spawn(command)?);
 
         Ok(())
     }

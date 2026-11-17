@@ -1,4 +1,7 @@
-use crate::instance::download::libs::{LibInfo, LibsData, LibsSyncError};
+use crate::{
+    instance::download::libs::{LibInfo, LibsData, LibsSyncError},
+    version::rules::{rules_allow, RuleContext},
+};
 
 mod prism;
 
@@ -8,33 +11,19 @@ impl<'a, 'b> LibsData<'a, 'b> {
         let mut downloadable_libs: Vec<LibInfo> = Vec::new();
 
         tracing::info!("starting libraries extraction");
+        let context = RuleContext::host();
 
         if let Some(libraries) = self.manifest["libraries"].as_array() {
             for lib in libraries {
                 let lib_name = lib["name"].as_str();
 
-                let allow_lib = if let Some(rules) = lib["rules"].as_array() {
-                    rules.iter().any(|rule| {
-                        if let Some(action) = rule["action"].as_str() {
-                            if action == "allow" {
-                                if let Some(os) = rule["os"].as_object() {
-                                    if os.get("name").and_then(|name| name.as_str())
-                                        == Some(self.current_os)
-                                    {
-                                        return true;
-                                    }
-                                } else {
-                                    return true;
-                                }
-                            }
-                        }
-                        false
-                    })
-                } else {
-                    true
-                };
+                if let Some(rules) = lib["rules"].as_array() {
+                    if !rules_allow(rules, &context)? {
+                        continue;
+                    }
+                }
 
-                if allow_lib {
+                {
                     let lib_path = lib["downloads"]["artifact"]["path"].as_str();
                     let lib_url = lib["downloads"]["artifact"]["url"].as_str();
                     let lib_hash = lib["downloads"]["artifact"]["sha1"].as_str();
@@ -55,7 +44,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 // Check for classifiers
                 if let Some(natives) = lib["natives"].as_object() {
                     for (k, native_name) in natives {
-                        if k == self.current_os {
+                        if k == context.os {
                             if let Some(classifiers) = lib["downloads"]["classifiers"].as_object() {
                                 for (name, v) in classifiers {
                                     if name == native_name {

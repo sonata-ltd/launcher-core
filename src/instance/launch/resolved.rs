@@ -2,16 +2,23 @@ use super::{args::offline_uuid, arguments, traits::StartupTraits, LaunchError};
 use crate::{
     data::layout::LauncherPaths,
     instance::{
-        download::transfer, error::InstanceError, init::model::InstalledProfile,
-        model::InstanceRecord, settings::EffectiveSettings, Result,
+        download::{libs::LibInfo, transfer},
+        error::InstanceError,
+        init::model::{InstalledArtifact, InstalledProfile},
+        model::InstanceRecord,
+        settings::EffectiveSettings,
+        Result,
     },
     java::{model::JavaRuntime, policy::JavaPolicy, select},
-    modloader::archive,
+    modloader::{archive, model::LoaderSpec},
     utils::files,
     version::rules::RuleContext,
 };
 use serde_json::Value;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 pub struct LaunchCommand {
     pub java: PathBuf,
@@ -29,6 +36,10 @@ fn validate_java(java: &JavaRuntime, policy: &JavaPolicy) -> Result<()> {
         .into());
     }
 
+    validate_java_architecture(java)
+}
+
+fn validate_java_architecture(java: &JavaRuntime) -> Result<()> {
     let host = select::host_arch();
     if let Some(actual) = java.arch.as_ref().filter(|_| !select::arch_ok(java, host)) {
         return Err(LaunchError::IncompatibleJavaArchitecture {
@@ -58,9 +69,70 @@ pub async fn prepare(
     }
 
     validate_java(java, &profile.java)?;
-
     let maven = files::child(paths.libraries(), &profile.libraries_root)?;
-    let game = paths.instances().join(&rec.dir);
+    prepare_command(rec, settings, java, paths, &maven, profile, false).await
+}
+
+pub(super) async fn prepare_legacy(
+    rec: &InstanceRecord,
+    settings: &EffectiveSettings,
+    java: &JavaRuntime,
+    paths: &LauncherPaths,
+    manifest: Value,
+    libs: Vec<LibInfo>,
+) -> Result<LaunchCommand> {
+    let majors = crate::version::provider::java_majors(&manifest);
+    let policy = JavaPolicy {
+        allow_newer: majors.iter().any(|&major| major > 8),
+        majors,
+    };
+    if policy.majors.is_empty() {
+        validate_java_architecture(java)?;
+    } else {
+        validate_java(java, &policy)?;
+    }
+
+    let maven = paths.libraries();
+    let mut artifacts = Vec::with_capacity(libs.len());
+    for lib in libs {
+        let path = Path::new(lib.path());
+        let path = path.strip_prefix(maven).map_err(|_| {
+            InstanceError::RunFailed(format!(
+                "library is outside the configured directory: {}",
+                path.display()
+            ))
+        })?;
+        artifacts.push(InstalledArtifact {
+            path: path.to_owned(),
+            sha1: lib.hash().clone(),
+            classpath: true,
+            native: lib.is_native(),
+        });
+    }
+
+    let profile = InstalledProfile {
+        format_version: 1,
+        minecraft: rec.version.clone(),
+        loader: LoaderSpec::vanilla(),
+        manifest,
+        java: policy,
+        libraries_root: PathBuf::new(),
+        artifacts,
+        metadata: Vec::new(),
+    };
+    prepare_command(rec, settings, java, paths, maven, profile, true).await
+}
+
+async fn prepare_command(
+    rec: &InstanceRecord,
+    settings: &EffectiveSettings,
+    java: &JavaRuntime,
+    paths: &LauncherPaths,
+    maven: &Path,
+    profile: InstalledProfile,
+    legacy: bool,
+) -> Result<LaunchCommand> {
+    let game = files::child(paths.instances(), Path::new(&rec.dir))?;
 
     async_std::fs::create_dir_all(&game)
         .await
@@ -72,7 +144,7 @@ pub async fn prepare(
 
     let mut classpath = Vec::new();
     for item in &profile.artifacts {
-        let path = files::child(&maven, &item.path)?;
+        let path = files::child(maven, &item.path)?;
 
         transfer::check_file(path.clone(), item.sha1.clone()).await?;
 
@@ -107,10 +179,13 @@ pub async fn prepare(
         .into_string()
         .map_err(|_| InstanceError::RunFailed("non-Unicode classpath".into()))?;
 
+    let asset_index = super::super::download::manifest::asset_index_id(&profile.manifest)
+        .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
     let mut variables = HashMap::from([
         ("auth_player_name".into(), "Player".into()),
         ("auth_uuid".into(), offline_uuid("Player")),
         ("auth_access_token".into(), String::new()),
+        ("auth_session".into(), String::new()),
         ("clientid".into(), String::new()),
         ("auth_xuid".into(), String::new()),
         ("user_properties".into(), "{}".into()),
@@ -122,14 +197,15 @@ pub async fn prepare(
             "assets_root".into(),
             paths.assets().to_string_lossy().into_owned(),
         ),
+        ("assets_index_name".into(), asset_index.into()),
         (
-            "assets_index_name".into(),
-            profile
-                .manifest
-                .pointer("/assetIndex/id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| InstanceError::RunFailed("missing assets index".into()))?
-                .into(),
+            "game_assets".into(),
+            paths
+                .assets()
+                .join("virtual")
+                .join(asset_index)
+                .to_string_lossy()
+                .into_owned(),
         ),
         (
             "library_directory".into(),
@@ -157,12 +233,27 @@ pub async fn prepare(
         .cloned()
         .unwrap_or_default();
 
-    let game_args = profile
+    let game_args = match profile
         .manifest
         .pointer("/arguments/game")
         .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    {
+        Some(args) => args.clone(),
+        None => match profile
+            .manifest
+            .get("minecraftArguments")
+            .and_then(Value::as_str)
+        {
+            Some(raw) => shlex::split(raw)
+                .ok_or(LaunchError::Arguments(arguments::ArgumentError::Invalid(
+                    "invalid legacy argument quoting",
+                )))?
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+            None => Vec::new(),
+        },
+    };
 
     let mut args = vec![
         format!("-Xms{}M", settings.memory_min),
@@ -194,11 +285,13 @@ pub async fn prepare(
             .and_then(Value::as_str)
             .ok_or_else(|| InstanceError::RunFailed("logging file id missing".into()))?;
 
-        let path = files::child(&maven, &PathBuf::from("sonata-logging").join(id))?;
+        let path = files::child(maven, &PathBuf::from("sonata-logging").join(id))?;
         variables.insert("path".into(), path.to_string_lossy().into_owned());
 
         if let Some(argument) = logging.get("argument").and_then(Value::as_str) {
-            args.push(arguments::substitute(argument, &variables).map_err(LaunchError::from)?);
+            if !legacy || path.is_file() {
+                args.push(arguments::substitute(argument, &variables).map_err(LaunchError::from)?);
+            }
         }
     }
 
@@ -209,6 +302,7 @@ pub async fn prepare(
             .manifest
             .get("mainClass")
             .and_then(Value::as_str)
+            .or_else(|| legacy.then_some("net.minecraft.launchwrapper.Launch"))
             .ok_or_else(|| InstanceError::RunFailed("mainClass missing".into()))?
             .into(),
     );
@@ -227,7 +321,7 @@ pub fn spawn(command: LaunchCommand) -> Result<async_std::process::Child> {
         .current_dir(command.game_dir)
         .args(command.args)
         .spawn()
-        .map_err(|e| InstanceError::RunFailed(e.to_string()))
+        .map_err(|error| LaunchError::Spawn(error).into())
 }
 
 // Official Forge metadata ignores <version>.jar, but our Maven layout uses
@@ -345,6 +439,128 @@ mod forge_ignore_tests {
 
         java.arch = None;
         assert!(validate_java(&java, &profile().java).is_ok());
+    }
+
+    #[async_std::test]
+    async fn legacy_and_persisted_profiles_share_rules_arguments_and_working_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::resolve(&crate::Config {
+            root_override: Some(directory.path().to_owned()),
+            ..crate::Config::init()
+        })
+        .await
+        .unwrap();
+        let rec = InstanceRecord {
+            id: 1.into(),
+            name: "Example".into(),
+            dir: "Example Instance".into(),
+            version: "1.20".into(),
+            loader: crate::modloader::model::LoaderKind::Vanilla,
+            loader_version: None,
+            manifest_url: String::new(),
+            meta_provider: "prism".into(),
+        };
+        let settings = EffectiveSettings {
+            java_runtime: Some(1),
+            memory_min: 512,
+            memory_max: 4096,
+            jvm_args: vec!["-Dtest=a b".into()],
+        };
+        let java = JavaRuntime {
+            id: 1,
+            major: 17,
+            version: "17".into(),
+            arch: None,
+            exec_path: "java".into(),
+            home_path: String::new(),
+            vendor: None,
+            source: Default::default(),
+        };
+        let client = paths.libraries().join("legacy/client.jar");
+        std::fs::create_dir_all(client.parent().unwrap()).unwrap();
+        std::fs::write(&client, b"fixture").unwrap();
+        let sha1 = files::sha1_file(&client).unwrap();
+        let lib = LibInfo::new(
+            "client".into(),
+            sha1.clone(),
+            client.clone(),
+            String::new(),
+            false,
+        )
+        .unwrap();
+        let manifest = json!({
+            "assetIndex": {"id": "test"}, "mainClass": "Example",
+            "javaVersion": {"majorVersion": 17},
+            "arguments": {
+                "jvm": [{"rules": [{"action": "allow"}], "value": "-Dname=${auth_player_name}"}],
+                "game": [
+                    {"rules": [{"action": "allow"}, {"action": "disallow"}], "value": "--skipped"},
+                    {"rules": [{"action": "allow"}], "value": ["--dir", "${game_directory}"]}
+                ]
+            }
+        });
+        let legacy = prepare_legacy(
+            &rec,
+            &settings,
+            &java,
+            &paths,
+            manifest.clone(),
+            vec![lib.clone()],
+        )
+        .await
+        .unwrap();
+        let installed = prepare(
+            &rec,
+            &settings,
+            &java,
+            &paths,
+            InstalledProfile {
+                format_version: 1,
+                minecraft: rec.version.clone(),
+                loader: LoaderSpec::vanilla(),
+                manifest: manifest.clone(),
+                java: JavaPolicy {
+                    majors: vec![17],
+                    allow_newer: false,
+                },
+                libraries_root: "legacy".into(),
+                artifacts: vec![InstalledArtifact {
+                    path: "client.jar".into(),
+                    sha1,
+                    classpath: true,
+                    native: false,
+                }],
+                metadata: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy.game_dir, installed.game_dir);
+        assert_eq!(legacy.game_dir, paths.instances().join(&rec.dir));
+        let without_natives = |args: Vec<String>| {
+            args.into_iter()
+                .filter(|arg| !arg.starts_with("-Djava.library.path="))
+                .collect::<Vec<_>>()
+        };
+        assert!(!legacy.args.iter().any(|arg| arg == "--skipped"));
+        assert!(legacy.args.iter().any(|arg| arg == "-Dname=Player"));
+        assert_eq!(
+            without_natives(legacy.args),
+            without_natives(installed.args)
+        );
+
+        let mut raw = manifest;
+        raw.as_object_mut().unwrap().remove("arguments");
+        raw["minecraftArguments"] = json!(r#"--note "one value" --player ${auth_player_name}"#);
+        let command = prepare_legacy(&rec, &settings, &java, &paths, raw, vec![lib])
+            .await
+            .unwrap();
+        assert!(command.args.ends_with(&[
+            "--note".into(),
+            "one value".into(),
+            "--player".into(),
+            "Player".into()
+        ]));
     }
 
     #[test]

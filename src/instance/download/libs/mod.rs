@@ -42,6 +42,9 @@ pub enum LibsSyncError {
     ManifestMalformed(String),
 
     #[error(transparent)]
+    Rules(#[from] crate::version::rules::RuleError),
+
+    #[error(transparent)]
     Sync(#[from] SyncError),
 
     #[error(transparent)]

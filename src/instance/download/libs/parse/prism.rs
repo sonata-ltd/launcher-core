@@ -10,6 +10,10 @@ use super::*;
 impl<'a, 'b> LibsData<'a, 'b> {
     pub async fn parse_manifest_prism(&self) -> Result<Vec<LibInfo>, LibsSyncError> {
         let mut downloadable_libs: Vec<LibInfo> = Vec::new();
+        let context = RuleContext {
+            os: self.current_os,
+            ..RuleContext::host()
+        };
 
         if let Some(libs) = self.manifest.get("libraries").and_then(|v| v.as_array()) {
             for lib in libs {
@@ -19,7 +23,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                         // If artifact not present or incomplete, check rules & downloads.classifiers under lib
                         let natives_key = format!("natives-{}", self.current_os);
                         if let Some(rules) = lib.get("rules").and_then(|v| v.as_array()) {
-                            if rules_applies(rules, self.current_os) {
+                            if rules_allow(rules, &context)? {
                                 if let Some(native_obj) = downloads_val
                                     .get("classifiers")
                                     .and_then(|c| c.get(&natives_key))
@@ -171,39 +175,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
 
         Ok(downloadable_libs)
     }
-}
-
-fn rules_applies(rules: &Vec<Value>, current_os: &str) -> bool {
-    let mut allow_lib = false;
-
-    for rule in rules {
-        let os_obj = match rule.get("os") {
-            Some(os) => os,
-            None => {
-                if let Some(action) = rule.get("action").and_then(|v| v.as_str()) {
-                    if action == "allow" {
-                        allow_lib = true;
-                    }
-                }
-
-                continue;
-            }
-        };
-
-        if let Some(os_name) = os_obj.get("name").and_then(|v| v.as_str()) {
-            if os_name == current_os {
-                if let Some(action) = rule.get("action").and_then(|v| v.as_str()) {
-                    if action == "allow" {
-                        return true;
-                    } else {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-
-    allow_lib
 }
 
 fn get_path_from_url(url: &str) -> Option<&str> {
