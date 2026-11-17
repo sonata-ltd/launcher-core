@@ -486,6 +486,15 @@ impl InstanceContentService {
         .await
     }
 
+    /// Stops recovery of one pending installation and keeps all files in place.
+    pub async fn abandon_recovery(&self, instance: InstanceId, operation: &str) -> Result<()> {
+        let _activity = self
+            .instances
+            .reserve_content_change(instance)
+            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+        storage::abandon(&self.db, instance, operation).await
+    }
+
     pub fn cancel(&self, id: Uuid) -> Result<()> {
         let jobs = self
             .jobs

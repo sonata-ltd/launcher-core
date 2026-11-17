@@ -7,6 +7,13 @@ use crate::{
 };
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
+enum OperationState {
+    Publishing,
+    Completed,
+}
+
 pub async fn ensure_no_pending(db: &Database, instance: InstanceId) -> Result<()> {
     if has_pending(db, instance).await? {
         return Err(ContentError::Invalid(
@@ -21,9 +28,10 @@ pub(crate) async fn has_pending(
     instance: InstanceId,
 ) -> std::result::Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM content_operations WHERE instance_id=? AND state='publishing')",
+        "SELECT EXISTS(SELECT 1 FROM content_operations WHERE instance_id=? AND state=?)",
     )
     .bind(instance.get())
+    .bind(OperationState::Publishing)
     .fetch_one(&db.pool)
     .await
 }
@@ -35,9 +43,15 @@ pub(crate) async fn prepare(
     files: &[PublishedFile],
 ) -> Result<()> {
     let mut transaction = db.pool.begin().await?;
-    sqlx::query("INSERT INTO content_operations(id,instance_id,state,plan_json,recovery_json) VALUES(?,?,'publishing','{}',?)")
-        .bind(id.to_string()).bind(instance.get()).bind(journal::encode(files)?)
-        .execute(&mut *transaction).await?;
+    sqlx::query(
+        "INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES(?,?,?,?)",
+    )
+    .bind(id.to_string())
+    .bind(instance.get())
+    .bind(OperationState::Publishing)
+    .bind(journal::encode(files)?)
+    .execute(&mut *transaction)
+    .await?;
     for file in files {
         sqlx::query(
             "INSERT OR IGNORE INTO content_object_leases(operation_id,object_id) VALUES(?,?)",
@@ -59,11 +73,13 @@ pub(crate) async fn complete(
 ) -> Result<()> {
     let mut transaction = db.pool.begin().await?;
     let transition = sqlx::query(
-        "UPDATE content_operations SET state='completed'
-         WHERE id=? AND instance_id=? AND state='publishing'",
+        "UPDATE content_operations SET state=?
+         WHERE id=? AND instance_id=? AND state=?",
     )
+    .bind(OperationState::Completed)
     .bind(id.to_string())
     .bind(instance.get())
+    .bind(OperationState::Publishing)
     .execute(&mut *transaction)
     .await?;
     if transition.rows_affected() != 1 {
@@ -103,9 +119,10 @@ pub(super) async fn pending(
 ) -> Result<Vec<PendingPublication>> {
     Ok(sqlx::query_as(
         "SELECT id, instance_id, recovery_json FROM content_operations
-         WHERE state='publishing' AND (?1 IS NULL OR instance_id=?1)
+         WHERE state=? AND (?2 IS NULL OR instance_id=?2)
          ORDER BY instance_id, created_at, rowid",
     )
+    .bind(OperationState::Publishing)
     .bind(instance.map(InstanceId::get))
     .fetch_all(&db.pool)
     .await?)
@@ -127,24 +144,26 @@ pub(super) async fn leased_objects(
 }
 
 pub(crate) async fn operation_completed(db: &Database, id: Uuid) -> Result<bool> {
-    let state: Option<String> =
+    let state: Option<OperationState> =
         sqlx::query_scalar("SELECT state FROM content_operations WHERE id=?")
             .bind(id.to_string())
             .fetch_optional(&db.pool)
             .await?;
-    Ok(state.as_deref() == Some("completed"))
+    Ok(state == Some(OperationState::Completed))
 }
 
 /// Завершённый recovery-журнал больше не защищает файлы. Убираем его,
 /// чтобы RESTRICT не запрещал в будущем удалить обычный экземпляр.
 pub(crate) async fn clear_completed(db: &Database, id: Option<Uuid>) -> Result<()> {
     if let Some(id) = id {
-        sqlx::query("DELETE FROM content_operations WHERE id=? AND state='completed'")
+        sqlx::query("DELETE FROM content_operations WHERE id=? AND state=?")
             .bind(id.to_string())
+            .bind(OperationState::Completed)
             .execute(&db.pool)
             .await?;
     } else {
-        sqlx::query("DELETE FROM content_operations WHERE state='completed'")
+        sqlx::query("DELETE FROM content_operations WHERE state=?")
+            .bind(OperationState::Completed)
             .execute(&db.pool)
             .await?;
     }
@@ -155,9 +174,25 @@ pub(super) async fn clear_completed_for_instance(
     db: &Database,
     instance: InstanceId,
 ) -> Result<()> {
-    sqlx::query("DELETE FROM content_operations WHERE instance_id=? AND state='completed'")
+    sqlx::query("DELETE FROM content_operations WHERE instance_id=? AND state=?")
         .bind(instance.get())
+        .bind(OperationState::Completed)
         .execute(&db.pool)
         .await?;
+    Ok(())
+}
+
+/// Releases the journal and its leases without changing any published files.
+pub(super) async fn abandon(db: &Database, instance: InstanceId, operation: &str) -> Result<()> {
+    let deleted =
+        sqlx::query("DELETE FROM content_operations WHERE id=? AND instance_id=? AND state=?")
+            .bind(operation)
+            .bind(instance.get())
+            .bind(OperationState::Publishing)
+            .execute(&db.pool)
+            .await?;
+    if deleted.rows_affected() != 1 {
+        return Err(ContentError::InvalidJournalId(operation.to_owned()));
+    }
     Ok(())
 }

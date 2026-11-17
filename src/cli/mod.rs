@@ -20,6 +20,9 @@ sonata-launcher-core cli usage:
     register-cleanroom <release-descriptor.json>
     register-cleanroom-url <loader-version> <official-mmc-zip-url> <java-majors-comma-separated>
     set-java <instance_id> <java_id>
+    recovery-list <instance_id>
+    recovery-retry <instance_id>
+    recovery-abandon <instance_id> <operation_id> --keep-files
     install  <instance_id>
     launch   <instance_id>
     list
@@ -155,6 +158,24 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
                 .await?;
 
             println!("effective settings: {:#?}", view.effective);
+        }
+
+        ["recovery-list", id] => {
+            for operation in state.content().pending_recovery(parse_id(id)?).await? {
+                println!("{operation}");
+            }
+        }
+
+        ["recovery-retry", id] => {
+            state.content().retry_recovery(parse_id(id)?).await?;
+        }
+
+        ["recovery-abandon", id, operation, "--keep-files"] => {
+            state
+                .content()
+                .abandon_recovery(parse_id(id)?, operation)
+                .await?;
+            println!("Recovery abandoned. Existing files were kept.");
         }
 
         ["install", id] => {

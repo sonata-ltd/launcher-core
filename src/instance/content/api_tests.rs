@@ -421,3 +421,72 @@ async fn startup_detaches_registered_legacy_links_without_changing_bytes() {
         .unwrap();
     assert_eq!(placement, "copy");
 }
+
+#[async_std::test]
+async fn abandoning_conflict_keeps_files_and_releases_only_the_selected_operation() {
+    let fixture = fixture().await;
+    let (id, _) = prepared(&fixture).await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"local changes").unwrap();
+    let service = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert!(service
+        .abandon_recovery(999.into(), &id.to_string())
+        .await
+        .is_err());
+    assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    let busy = fixture
+        .instances
+        .reserve_content_change(fixture.id)
+        .unwrap();
+    assert!(service
+        .abandon_recovery(fixture.id, &id.to_string())
+        .await
+        .is_err());
+    drop(busy);
+    service
+        .abandon_recovery(fixture.id, &id.to_string())
+        .await
+        .unwrap();
+    assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    assert_eq!(std::fs::read(target).unwrap(), b"local changes");
+    let leases: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM content_object_leases WHERE operation_id=?")
+            .bind(id.to_string())
+            .fetch_one(&fixture.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(leases, 0);
+}
+
+#[async_std::test]
+async fn database_enforces_publication_journal_state_transitions() {
+    let fixture = fixture().await;
+    let (id, files) = prepared(&fixture).await;
+    let id_string = id.to_string();
+    let update = "UPDATE content_operations SET state=? WHERE id=?";
+    assert!(sqlx::query(update)
+        .bind("unknown")
+        .bind(&id_string)
+        .execute(&fixture.db.pool)
+        .await
+        .is_err());
+    storage::complete(&fixture.db, id, fixture.id, &files)
+        .await
+        .unwrap();
+    assert!(sqlx::query(update)
+        .bind("publishing")
+        .bind(&id_string)
+        .execute(&fixture.db.pool)
+        .await
+        .is_err());
+    assert!(storage::operation_completed(&fixture.db, id).await.unwrap());
+}
