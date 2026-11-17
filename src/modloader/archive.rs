@@ -1,4 +1,4 @@
-use crate::utils::files;
+use crate::utils::{cancellation::Cancellation, files};
 
 use super::error::{ModloaderError, Result};
 use std::{
@@ -7,6 +7,22 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+pub(super) async fn stage_embedded_libraries(
+    source: PathBuf,
+    destination: PathBuf,
+    cancel: &Cancellation,
+) -> Result<()> {
+    let token = cancel.clone();
+    let result = async_std::task::spawn_blocking(move || match fs::symlink_metadata(&source) {
+        Ok(_) => files::placement::copy_tree_replace(&source, &destination, &token),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    })
+    .await;
+    cancel.check()?;
+    Ok(result?)
+}
 
 fn zip_error(e: impl std::fmt::Display) -> ModloaderError {
     ModloaderError::Invalid(e.to_string())

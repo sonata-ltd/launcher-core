@@ -124,6 +124,7 @@ pub async fn prepare<'a>(
             context.maven_dir.into(),
             &request.game_version,
             &mut game_components,
+            context.cancel,
         )
         .await?;
 

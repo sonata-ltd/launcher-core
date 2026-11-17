@@ -98,12 +98,7 @@ pub async fn prepare(
         ));
     }
 
-    let source = root.join("libraries");
-    let target = maven.to_owned();
-
-    if source.is_dir() {
-        async_std::task::spawn_blocking(move || copy_local(source, target)).await?;
-    }
+    archive::stage_embedded_libraries(root.join("libraries"), maven.to_owned(), cancel).await?;
 
     let mut result = components::prism(
         repo,
@@ -132,31 +127,4 @@ pub async fn prepare(
     });
 
     Ok(result)
-}
-
-fn copy_local(source: PathBuf, target: PathBuf) -> Result<()> {
-    let mut todo = vec![(source, target)];
-
-    while let Some((source, target)) = todo.pop() {
-        std::fs::create_dir_all(&target)?;
-
-        for entry in std::fs::read_dir(source)? {
-            let entry = entry?;
-            let kind = entry.file_type()?;
-
-            if kind.is_symlink() {
-                return Err(ModloaderError::Invalid("MMC libraries symlink".into()));
-            }
-
-            let destination = target.join(entry.file_name());
-
-            if kind.is_dir() {
-                todo.push((entry.path(), destination));
-            } else {
-                std::fs::copy(entry.path(), destination)?;
-            }
-        }
-    }
-
-    Ok(())
 }

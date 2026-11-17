@@ -86,6 +86,7 @@ pub async fn prepare(
     maven: PathBuf,
     game_version: &str,
     base: &mut components::Components,
+    cancel: &Cancel,
 ) -> Result<Prepared> {
     let input = installer.clone();
     let dir = extracted.clone();
@@ -143,44 +144,13 @@ pub async fn prepare(
     components::apply(base, &patch)?;
     base.maven_files.extend(profile.libraries.clone());
 
-    let embedded = extracted.join("maven");
-    if embedded.is_dir() {
-        copy_tree(embedded, maven).await?;
-    }
+    archive::stage_embedded_libraries(extracted.join("maven"), maven, cancel).await?;
 
     Ok(Prepared {
         profile,
         installer,
         extracted,
     })
-}
-
-async fn copy_tree(source: PathBuf, destination: PathBuf) -> Result<()> {
-    async_std::task::spawn_blocking(move || {
-        let mut stack = vec![(source, destination)];
-
-        while let Some((source, target)) = stack.pop() {
-            std::fs::create_dir_all(&target)?;
-
-            for item in std::fs::read_dir(source)? {
-                let item = item?;
-                let dest = target.join(item.file_name());
-                let kind = item.file_type()?;
-
-                if kind.is_symlink() {
-                    return Err(ModloaderError::Invalid("embedded Maven symlink".into()));
-                }
-
-                if kind.is_dir() {
-                    stack.push((item.path(), dest));
-                } else {
-                    std::fs::copy(item.path(), dest)?;
-                }
-            }
-        }
-        Ok(())
-    })
-    .await
 }
 
 pub async fn run(
@@ -462,6 +432,7 @@ mod tests {
             temp.path().join("maven"),
             "1.20.1",
             &mut base,
+            &Cancel::new(),
         )
         .await
         .unwrap();
