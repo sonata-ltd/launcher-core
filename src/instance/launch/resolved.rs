@@ -329,11 +329,16 @@ async fn prepare_command(
 pub(crate) fn spawn(
     command: LaunchCommand,
 ) -> Result<(async_std::process::Child, NativeDirectory)> {
+    command
+        .natives
+        .before_spawn()
+        .map_err(LaunchError::Natives)?;
     let child = async_std::process::Command::new(command.java)
         .current_dir(command.game_dir)
         .args(command.args)
         .spawn()
         .map_err(LaunchError::Spawn)?;
+    command.natives.record_child(child.id());
     Ok((child, command.natives))
 }
 

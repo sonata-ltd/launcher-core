@@ -41,8 +41,12 @@ dunce = "1.0.5"
 tempfile = "3.21.0"
 shlex = "2.0.1"
 notify = "8.2.2"
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.100.0"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [dev-dependencies]
 httpmock = "0.7.0"

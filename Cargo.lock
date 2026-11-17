@@ -2973,6 +2973,7 @@ dependencies = [
  "home",
  "http-types",
  "httpmock",
+ "libc",
  "linked-hash-map",
  "md5",
  "notify",
@@ -2995,6 +2996,7 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-registry",
+ "windows-sys 0.61.0",
  "zip",
 ]
 

@@ -83,6 +83,7 @@ impl GlobalState {
                 if removed > 0 {
                     tracing::info!(removed, "cleaned up partial downloads");
                 }
+                crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
             });
         }
 
