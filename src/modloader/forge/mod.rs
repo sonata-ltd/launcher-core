@@ -7,7 +7,6 @@ use serde_json::Value;
 use crate::data::registry::operation::handle::OperationHandle;
 use crate::data::registry::operation::message::stage::{OperationStage, StageResult};
 use crate::data::registry::operation::message::status::Outcome;
-use crate::java;
 use crate::java::model::JavaRuntime;
 use crate::modloader::components;
 use crate::modloader::components::Components;
@@ -27,6 +26,7 @@ mod install;
 mod model;
 mod output;
 mod processor;
+mod runtime;
 mod tokens;
 
 #[cfg(test)]
@@ -184,18 +184,13 @@ pub async fn finalize<'a>(
 ) -> Result<()> {
     context.cancel.check()?;
 
-    let java = context
-        .modloader_java_runtimes
-        .iter()
-        .filter(|j| {
-            j.arch
-                .as_deref()
-                .is_none_or(|a| java::select::normalize_arch(a) == java::select::host_arch())
-        })
-        .max_by_key(|j| j.major)
-        .ok_or_else(|| {
-            ModloaderError::Invalid("register a Java runtime for installer processors".into())
-        })?;
+    let java = runtime::select_for_processors(
+        &request.prepared.profile.processors,
+        request.maven_dir,
+        context.modloader_java_runtimes,
+        context.cancel,
+    )
+    .await?;
 
     let stage_start_point = Instant::now();
     context

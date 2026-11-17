@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 use crate::{
     instance::download::{libs::LibInfo, manifest::fetch_manifest},
     utils::str_nth_occurrence,

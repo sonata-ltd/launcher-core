@@ -13,6 +13,9 @@ pub enum ModloaderError {
     #[error("metadata request failed: {0}")]
     Http(String),
 
+    #[error("processor classpath requires Java {minimum} or newer for this host")]
+    ProcessorJavaUnavailable { minimum: u32 },
+
     #[error("processor failed: {0}")]
     Processor(String),
 
