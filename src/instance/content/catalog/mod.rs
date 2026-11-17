@@ -3,6 +3,8 @@ pub mod curseforge;
 pub mod modrinth;
 pub mod types;
 
+use std::{collections::VecDeque, sync::Arc};
+
 use crate::instance::content::{
     error::{ContentError, Result},
     model::{ProjectKey, Provider},
@@ -10,20 +12,48 @@ use crate::instance::content::{
 use types::{CatalogRelease, Compatibility, SearchPage};
 
 const MAX_PLAN_REQUESTS: usize = 128;
+const MAX_CACHED_MODRINTH_VERSIONS: usize = 8;
 
 pub(crate) struct RequestBudget {
     remaining: usize,
+    modrinth_versions: VecDeque<(String, Option<Arc<modrinth::VersionResponse>>)>,
 }
 
 impl Default for RequestBudget {
     fn default() -> Self {
         Self {
             remaining: MAX_PLAN_REQUESTS,
+            modrinth_versions: VecDeque::new(),
         }
     }
 }
 
 impl RequestBudget {
+    fn cached_modrinth_version(
+        &mut self,
+        id: &str,
+    ) -> Option<Option<Arc<modrinth::VersionResponse>>> {
+        let position = self
+            .modrinth_versions
+            .iter()
+            .position(|(key, _)| key == id)?;
+        let entry = self.modrinth_versions.remove(position)?;
+        let response = entry.1.clone();
+        self.modrinth_versions.push_back(entry);
+        Some(response)
+    }
+
+    fn remember_modrinth_version(
+        &mut self,
+        id: String,
+        response: Option<Arc<modrinth::VersionResponse>>,
+    ) {
+        if self.modrinth_versions.len() >= MAX_CACHED_MODRINTH_VERSIONS {
+            self.modrinth_versions.pop_front();
+        }
+        self.modrinth_versions.push_back((id, response));
+    }
+
     async fn get<T: serde::de::DeserializeOwned>(
         &mut self,
         request: surf::RequestBuilder,
@@ -142,5 +172,30 @@ impl From<crate::utils::download::json::JsonRequestError> for ContentError {
             crate::utils::download::json::JsonRequestError::Status(status) => Self::Http(status),
             other => Self::Transport(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod request_budget_tests {
+    use super::*;
+
+    #[async_std::test]
+    async fn unavailable_version_lookup_reuses_cached_404_without_a_request() {
+        let mut budget = RequestBudget {
+            remaining: 0,
+            ..Default::default()
+        };
+        budget.remember_modrinth_version("missing".into(), None);
+        let catalog = ContentCatalog::new(None);
+        let game = Compatibility {
+            minecraft: "1.21.1".into(),
+            loader: "fabric".into(),
+        };
+        assert!(matches!(
+            catalog
+                .exact_release_bounded(Provider::Modrinth, "project", "missing", &game, &mut budget)
+                .await,
+            Err(ContentError::CandidateUnavailable(_))
+        ));
     }
 }

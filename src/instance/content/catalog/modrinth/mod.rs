@@ -1,4 +1,6 @@
 mod dto;
+pub(super) use dto::Version as VersionResponse;
+use std::sync::Arc;
 
 use super::types::*;
 use crate::{
@@ -109,7 +111,7 @@ impl Modrinth {
     ) -> Result<Vec<CatalogRelease>> {
         let mut releases = Vec::new();
         for version in versions.into_iter().take(64) {
-            match self.normalize(version, compatibility, budget).await {
+            match self.normalize(&version, compatibility, budget).await {
                 Ok(release) => releases.push(release),
                 Err(ContentError::CandidateUnavailable(reason)) => {
                     tracing::debug!(%reason, "skipping unavailable Modrinth release")
@@ -145,25 +147,42 @@ impl Modrinth {
                 version.name
             )));
         }
-        self.normalize(version, compatibility, budget).await
+        self.normalize(&version, compatibility, budget).await
     }
 
-    async fn version(&self, id: &str, budget: &mut super::RequestBudget) -> Result<dto::Version> {
-        match budget
+    async fn version(
+        &self,
+        id: &str,
+        budget: &mut super::RequestBudget,
+    ) -> Result<Arc<dto::Version>> {
+        let unavailable =
+            || ContentError::CandidateUnavailable(format!("Modrinth release {id} was not found"));
+        if let Some(cached) = budget.cached_modrinth_version(id) {
+            return cached.ok_or_else(unavailable);
+        }
+        let result: Result<dto::Version> = budget
             .get(self.request(Self::url(&["version", id])?)?)
-            .await
-        {
-            Ok(version) => Ok(version),
-            Err(ContentError::Http(404)) => Err(ContentError::CandidateUnavailable(format!(
-                "Modrinth release {id} was not found"
-            ))),
+            .await;
+        match result {
+            Ok(version) if version.id == id => {
+                let version = Arc::new(version);
+                budget.remember_modrinth_version(id.to_owned(), Some(version.clone()));
+                Ok(version)
+            }
+            Ok(_) => Err(ContentError::Invalid(
+                "Modrinth returned a different exact release".into(),
+            )),
+            Err(ContentError::Http(404)) => {
+                budget.remember_modrinth_version(id.to_owned(), None);
+                Err(unavailable())
+            }
             Err(error) => Err(error),
         }
     }
 
     async fn normalize(
         &self,
-        version: dto::Version,
+        version: &dto::Version,
         compatibility: &Compatibility,
         budget: &mut super::RequestBudget,
     ) -> Result<CatalogRelease> {
@@ -209,7 +228,7 @@ impl Modrinth {
                         "Точная зависимость несовместима с экземпляром".into(),
                     ));
                 }
-                target.project_id
+                target.project_id.clone()
             } else {
                 return Err(ContentError::CandidateUnavailable(
                     "Зависимость без project_id/version_id требует ручной установки".into(),
@@ -223,10 +242,10 @@ impl Modrinth {
         }
         Ok(CatalogRelease {
             key: ReleaseKey {
-                project: project_key(Provider::Modrinth, version.project_id),
-                release_id: version.id,
+                project: project_key(Provider::Modrinth, version.project_id.clone()),
+                release_id: version.id.clone(),
             },
-            title: version.name,
+            title: version.name.clone(),
             dependencies,
             file,
         })
