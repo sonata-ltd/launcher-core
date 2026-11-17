@@ -10,6 +10,30 @@ use sha2::{Digest, Sha256, Sha512};
 
 use crate::utils::cancellation::Cancellation;
 
+#[derive(Debug)]
+pub(crate) struct Sha256Digest(String);
+
+#[derive(Debug, thiserror::Error)]
+#[error("expected a 64-digit hexadecimal SHA-256 digest")]
+pub(crate) struct InvalidSha256;
+
+impl TryFrom<&str> for Sha256Digest {
+    type Error = InvalidSha256;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if !super::hash_valid(value, 64) {
+            return Err(InvalidSha256);
+        }
+        Ok(Self(value.to_ascii_lowercase()))
+    }
+}
+
+impl From<Sha256Digest> for String {
+    fn from(digest: Sha256Digest) -> Self {
+        digest.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDigests {
     pub sha256: String,

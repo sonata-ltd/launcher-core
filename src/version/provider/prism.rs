@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use crate::utils::{files::digest::Sha256Digest, url};
+
 use crate::version::provider::VersionKind;
 use crate::version::provider::{VersionSource, VersionSummary};
 
@@ -71,32 +73,78 @@ impl VersionSource for PrismSource {
         }
 
         let mut ids = HashSet::new();
-        for version in &index.versions {
-            if version.version.trim().is_empty() || !ids.insert(version.version.as_str()) {
+        let mut versions = Vec::with_capacity(index.versions.len());
+        for version in index.versions {
+            let id = version.version;
+            if id.trim().is_empty() || !ids.insert(id.clone()) {
                 return Err(VersionError::InvalidIndex(format!(
-                    "empty or duplicate version id: {:?}",
-                    version.version
+                    "empty or duplicate version id: {id:?}"
                 )));
             }
-        }
-
-        let base_url = self.base_url();
-        let mut version_summary = Vec::new();
-
-        for version in index.versions {
-            let url = format!("{}/{}/{}.json", base_url, index.uid, version.version);
-
-            version_summary.push(VersionSummary {
-                id: version.version,
+            url::validate_segment(&id)
+                .map_err(|error| VersionError::InvalidIndex(error.to_string()))?;
+            let url = url::append_segments(self.base_url(), &[&index.uid, &format!("{id}.json")])
+                .map_err(|error| VersionError::InvalidIndex(error.to_string()))?;
+            let digest = Sha256Digest::try_from(version.sha256.as_str()).map_err(|error| {
+                VersionError::InvalidIndex(format!("invalid hash for version {id:?}: {error}"))
+            })?;
+            versions.push(VersionSummary {
+                id,
                 url,
                 kind: version.kind,
                 latest_stable: version.recommended,
                 released_at: Some(version.release_time),
                 provider: self.id(),
-                sha256: Some(version.sha256),
+                sha256: Some(digest.into()),
             });
         }
 
-        Ok(version_summary)
+        Ok(versions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index(version: &str, hash: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "formatVersion": 1,
+            "name": "Minecraft",
+            "uid": "net.minecraft",
+            "versions": [{
+                "recommended": false,
+                "releaseTime": "2026-01-01T00:00:00Z",
+                "sha256": hash,
+                "type": "release",
+                "version": version,
+            }],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn validates_index_digest_and_builds_one_url_path_segment() {
+        let source = PrismSource;
+        let hash = "AB".repeat(32);
+        for id in ["..", "a/b", "a\\b"] {
+            assert!(matches!(
+                source.parse_index(&index(id, &hash)),
+                Err(VersionError::InvalidIndex(_))
+            ));
+        }
+        assert!(matches!(
+            source.parse_index(&index("1.0", &"Q".repeat(64))),
+            Err(VersionError::InvalidIndex(_))
+        ));
+        let rows = source.parse_index(&index("a ?#", &hash)).unwrap();
+        assert_eq!(
+            rows[0].url,
+            "https://meta.prismlauncher.org/v1/net.minecraft/a%20%3F%23.json"
+        );
+        assert_eq!(
+            rows[0].sha256.as_deref(),
+            Some(hash.to_ascii_lowercase().as_str())
+        );
     }
 }

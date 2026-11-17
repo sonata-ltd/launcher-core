@@ -19,6 +19,13 @@ pub enum UrlBuildError {
 
 type Result<T> = std::result::Result<T, UrlBuildError>;
 
+pub(crate) fn validate_segment(segment: &str) -> Result<()> {
+    if segment.is_empty() || matches!(segment, "." | "..") || segment.contains(['/', '\\']) {
+        return Err(UrlBuildError::InvalidSegment(segment.to_owned()));
+    }
+    Ok(())
+}
+
 pub fn append_segments(base: &str, segments: &[&str]) -> Result<String> {
     let mut url =
         http_types::Url::parse(base).map_err(|_| UrlBuildError::InvalidBase(base.to_string()))?;
@@ -30,10 +37,7 @@ pub fn append_segments(base: &str, segments: &[&str]) -> Result<String> {
         path.pop_if_empty();
 
         for segment in segments {
-            if matches!(*segment, "." | "..") || segment.contains(['/', '\\']) {
-                return Err(UrlBuildError::InvalidSegment(segment.to_string()));
-            }
-
+            validate_segment(segment)?;
             path.push(segment);
         }
     }

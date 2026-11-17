@@ -25,7 +25,7 @@ fn index(id: &str) -> Vec<u8> {
         "versions": [{
             "recommended": true,
             "releaseTime": "2026-01-01T00:00:00Z",
-            "sha256": "fixture-hash",
+            "sha256": "01".repeat(32),
             "type": "release",
             "version": id
         }]
