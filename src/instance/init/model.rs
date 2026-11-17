@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::modloader::model::{JavaPolicy, LoaderSpec, MetadataPin};
+use crate::{
+    java::policy::JavaPolicy,
+    modloader::model::{LoaderSpec, MetadataPin},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledArtifact {

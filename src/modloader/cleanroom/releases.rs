@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::modloader::{model::JavaPolicy, repository::Repository};
+use crate::{java::policy::JavaPolicy, modloader::repository::Repository};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CleanroomRelease {

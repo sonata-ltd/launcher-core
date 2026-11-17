@@ -5,8 +5,8 @@ use crate::{
         download::transfer, error::InstanceError, init::model::InstalledProfile,
         model::InstanceRecord, settings::EffectiveSettings, Result,
     },
-    java::{model::JavaRuntime, select},
-    modloader::{archive, model::JavaPolicy},
+    java::{model::JavaRuntime, policy::JavaPolicy, select},
+    modloader::archive,
     utils::files,
     version::rules::RuleContext,
 };

@@ -1,6 +1,7 @@
 pub mod discovery;
 pub mod error;
 pub mod model;
+pub mod policy;
 pub mod registry;
 pub mod select;
 pub mod service;

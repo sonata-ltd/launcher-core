@@ -28,14 +28,14 @@ use crate::{
         },
         model::InstanceId,
     },
-    java::model::JavaRuntime,
+    java::{model::JavaRuntime, policy::JavaPolicy},
     modloader::{
         self,
         catalog::ModloaderCatalog,
         cleanroom, components,
         error::ModloaderError,
         fabric_quilt, forge,
-        model::{JavaPolicy, LoaderKind, LoaderSpec, MetadataPin},
+        model::{LoaderKind, LoaderSpec, MetadataPin},
     },
     version::provider::MetaProvider,
 };

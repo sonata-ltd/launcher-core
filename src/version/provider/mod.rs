@@ -9,6 +9,32 @@ use strum::Display;
 
 pub mod prism;
 
+/// Normalize the Java major list carried by Prism and official game manifests.
+pub(crate) fn java_majors(manifest: &serde_json::Value) -> Vec<u32> {
+    let prism = manifest
+        .get("compatibleJavaMajors")
+        .and_then(|v| v.as_array())
+        .map(|majors| {
+            majors
+                .iter()
+                .filter_map(|m| m.as_u64())
+                .filter_map(|m| u32::try_from(m).ok())
+                .collect::<Vec<_>>()
+        })
+        .filter(|majors| !majors.is_empty());
+
+    let mojang = || {
+        manifest
+            .get("javaVersion")
+            .and_then(|j| j.get("majorVersion"))
+            .and_then(|m| m.as_u64())
+            .and_then(|m| u32::try_from(m).ok())
+            .map(|m| vec![m])
+    };
+
+    prism.or_else(mojang).unwrap_or_default()
+}
+
 #[derive(Debug, Clone)]
 pub struct VersionSummary {
     pub id: String,

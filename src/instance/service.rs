@@ -29,8 +29,9 @@ use crate::{
     },
     java::{
         model::{JavaEvent, JavaRuntime},
+        policy::JavaPolicy,
         registry::JavaRegistry,
-        select::{self, JavaRequirement},
+        select,
         service::JavaService,
     },
     modloader::model::{LoaderKind, LoaderSpec},
@@ -239,14 +240,7 @@ impl InstanceService {
         match result {
             Ok(profile) => {
                 op.finish(Outcome::Completed);
-                self.auto_select_runtime(
-                    &rec,
-                    &JavaRequirement {
-                        majors: profile.java.majors,
-                    },
-                    true,
-                )
-                .await?;
+                self.auto_select_runtime(&rec, &profile.java, true).await?;
                 Ok(())
             }
             Err(e) => {
@@ -286,15 +280,17 @@ impl InstanceService {
             }
 
             let requirement = match instance::init::storage::load(&self.db, rec.id).await {
-                Ok(Some(profile)) => JavaRequirement {
-                    majors: profile.java.majors,
-                },
+                Ok(Some(profile)) => profile.java,
                 Ok(None) if rec.loader == LoaderKind::Vanilla => {
                     let Some(manifest) = load_cached(&rec.manifest_url, self.paths.meta()).await
                     else {
                         continue;
                     };
-                    JavaRequirement::from_manifest(&manifest)
+                    let majors = crate::version::provider::java_majors(&manifest);
+                    JavaPolicy {
+                        allow_newer: majors.iter().any(|&major| major > 8),
+                        majors,
+                    }
                 }
                 Ok(None) => continue,
                 Err(error) => {
@@ -315,7 +311,7 @@ impl InstanceService {
     async fn auto_select_runtime(
         &self,
         rec: &InstanceRecord,
-        requirement: &JavaRequirement,
+        policy: &JavaPolicy,
         notify: bool,
     ) -> Result<()> {
         self.java_service.wait_discovery().await;
@@ -326,15 +322,7 @@ impl InstanceService {
 
         let runtimes = self.java.list_all().await?;
 
-        let policy = instance::init::storage::load(&self.db, rec.id)
-            .await?
-            .map(|p| p.java)
-            .unwrap_or(crate::modloader::model::JavaPolicy {
-                majors: requirement.majors.clone(),
-                allow_newer: true,
-            });
-
-        match select::pick_with_policy(&runtimes, &policy, select::host_arch()) {
+        match select::pick_with_policy(&runtimes, policy, select::host_arch()) {
             Some((java, fit)) => {
                 tracing::info!(
                     instance = %rec.id,
@@ -360,7 +348,7 @@ impl InstanceService {
                 self.bus.publish(JavaEvent::NoSuitableRuntime {
                     instance: rec.id,
                     name: rec.name.clone(),
-                    required: requirement.majors.clone(),
+                    required: policy.majors.clone(),
                 });
             }
             None => {}

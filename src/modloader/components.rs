@@ -297,16 +297,16 @@ pub async fn prism(
     Ok(result)
 }
 
-pub fn policy(manifest: &Value) -> Result<super::model::JavaPolicy> {
-    let req = crate::java::select::JavaRequirement::from_manifest(manifest);
-    if req.majors.is_empty() {
+pub fn policy(manifest: &Value) -> Result<crate::java::policy::JavaPolicy> {
+    let majors = crate::version::provider::java_majors(manifest);
+    if majors.is_empty() {
         return Err(ModloaderError::Unsupported(
             "profile has no Java requirement".into(),
         ));
     }
 
-    Ok(super::model::JavaPolicy {
-        majors: req.majors,
+    Ok(crate::java::policy::JavaPolicy {
+        majors,
         allow_newer: false,
     })
 }
