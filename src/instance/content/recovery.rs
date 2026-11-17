@@ -116,6 +116,11 @@ async fn recover_one(
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        if file.placement == "external" {
+            return Err(ContentError::RecoveryConflict {
+                name: file.name.clone(),
+            });
+        }
         let object = store.path_for(&file.sha256)?;
         let expected = file.sha256.clone();
         let staged = stage.path().join(&file.name);

@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 struct StoredPlan {
     preview: InstallPreview,
-    releases: Vec<CatalogRelease>,
+    releases: Vec<install::PlannedRelease>,
     signature: String,
     compatibility: Compatibility,
     created: Instant,
@@ -209,8 +209,17 @@ impl InstanceContentService {
                 size_bytes: release.file.size_bytes,
                 already_installed,
             });
-            if !already_installed {
-                releases.push(release);
+            if !already_installed
+                || !registered.iter().any(|entry| {
+                    entry.matches(&release.key.project, &snapshot)
+                        && std::path::Path::new(&entry.relative_path)
+                            == std::path::Path::new("mods").join(&release.file.file_name)
+                })
+            {
+                releases.push(install::PlannedRelease {
+                    release,
+                    adopt_existing: already_installed,
+                });
             }
         }
         if super::inventory::signature(root).await? != snapshot.signature {
@@ -222,7 +231,11 @@ impl InstanceContentService {
         let preview = InstallPreview {
             id: Uuid::new_v4(),
             instance_id: instance,
-            download_bytes: releases.iter().map(|release| release.file.size_bytes).sum(),
+            download_bytes: releases
+                .iter()
+                .filter(|action| !action.adopt_existing)
+                .map(|action| action.release.file.size_bytes)
+                .sum(),
             items,
         };
         let mut plans = self

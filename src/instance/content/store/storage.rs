@@ -29,3 +29,21 @@ pub async fn cached_hash(
     Ok(sqlx::query_scalar("SELECT sha256 FROM content_objects WHERE store_state='ready' AND size_bytes=? AND (? IS NULL OR sha1=?) AND (? IS NULL OR sha512=?) LIMIT 1")
         .bind(size as i64).bind(sha1).bind(sha1).bind(sha512).bind(sha512).fetch_optional(&db.pool).await?)
 }
+
+/// Records a verified local file without claiming a copy exists in the CAS.
+pub(in crate::instance::content) async fn register_external(
+    db: &Database,
+    hashes: &crate::utils::files::digest::FileDigests,
+) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "INSERT INTO content_objects(sha256,size_bytes,sha1,sha512) VALUES(?,?,?,?)
+         ON CONFLICT(sha256) DO UPDATE SET sha1=excluded.sha1, sha512=excluded.sha512
+         RETURNING id",
+    )
+    .bind(&hashes.sha256)
+    .bind(hashes.size_bytes as i64)
+    .bind(&hashes.sha1)
+    .bind(&hashes.sha512)
+    .fetch_one(&db.pool)
+    .await?)
+}

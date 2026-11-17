@@ -596,3 +596,75 @@ async fn snapshot_detects_changed_bytes_even_with_the_same_size_and_modified_tim
         .unwrap();
     assert_ne!(before, after);
 }
+
+#[async_std::test]
+async fn adoption_records_verified_local_mod_without_downloading_or_replacing_it() {
+    use super::{
+        catalog::types::{CatalogRelease, DownloadFile},
+        install::PlannedRelease,
+        model::{ProjectKey, Provider, ReleaseKey},
+    };
+    let fixture = fixture().await;
+    let bytes = b"local mod";
+    let target = fixture.root.join("mods/local.jar");
+    std::fs::write(&target, bytes).unwrap();
+    let signature = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let (hashes, stamp) =
+        crate::utils::files::digest::digest_file(&target, &Cancellation::default(), |_| {})
+            .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let store = Arc::new(ObjectStore::new(fixture.paths.root().join("content-store")));
+    super::install::execute(
+        fixture.db.clone(),
+        store.clone(),
+        fixture.id,
+        &fixture.root,
+        operation,
+        &[PlannedRelease {
+            adopt_existing: true,
+            release: CatalogRelease {
+                key: ReleaseKey {
+                    project: ProjectKey {
+                        provider: Provider::Modrinth,
+                        project_id: "project".into(),
+                    },
+                    release_id: "version".into(),
+                },
+                title: "Local mod".into(),
+                file: DownloadFile {
+                    file_name: "local.jar".into(),
+                    url: "https://example.invalid/unreachable.jar".into(),
+                    size_bytes: hashes.size_bytes,
+                    sha1: Some(hashes.sha1),
+                    sha512: Some(hashes.sha512),
+                },
+                dependencies: vec![],
+            },
+        }],
+        &signature,
+        &Default::default(),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+    let after =
+        crate::utils::files::digest::FileStamp::from_metadata(&std::fs::metadata(&target).unwrap());
+    assert_eq!(stamp, after);
+    assert!(!store.path_for(&hashes.sha256).unwrap().exists());
+    let row: (String, String, String) = sqlx::query_as(
+        "SELECT i.placement, p.release_id, p.match_evidence FROM instance_content i
+         JOIN content_provider_files p ON p.id=i.preferred_provider_file_id WHERE i.instance_id=?",
+    )
+    .bind(fixture.id.get())
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        ("external".into(), "version".into(), "verified_hash".into())
+    );
+}

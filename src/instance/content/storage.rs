@@ -87,11 +87,17 @@ pub(crate) async fn complete(
     }
     for file in files {
         let relative = format!("mods/{}", file.name);
+        let evidence = if file.placement == "external" {
+            "verified_hash"
+        } else {
+            "download_hash"
+        };
         let provider_id: i64 = sqlx::query_scalar(
             "INSERT INTO content_provider_files(object_id,provider,project_id,release_id,file_key,match_evidence)
-             VALUES(?,?,?,?,?,'download_hash') ON CONFLICT(object_id,provider,project_id,release_id,file_key)
-             DO UPDATE SET match_evidence='download_hash' RETURNING id"
-        ).bind(file.object_id).bind(&file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name)
+             VALUES(?,?,?,?,?,?) ON CONFLICT(object_id,provider,project_id,release_id,file_key)
+             DO UPDATE SET match_evidence=CASE WHEN content_provider_files.match_evidence='download_hash'
+                 THEN content_provider_files.match_evidence ELSE excluded.match_evidence END RETURNING id"
+        ).bind(file.object_id).bind(&file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name).bind(evidence)
             .fetch_one(&mut *transaction).await?;
         sqlx::query("INSERT INTO instance_content(instance_id,object_id,kind,relative_path,path_key,mod_enabled,placement,preferred_provider_file_id)
                      VALUES(?,?,'mod',?,?,1,?,?)
