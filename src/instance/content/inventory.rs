@@ -147,11 +147,13 @@ pub(super) async fn snapshot(
             .sort_by(|left, right| left.name.cmp(&right.name));
         let mut digest = Sha256::new();
         let mut archives = std::collections::HashMap::new();
+        let mut observed = std::collections::HashSet::new();
         for entry in inventory.entries {
             let name = entry.name.as_encoded_bytes();
             digest.update((name.len() as u64).to_le_bytes());
             digest.update(name);
             let path = root.join(&entry.relative_path);
+            observed.insert(entry.relative_path.clone());
             match entry.entry_type {
                 ObservedType::Archive(stamp) => {
                     let sha256 = crate::utils::files::sha256_file(&path)?;
@@ -177,6 +179,7 @@ pub(super) async fn snapshot(
         Ok(ModSnapshot {
             signature: format!("{:x}", digest.finalize()),
             archives,
+            observed,
         })
     })
     .await
@@ -185,6 +188,7 @@ pub(super) async fn snapshot(
 pub(super) struct ModSnapshot {
     pub signature: String,
     pub archives: std::collections::HashMap<PathBuf, String>,
+    pub observed: std::collections::HashSet<PathBuf>,
 }
 
 pub(super) async fn signature(root: PathBuf) -> crate::instance::content::error::Result<String> {

@@ -1,7 +1,7 @@
 //! Восстановление add-only установки идёт вперёд из проверенного CAS.
 //! Чужие файлы не удаляются: несовпадение hash останавливает восстановление.
 use super::{
-    journal,
+    journal::{self, Placement},
     storage::{self, PendingPublication},
 };
 use crate::{
@@ -72,7 +72,6 @@ async fn recover_one(
             || !leased_objects
                 .get(&file.object_id)
                 .is_some_and(|hash| hash.eq_ignore_ascii_case(&file.sha256))
-            || !matches!(file.provider.as_str(), "modrinth" | "curseforge")
         {
             return Err(ContentError::Invalid(
                 "invalid file entry in content journal".into(),
@@ -110,13 +109,13 @@ async fn recover_one(
                     });
                 }
                 // Matching bytes do not tell us how this entry was placed.
-                file.placement = "external".into();
+                file.placement = Placement::External;
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        if file.placement == "external" {
+        if file.placement == Placement::External {
             return Err(ContentError::RecoveryConflict {
                 name: file.name.clone(),
             });
@@ -135,7 +134,7 @@ async fn recover_one(
             Ok(())
         })
         .await?;
-        file.placement = "copy".into();
+        file.placement = Placement::Copy;
     }
     storage::complete(db, id, instance, &expected_files).await?;
     Ok(())

@@ -3,12 +3,16 @@ use std::{fs, io, path::Path};
 
 use crate::{
     data::{db::Database, layout::LauncherPaths},
-    instance::{activity::InstanceActivity, content::error::Result, model::InstanceId},
+    instance::{
+        activity::InstanceActivity,
+        content::{error::Result, journal::Placement},
+        model::InstanceId,
+    },
     utils::files::{self, digest::FileStamp},
 };
 
 #[derive(sqlx::FromRow)]
-struct Placement {
+struct LegacyPlacement {
     id: i64,
     instance_id: InstanceId,
     dir: String,
@@ -21,13 +25,14 @@ pub(in crate::instance::content) async fn detach_registered_links(
     paths: &LauncherPaths,
     activity: &InstanceActivity,
 ) -> Result<()> {
-    let placements: Vec<Placement> = sqlx::query_as(
+    let placements: Vec<LegacyPlacement> = sqlx::query_as(
         "SELECT content.id, content.instance_id, instance.dir, content.relative_path, object.sha256
          FROM instance_content AS content
          JOIN instances AS instance ON instance.id=content.instance_id
          JOIN content_objects AS object ON object.id=content.object_id
-         WHERE content.placement='hardlink'",
+         WHERE content.placement=?",
     )
+    .bind(Placement::Hardlink)
     .fetch_all(&db.pool)
     .await?;
 
@@ -49,17 +54,23 @@ pub(in crate::instance::content) async fn detach_registered_links(
         .await;
         match outcome {
             Ok(Some(true)) => {
-                sqlx::query("UPDATE instance_content SET placement='copy' WHERE id=? AND placement='hardlink'")
-                    .bind(id).execute(&db.pool).await?;
+                sqlx::query("UPDATE instance_content SET placement=? WHERE id=? AND placement=?")
+                    .bind(Placement::Copy)
+                    .bind(id)
+                    .bind(Placement::Hardlink)
+                    .execute(&db.pool)
+                    .await?;
             }
             Ok(Some(false)) => {
                 // Preserve the user's bytes and discard the stale provider identity.
                 sqlx::query(
-                    "UPDATE instance_content SET placement='external', object_id=NULL,
+                    "UPDATE instance_content SET placement=?, object_id=NULL,
                          preferred_provider_file_id=NULL, indexed_fingerprint=NULL
-                     WHERE id=? AND placement='hardlink'",
+                     WHERE id=? AND placement=?",
                 )
+                .bind(Placement::External)
                 .bind(id)
+                .bind(Placement::Hardlink)
                 .execute(&db.pool)
                 .await?;
             }

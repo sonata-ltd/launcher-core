@@ -3,8 +3,19 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(rename_all = "lowercase")]
 pub enum Provider {
+    #[serde(alias = "modrinth")]
     Modrinth,
+    #[serde(alias = "curseforge")]
     CurseForge,
+}
+
+impl Provider {
+    pub(crate) fn slug(self) -> &'static str {
+        match self {
+            Self::Modrinth => "modrinth",
+            Self::CurseForge => "curseforge",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

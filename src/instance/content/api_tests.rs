@@ -88,10 +88,10 @@ async fn prepared(fixture: &Fixture) -> (uuid::Uuid, Vec<PublishedFile>) {
         name: "mod.jar".into(),
         sha256: object.digests.sha256,
         object_id,
-        provider: "modrinth".into(),
+        provider: super::model::Provider::Modrinth,
         project_id: "project".into(),
         release_id: "version".into(),
-        placement: "hardlink".into(),
+        placement: super::journal::Placement::Hardlink,
         dependencies: None,
     }];
     let id = uuid::Uuid::new_v4();
@@ -668,4 +668,82 @@ async fn adoption_records_verified_local_mod_without_downloading_or_replacing_it
         row,
         ("external".into(), "version".into(), "verified_hash".into())
     );
+}
+
+#[async_std::test]
+async fn migration_detaches_a_modified_link_and_clears_stale_provenance() {
+    let fixture = fixture().await;
+    let (id, files) = prepared(&fixture).await;
+    let store = ObjectStore::new(fixture.paths.root().join("content-store"));
+    let object = store.path_for(&files[0].sha256).unwrap();
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::hard_link(&object, &target).unwrap();
+    storage::complete(&fixture.db, id, fixture.id, &files)
+        .await
+        .unwrap();
+    std::fs::write(&target, b"modified").unwrap();
+    let _service = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+
+    let row: (String, Option<i64>, Option<i64>) = sqlx::query_as(
+        "SELECT placement, object_id, preferred_provider_file_id FROM instance_content",
+    )
+    .fetch_one(&fixture.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(row, ("external".into(), None, None));
+    assert_eq!(std::fs::read(&target).unwrap(), b"modified");
+    std::fs::write(&target, b"another change").unwrap();
+    assert_eq!(std::fs::read(object).unwrap(), b"modified");
+}
+
+#[async_std::test]
+async fn reconcile_tracks_disabled_renames_and_marks_a_removed_file_missing() {
+    let fixture = fixture().await;
+    let (id, files) = prepared(&fixture).await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"verified bytes").unwrap();
+    storage::complete(&fixture.db, id, fixture.id, &files)
+        .await
+        .unwrap();
+    let disabled = fixture.root.join("mods/moved.jar.disabled");
+    std::fs::rename(target, &disabled).unwrap();
+    let snapshot = super::inventory::snapshot(fixture.root.clone())
+        .await
+        .unwrap();
+    storage::reconcile_registered_mods(&fixture.db, fixture.id, &snapshot)
+        .await
+        .unwrap();
+
+    let row: (String, bool, String) =
+        sqlx::query_as("SELECT relative_path, mod_enabled, presence FROM instance_content")
+            .fetch_one(&fixture.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        std::path::Path::new(&row.0),
+        std::path::Path::new("mods").join("moved.jar.disabled")
+    );
+    assert!(!row.1);
+    assert_eq!(row.2, "present");
+
+    std::fs::remove_file(disabled).unwrap();
+    let snapshot = super::inventory::snapshot(fixture.root.clone())
+        .await
+        .unwrap();
+    storage::reconcile_registered_mods(&fixture.db, fixture.id, &snapshot)
+        .await
+        .unwrap();
+    let presence: String = sqlx::query_scalar("SELECT presence FROM instance_content")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(presence, "missing");
 }

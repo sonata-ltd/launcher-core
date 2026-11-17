@@ -1,11 +1,13 @@
 //! Исполнение готового плана. Никакого выбора релизов или wire-DTO API.
-use super::{journal::PublishedFile, storage};
+use super::{
+    journal::{Placement, PublishedFile},
+    storage,
+};
 use crate::{
     data::db::Database,
     instance::content::{
         catalog::types::CatalogRelease,
         error::{ContentError, Result},
-        model::Provider,
         store::ObjectStore,
     },
     instance::model::InstanceId,
@@ -63,7 +65,7 @@ pub(super) async fn execute(
             })
             .await?;
             let object_id = super::store::storage::register_external(&db, &hashes).await?;
-            (object_id, hashes.sha256, "external")
+            (object_id, hashes.sha256, Placement::External)
         } else {
             let cached_hash = crate::instance::content::store::storage::cached_hash(
                 &db,
@@ -126,20 +128,16 @@ pub(super) async fn execute(
             let token = common_cancel.clone();
             async_std::task::spawn_blocking(move || placement::copy_new(&source, &target, &token))
                 .await?;
-            (object_id, object.digests.sha256, "copy")
-        };
-        let provider = match release.key.project.provider {
-            Provider::Modrinth => "modrinth",
-            Provider::CurseForge => "curseforge",
+            (object_id, object.digests.sha256, Placement::Copy)
         };
         prepared.push(PublishedFile {
             name: file.file_name.clone(),
             sha256,
             object_id,
-            provider: provider.into(),
+            provider: release.key.project.provider,
             project_id: release.key.project.project_id.clone(),
             release_id: release.key.release_id.clone(),
-            placement: placement.into(),
+            placement,
             dependencies: Some(release.dependencies.clone()),
         });
         progress(index + 1, false);
@@ -154,7 +152,10 @@ pub(super) async fn execute(
     progress(releases.len(), true);
     // После сохранения намерения commit не прерывается Cancel. Все назначения
     // новые; persist_noclobber не перезапишет появившийся файл пользователя.
-    for file in prepared.iter().filter(|file| file.placement != "external") {
+    for file in prepared
+        .iter()
+        .filter(|file| file.placement != Placement::External)
+    {
         let source = stage.path().join(&file.name);
         let target = mods.join(&file.name);
         async_std::task::spawn_blocking(move || files::publish::publish_new(source, target))

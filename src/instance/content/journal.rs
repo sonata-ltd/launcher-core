@@ -6,16 +6,34 @@ use super::error::{ContentError, Result};
 const VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PublishedFile {
+pub(super) struct PublishedFile {
     pub name: String,
     pub sha256: String,
     pub object_id: i64,
-    pub provider: String,
+    #[serde(serialize_with = "serialize_provider")]
+    pub provider: super::model::Provider,
     pub project_id: String,
     pub release_id: String,
-    pub placement: String,
+    pub placement: Placement,
     #[serde(default)]
     pub dependencies: Option<Vec<super::model::Dependency>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "lowercase")]
+#[sqlx(rename_all = "lowercase")]
+pub(super) enum Placement {
+    External,
+    Copy,
+    Hardlink,
+    Reflink,
+}
+
+fn serialize_provider<S: serde::Serializer>(
+    provider: &super::model::Provider,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_str(provider.slug())
 }
 
 #[derive(Serialize, Deserialize)]

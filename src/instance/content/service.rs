@@ -460,11 +460,13 @@ impl InstanceContentService {
             ));
         }
         storage::ensure_no_pending(&self.db, plan.preview.instance_id).await?;
-        if super::inventory::signature(root.clone()).await? != plan.signature {
+        let snapshot = super::inventory::snapshot(root.clone()).await?;
+        if snapshot.signature != plan.signature {
             return Err(ContentError::Invalid(
                 "Папка mods изменилась после предпросмотра; постройте план заново".into(),
             ));
         }
+        storage::reconcile_registered_mods(&self.db, plan.preview.instance_id, &snapshot).await?;
         let result = install::execute(
             self.db.clone(),
             self.store.clone(),

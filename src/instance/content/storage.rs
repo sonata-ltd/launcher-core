@@ -1,5 +1,5 @@
 //! SQL привязок и журнала; файловые изменения находятся в install/recovery.
-use super::journal::{self, PublishedFile};
+use super::journal::{self, Placement, PublishedFile};
 use crate::{
     data::db::Database,
     instance::content::error::{ContentError, Result},
@@ -12,6 +12,14 @@ use uuid::Uuid;
 enum OperationState {
     Publishing,
     Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(rename_all = "snake_case")]
+enum ModPresence {
+    Present,
+    Missing,
+    Unstable,
 }
 
 pub async fn ensure_no_pending(db: &Database, instance: InstanceId) -> Result<()> {
@@ -36,7 +44,7 @@ pub(crate) async fn has_pending(
     .await
 }
 
-pub(crate) async fn prepare(
+pub(super) async fn prepare(
     db: &Database,
     id: Uuid,
     instance: InstanceId,
@@ -65,7 +73,7 @@ pub(crate) async fn prepare(
     Ok(())
 }
 
-pub(crate) async fn complete(
+pub(super) async fn complete(
     db: &Database,
     id: Uuid,
     instance: InstanceId,
@@ -87,7 +95,7 @@ pub(crate) async fn complete(
     }
     for file in files {
         let relative = format!("mods/{}", file.name);
-        let evidence = if file.placement == "external" {
+        let evidence = if file.placement == Placement::External {
             "verified_hash"
         } else {
             "download_hash"
@@ -99,21 +107,21 @@ pub(crate) async fn complete(
                  THEN content_provider_files.match_evidence ELSE excluded.match_evidence END,
              dependencies_json=COALESCE(excluded.dependencies_json,content_provider_files.dependencies_json)
              RETURNING id"
-        ).bind(file.object_id).bind(&file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name).bind(evidence).bind(file.dependencies.as_ref().map(serde_json::to_string).transpose()?)
+        ).bind(file.object_id).bind(file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name).bind(evidence).bind(file.dependencies.as_ref().map(serde_json::to_string).transpose()?)
             .fetch_one(&mut *transaction).await?;
-        sqlx::query("INSERT INTO instance_content(instance_id,object_id,kind,relative_path,path_key,mod_enabled,placement,preferred_provider_file_id)
-                     VALUES(?,?,'mod',?,?,1,?,?)
+        sqlx::query("INSERT INTO instance_content(instance_id,object_id,kind,relative_path,path_key,mod_enabled,placement,presence,preferred_provider_file_id)
+                     VALUES(?,?,'mod',?,?,1,?,?,?)
                      ON CONFLICT(instance_id,path_key) DO UPDATE SET
                          object_id=excluded.object_id, kind=excluded.kind,
                          relative_path=excluded.relative_path, mod_enabled=excluded.mod_enabled,
-                         placement=excluded.placement, presence='present',
+                         placement=excluded.placement, presence=excluded.presence,
                          observed_size=NULL, observed_modified=NULL, observed_identity=NULL,
                          indexed_fingerprint=NULL,
                          pinned=CASE WHEN instance_content.object_id=excluded.object_id
                                      THEN instance_content.pinned ELSE 0 END,
                          preferred_provider_file_id=excluded.preferred_provider_file_id")
             .bind(instance.get()).bind(file.object_id).bind(&relative).bind(crate::utils::files::path_key(std::path::Path::new(&relative)))
-            .bind(&file.placement).bind(provider_id).execute(&mut *transaction).await?;
+            .bind(file.placement).bind(ModPresence::Present).bind(provider_id).execute(&mut *transaction).await?;
     }
     sqlx::query("DELETE FROM content_object_leases WHERE operation_id=?")
         .bind(id.to_string())
@@ -216,6 +224,7 @@ pub(super) async fn abandon(db: &Database, instance: InstanceId, operation: &str
 
 #[derive(sqlx::FromRow)]
 pub(super) struct RegisteredMod {
+    id: i64,
     pub relative_path: String,
     pub object_sha256: String,
     pub provider: super::model::Provider,
@@ -282,7 +291,7 @@ pub(super) async fn registered_mods(
     instance: InstanceId,
 ) -> Result<Vec<RegisteredMod>> {
     Ok(sqlx::query_as(
-        "SELECT i.relative_path, o.sha256 AS object_sha256, p.provider, p.project_id, p.release_id,
+        "SELECT i.id, i.relative_path, o.sha256 AS object_sha256, p.provider, p.project_id, p.release_id,
                 o.size_bytes, p.dependencies_json
          FROM instance_content AS i
          JOIN content_objects AS o ON o.id=i.object_id
@@ -293,4 +302,61 @@ pub(super) async fn registered_mods(
     .bind(instance.get())
     .fetch_all(&db.pool)
     .await?)
+}
+
+/// Reconciles registered files against a completed scan while the instance is reserved.
+pub(super) async fn reconcile_registered_mods(
+    db: &Database,
+    instance: InstanceId,
+    snapshot: &super::inventory::ModSnapshot,
+) -> Result<()> {
+    let registered = registered_mods(db, instance).await?;
+    let mut transaction = db.pool.begin().await?;
+    for entry in registered {
+        let recorded = std::path::Path::new(&entry.relative_path);
+        let observed = entry.verified_path(snapshot);
+        let rename = observed
+            .filter(|path| *path != recorded)
+            .and_then(|path| path.to_str());
+        if let Some(path) = rename {
+            let path = std::path::Path::new(path);
+            let key = crate::utils::files::path_key(path);
+            let changed = sqlx::query(
+                "UPDATE instance_content SET relative_path=?, path_key=?, mod_enabled=?, presence=?
+                 WHERE id=? AND NOT EXISTS(SELECT 1 FROM instance_content
+                   WHERE instance_id=? AND path_key=? AND id<>?)",
+            )
+            .bind(path.to_str())
+            .bind(&key)
+            .bind(
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("jar")),
+            )
+            .bind(ModPresence::Present)
+            .bind(entry.id)
+            .bind(instance.get())
+            .bind(&key)
+            .bind(entry.id)
+            .execute(&mut *transaction)
+            .await?;
+            if changed.rows_affected() == 1 {
+                continue;
+            }
+        }
+        let presence = if observed == Some(recorded) {
+            ModPresence::Present
+        } else if snapshot.observed.contains(recorded) {
+            ModPresence::Unstable
+        } else {
+            ModPresence::Missing
+        };
+        sqlx::query("UPDATE instance_content SET presence=? WHERE id=? AND presence<>?")
+            .bind(presence)
+            .bind(entry.id)
+            .bind(presence)
+            .execute(&mut *transaction)
+            .await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
