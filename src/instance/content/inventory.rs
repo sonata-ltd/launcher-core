@@ -37,12 +37,25 @@ pub fn inventory_scope(instance_root: &Path, kind: ContentKind) -> io::Result<In
         ContentKind::ShaderPack => "shaderpacks",
     });
 
-    let directory = instance_root.join(relative_directory);
-    let directory_metadata = match fs::symlink_metadata(&directory) {
+    let result = inventory_directory(
+        &instance_root.join(relative_directory),
+        relative_directory,
+        kind,
+    )?;
+    if !result.directory_exists {
+        fs::metadata(instance_root)?;
+    }
+    Ok(result)
+}
+
+pub(in crate::instance) fn inventory_directory(
+    directory: &Path,
+    relative_directory: &Path,
+    kind: ContentKind,
+) -> io::Result<InventoryScope> {
+    let directory_metadata = match fs::symlink_metadata(directory) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::metadata(instance_root)?;
-
             return Ok(InventoryScope {
                 entries: Vec::new(),
                 directory_exists: false,
@@ -59,7 +72,7 @@ pub fn inventory_scope(instance_root: &Path, kind: ContentKind) -> io::Result<In
     }
 
     let mut entries = Vec::new();
-    for entry in fs::read_dir(&directory)? {
+    for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let name = entry.file_name();
         let relative_path = relative_directory.join(&name);

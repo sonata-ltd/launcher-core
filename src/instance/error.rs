@@ -29,6 +29,13 @@ pub enum InstanceError {
         source: crate::instance::content::error::ContentError,
     },
 
+    #[error("could not list mods in {}: {source}", path.display())]
+    ModInventory {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("invalid effective memory range: minimum {min_mib} MiB, maximum {max_mib} MiB")]
     InvalidMemoryRange { min_mib: i64, max_mib: i64 },
 

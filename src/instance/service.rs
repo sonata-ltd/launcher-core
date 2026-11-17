@@ -17,7 +17,7 @@ use crate::{
         event::InstanceEvent,
         init::install::{InstallContext, InstallRequest},
         launch::{prepare, resolved},
-        model::{InstanceId, InstanceRecord, NewInstance},
+        model::{InstanceId, InstanceMod, InstanceRecord, NewInstance},
         mods::resolve_mods,
         registry::InstanceRegistry,
         running::RunPhase,
@@ -416,16 +416,11 @@ impl InstanceService {
         Ok(rec)
     }
 
-    pub async fn mods(&self, id: InstanceId) -> Result<()> {
+    pub async fn mods(&self, id: InstanceId) -> Result<Vec<InstanceMod>> {
         let rec = self.get_instance(id).await?;
-        let mods_dir = self.paths.instances().join(rec.dir.to_owned()).join("mods");
-
-        println!("{}", mods_dir.display());
-
-        let mods = resolve_mods(id, mods_dir).await?;
-        println!("{:#?}", mods);
-
-        Ok(())
+        let root =
+            crate::utils::files::child(self.paths.instances(), std::path::Path::new(&rec.dir))?;
+        resolve_mods(id, root.join("mods")).await
     }
 
     pub async fn settings(&self, id: InstanceId) -> Result<InstanceSettings> {

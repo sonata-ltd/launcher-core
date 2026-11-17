@@ -59,14 +59,8 @@ pub struct ModId(pub i64);
 
 #[derive(Debug)]
 pub struct InstanceMod {
-    // pub id: ModId,
     pub instance_id: InstanceId,
-
-    pub name: OsString, //     pub relative_path: PathBuf,
-                        //     pub disabled: bool,
-                        //
-                        //     pub metadata: ModMetadata,
-                        //     pub version_pinned: bool,
+    pub name: OsString,
 }
 
 pub struct ModMetadata {
