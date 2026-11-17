@@ -390,3 +390,34 @@ async fn journal_with_mismatched_object_is_rejected_before_publication() {
     assert!(!fixture.root.join("mods/mod.jar").exists());
     assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
 }
+
+#[async_std::test]
+async fn startup_detaches_registered_legacy_links_without_changing_bytes() {
+    let fixture = fixture().await;
+    let (id, files) = prepared(&fixture).await;
+    let store = ObjectStore::new(fixture.paths.root().join("content-store"));
+    let object = store.path_for(&files[0].sha256).unwrap();
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::hard_link(&object, &target).unwrap();
+    storage::complete(&fixture.db, id, fixture.id, &files)
+        .await
+        .unwrap();
+
+    let _service = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"verified bytes");
+    std::fs::write(&target, b"local changes").unwrap();
+    assert_eq!(std::fs::read(&object).unwrap(), b"verified bytes");
+    let placement: String = sqlx::query_scalar("SELECT placement FROM instance_content")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(placement, "copy");
+}

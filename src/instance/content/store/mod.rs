@@ -110,3 +110,5 @@ impl ObjectStore {
 }
 
 pub mod storage;
+
+pub(in crate::instance::content) mod legacy;

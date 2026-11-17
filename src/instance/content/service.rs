@@ -81,6 +81,11 @@ impl InstanceContentService {
             Err(error) => tracing::error!(%error, "could not load pending content publications"),
         }
         storage::clear_completed(&db, None).await?;
+        if let Err(error) =
+            super::store::legacy::detach_registered_links(&db, &paths, &instances).await
+        {
+            tracing::warn!(%error, "could not migrate registered hardlinks");
+        }
         Ok(Self {
             operations,
             catalog: ContentCatalog::new(curseforge_key),
