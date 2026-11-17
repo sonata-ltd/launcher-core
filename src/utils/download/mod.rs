@@ -6,9 +6,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_std::fs::{create_dir_all, remove_file, rename, File};
 use async_std::future::timeout;
-use futures::{AsyncReadExt, AsyncWriteExt};
-use sha1::{Digest, Sha1};
-use surf::{self, Url};
+#[cfg(test)]
+use sha1::Digest;
+use sha1::Sha1;
 use uuid::Uuid;
 
 use crate::utils::download::buffer::BufferPool;
@@ -17,6 +17,7 @@ use crate::utils::download::error::{DownloadError, Result};
 pub mod buffer;
 pub mod error;
 pub mod json;
+pub(crate) mod stream;
 pub mod sweep;
 #[cfg(test)]
 mod tests;
@@ -91,7 +92,7 @@ pub async fn download_in_json(url: &str) -> Result<serde_json::Value> {
         },
         HttpError::SizeLimit(limit) => DownloadError::SizeLimit {
             url: url.to_owned(),
-            limit,
+            limit: limit as u64,
         },
         other => DownloadError::Request {
             url: url.to_owned(),
@@ -164,111 +165,27 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
     }
 
     async fn fetch_to(&self, temp_path: &Path) -> Result<()> {
-        let mut url = Url::parse(self.object.get_url()).map_err(|e| DownloadError::InvalidUrl {
-            url: self.object.get_url().clone(),
-            source: e,
-        })?;
-
-        let mut redirects: usize = 0;
-
-        let mut resp = loop {
-            let resp = timeout(
-                REQUEST_TIMEOUT,
-                surf::get(&url).header("Accept-Encoding", "identity"),
-            )
-            .await
-            .map_err(|_| DownloadError::Timeout {
-                url: url.to_string(),
-                phase: "response",
-                after: REQUEST_TIMEOUT,
-            })?
-            .map_err(|e| DownloadError::Request {
-                url: url.to_string(),
-                source: e.into(),
-            })?;
-
-            let status = resp.status();
-
-            if !status.is_redirection() {
-                break resp;
-            }
-
-            if redirects >= MAX_REDIRECT_COUNT {
-                return Err(DownloadError::TooManyRedirects {
-                    url: url.to_string(),
-                    count: redirects,
-                });
-            }
-
-            let location = resp
-                .header("Location")
-                .map(|v| v.last().as_str().to_owned())
-                .ok_or_else(|| DownloadError::RedirectWithoutLocation {
-                    status,
-                    url: url.to_string(),
-                })?;
-
-            let next = url.join(&location);
-            let base = url.to_string();
-
-            url = next.map_err(|e| DownloadError::RedirectTargetInvalid {
-                base,
-                location,
-                source: e,
-            })?;
-
-            redirects += 1;
-        };
-
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(DownloadError::Http {
-                status,
-                url: url.to_string(),
-            });
-        }
-
+        let cancel = crate::utils::cancellation::Cancellation::new();
+        let (mut response, url) =
+            stream::response(self.object.get_url(), false, None, &cancel).await?;
         tracing::debug!(name = %self.object.get_name(), %url, "downloading");
+        let mut file =
+            File::create(temp_path)
+                .await
+                .map_err(|source| DownloadError::FileCreation {
+                    path: temp_path.to_owned(),
+                    source,
+                })?;
 
-        let mut file = File::create(temp_path)
-            .await
-            .map_err(|e| DownloadError::FileCreation {
-                path: temp_path.to_path_buf(),
-                source: e,
-            })?;
-
-        let mut hasher = Sha1::new();
         let mut guard = self.buffers_pool.acquire().await;
-        let buf = guard.as_mut_slice();
-
-        loop {
-            let n = timeout(READ_TIMEOUT, resp.read(buf))
-                .await
-                .map_err(|_| DownloadError::Timeout {
-                    url: url.to_string(),
-                    phase: "body chunk",
-                    after: READ_TIMEOUT,
-                })?
-                .map_err(|e| DownloadError::BodyRead {
-                    url: url.to_string(),
-                    source: e,
-                })?;
-
-            if n == 0 {
-                break;
-            }
-
-            hasher.update(&buf[..n]);
-
-            file.write_all(&buf[..n])
-                .await
-                .map_err(|e| DownloadError::FileWrite {
-                    path: temp_path.to_path_buf(),
-                    source: e,
-                })?;
+        let actual = stream::Stream {
+            url: url.as_str(),
+            destination: temp_path,
+            length: stream::Length::UpTo(u64::MAX),
+            cancel: &cancel,
         }
-
-        let actual = format!("{:x}", hasher.finalize());
+        .copy::<Sha1>(&mut response, &mut file, guard.as_mut_slice(), |_| {})
+        .await?;
         let expected = self.object.get_hash().to_lowercase();
 
         if actual != expected {

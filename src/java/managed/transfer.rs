@@ -1,10 +1,15 @@
-use async_std::{fs::File, future::timeout};
-use futures::{AsyncReadExt, AsyncWriteExt};
-use sha2::{Digest, Sha256};
-use std::{path::Path, time::Duration};
+use async_std::fs::File;
+use sha2::Sha256;
+use std::path::Path;
 
 use super::model::*;
-use crate::utils::cancellation::Cancellation;
+use crate::utils::{
+    cancellation::Cancellation,
+    download::{
+        error::DownloadError,
+        stream::{self, Length, Stream},
+    },
+};
 
 pub(super) async fn download(
     package: &ManagedJavaPackage,
@@ -12,56 +17,27 @@ pub(super) async fn download(
     cancel: &Cancellation,
     progress: impl Fn(u64),
 ) -> Result<String> {
-    let mut url =
-        surf::Url::parse(&package.url).map_err(|e| ManagedJavaError::new("download", e))?;
-    let mut redirects = 0;
-    let mut response = loop {
-        if url.scheme() != "https" {
-            return Err(ManagedJavaError::new(
-                "download",
-                "Java downloads require HTTPS",
-            ));
-        }
-        let response = cancel
-            .run(async {
-                timeout(
-                    Duration::from_secs(30),
-                    surf::get(url.as_str()).header("Accept-Encoding", "identity"),
-                )
-                .await
-                .map_err(|_| {
-                    ManagedJavaError::new("download", format!("Response timed out: {url}"))
-                })?
-                .map_err(|e| ManagedJavaError::new("download", format!("{url}: {e}")))
-            })
-            .await??;
-        if !response.status().is_redirection() {
-            break response;
-        }
-        if redirects >= 20 {
-            return Err(ManagedJavaError::new("download", "Too many redirects"));
-        }
-        let location = response
-            .header("Location")
-            .map(|v| v.last().as_str())
-            .ok_or_else(|| ManagedJavaError::new("download", "Redirect has no Location"))?;
-        url = url
-            .join(location)
-            .map_err(|e| ManagedJavaError::new("download", e))?;
-        redirects += 1;
-    };
-    if !response.status().is_success() {
-        return Err(ManagedJavaError::new(
-            "download",
-            format!("HTTP {}: {url}", response.status()),
-        ));
-    }
-    let mut file = File::create(path)
+    let (mut response, url) = stream::response(&package.url, true, None, cancel)
         .await
-        .map_err(|e| ManagedJavaError::new("download", format!("{}: {e}", path.display())))?;
-    stream_body(&mut response, &mut file, package.size, cancel, progress).await
+        .map_err(download_error)?;
+    let mut file = File::create(path).await.map_err(|error| {
+        ManagedJavaError::new("download", format!("{}: {error}", path.display()))
+    })?;
+    copy_body(
+        &mut response,
+        &mut file,
+        Stream {
+            url: url.as_str(),
+            destination: path,
+            length: Length::Exact(package.size),
+            cancel,
+        },
+        progress,
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(super) async fn stream_body(
     reader: &mut (impl futures::AsyncRead + Unpin),
     writer: &mut (impl futures::AsyncWrite + Unpin),
@@ -69,50 +45,47 @@ pub(super) async fn stream_body(
     cancel: &Cancellation,
     progress: impl Fn(u64),
 ) -> Result<String> {
-    let mut hash = Sha256::new();
-    let mut buffer = vec![0; 64 * 1024];
-    let mut downloaded = 0;
-    loop {
-        let n = cancel
-            .run(async {
-                timeout(Duration::from_secs(30), reader.read(&mut buffer))
-                    .await
-                    .map_err(|_| {
-                        ManagedJavaError::new("download", "Reading response body timed out")
-                    })?
-                    .map_err(|e| ManagedJavaError::new("download", e))
-            })
-            .await??;
-        if n == 0 {
-            break;
-        }
-        downloaded += n as u64;
-        if downloaded > expected_size {
-            return Err(ManagedJavaError::new(
-                "download",
-                format!("Expected {expected_size} bytes; received more than expected"),
-            ));
-        }
-        cancel
-            .run(async {
-                writer
-                    .write_all(&buffer[..n])
-                    .await
-                    .map_err(|e| ManagedJavaError::new("download", e))
-            })
-            .await??;
-        hash.update(&buffer[..n]);
-        progress(downloaded);
-    }
-    if downloaded != expected_size {
-        return Err(ManagedJavaError::new(
-            "download",
-            format!("Expected {expected_size} bytes; received {downloaded}"),
-        ));
-    }
-    writer
-        .flush()
+    copy_body(
+        reader,
+        writer,
+        Stream {
+            url: "https://example.invalid",
+            destination: Path::new("runtime archive"),
+            length: Length::Exact(expected_size),
+            cancel,
+        },
+        progress,
+    )
+    .await
+}
+
+async fn copy_body(
+    reader: &mut (impl futures::AsyncRead + Unpin),
+    writer: &mut (impl futures::AsyncWrite + Unpin),
+    stream: Stream<'_>,
+    progress: impl Fn(u64),
+) -> Result<String> {
+    stream
+        .copy::<Sha256>(reader, writer, &mut vec![0; 64 * 1024], progress)
         .await
-        .map_err(|e| ManagedJavaError::new("download", e))?;
-    Ok(format!("{:x}", hash.finalize()))
+        .map_err(download_error)
+}
+
+fn download_error(error: DownloadError) -> ManagedJavaError {
+    match error {
+        DownloadError::Cancelled(cancelled) => cancelled.into(),
+        DownloadError::SizeMismatch { expected, actual } if actual > expected => {
+            ManagedJavaError::new(
+                "download",
+                format!("Expected {expected} bytes, received more than expected"),
+            )
+        }
+        DownloadError::BodyRead { source, .. } | DownloadError::FileWrite { source, .. } => {
+            ManagedJavaError::new("download", source)
+        }
+        DownloadError::Request { url, source } => {
+            ManagedJavaError::new("download", format!("{url}: {source}"))
+        }
+        other => ManagedJavaError::new("download", other),
+    }
 }

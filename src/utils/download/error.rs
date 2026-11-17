@@ -10,6 +10,14 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Error)]
 pub enum DownloadError {
+    #[error(transparent)]
+    Cancelled(#[from] crate::utils::cancellation::Cancelled),
+
+    #[error("unsupported URL scheme for {url} (HTTPS required: {https_only})")]
+    UnsupportedScheme { url: String, https_only: bool },
+
+    #[error("expected {expected} bytes, received {actual}")]
+    SizeMismatch { expected: u64, actual: u64 },
     #[error("request to {url} failed")]
     Request {
         url: String,
@@ -21,7 +29,7 @@ pub enum DownloadError {
     Http { status: StatusCode, url: String },
 
     #[error("response from {url} exceeds {limit} bytes")]
-    SizeLimit { url: String, limit: usize },
+    SizeLimit { url: String, limit: u64 },
 
     #[error("malformed JSON in response from {url}")]
     MalformedJson {

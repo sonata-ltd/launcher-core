@@ -1,11 +1,16 @@
 pub mod error;
+use super::{
+    error::DownloadError as StreamError,
+    stream::{self, Length, Stream},
+};
 use crate::{
     utils::download::transfer::error::{DownloadError, Result},
     utils::files,
 };
 use async_std::{fs, task};
-use futures::{AsyncReadExt, AsyncWriteExt};
-use sha1::{Digest, Sha1};
+#[cfg(test)]
+use sha1::Digest;
+use sha1::Sha1;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -52,82 +57,21 @@ pub async fn download(
         cancel.check()?;
 
         let result = async {
-            let mut current =
-                http_types::Url::parse(url).map_err(|e| DownloadError::Invalid(e.to_string()))?;
-
-            let mut redirects = 0;
-            let mut response = loop {
-                cancel.check()?;
-
-                let response = cancel
-                    .run(async_std::future::timeout(
-                        Duration::from_secs(30),
-                        surf::get(current.as_str())
-                            .header("User-Agent", "SonataLauncher/0.1")
-                            .header("Accept-Encoding", "identity"),
-                    ))
-                    .await?
-                    .map_err(|_| DownloadError::Timeout("response"))?
-                    .map_err(|e| DownloadError::Http(e.to_string()))?;
-
-                if !response.status().is_redirection() {
-                    break response;
-                }
-
-                if redirects >= 20 {
-                    return Err(DownloadError::Http("too many redirects".into()));
-                }
-
-                let location = response
-                    .header("Location")
-                    .map(|h| h.last().as_str())
-                    .ok_or_else(|| DownloadError::Http("redirect without Location".into()))?;
-
-                current = current
-                    .join(location)
-                    .map_err(|e| DownloadError::Http(e.to_string()))?;
-
-                redirects += 1;
-            };
-
-            if !response.status().is_success() {
-                return Err(DownloadError::Http(format!("{}: {url}", response.status())));
-            }
-
-            let mut reader = response.take_body().into_reader();
+            const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+            let (mut response, final_url) =
+                stream::response(url, false, Some("SonataLauncher/0.1"), cancel)
+                    .await
+                    .map_err(map_stream_error)?;
             let mut output = fs::File::create(&temporary).await?;
-            let mut buffer = vec![0u8; 65536];
-            let mut digest = Sha1::new();
-            let mut size = 0u64;
-
-            loop {
-                cancel.check()?;
-
-                let count = cancel
-                    .run(async_std::future::timeout(
-                        Duration::from_secs(30),
-                        reader.read(&mut buffer),
-                    ))
-                    .await?
-                    .map_err(|_| DownloadError::Timeout("body"))??;
-
-                if count == 0 {
-                    break;
-                }
-
-                size += count as u64;
-
-                if size > 2 * 1024 * 1024 * 1024 {
-                    return Err(DownloadError::SizeLimit {
-                        limit: 2 * 1024 * 1024 * 1024,
-                    });
-                }
-
-                digest.update(&buffer[..count]);
-                output.write_all(&buffer[..count]).await?;
+            let hash = Stream {
+                url: final_url.as_str(),
+                destination: &temporary,
+                length: Length::UpTo(MAX_ARTIFACT_BYTES),
+                cancel,
             }
-
-            let hash = format!("{:x}", digest.finalize());
+            .copy::<Sha1>(&mut response, &mut output, &mut vec![0; 64 * 1024], |_| {})
+            .await
+            .map_err(map_stream_error)?;
             if let Some(expected) =
                 expected.filter(|expected| !expected.eq_ignore_ascii_case(&hash))
             {
@@ -175,6 +119,19 @@ pub async fn download(
     }
 
     Err(last.unwrap_or_else(|| DownloadError::Http("download failed".into())))
+}
+
+fn map_stream_error(error: StreamError) -> DownloadError {
+    match error {
+        StreamError::Cancelled(cancelled) => cancelled.into(),
+        invalid @ StreamError::InvalidUrl { .. } => DownloadError::Invalid(invalid.to_string()),
+        StreamError::Timeout { phase, .. } => DownloadError::Timeout(phase),
+        StreamError::SizeLimit { limit, .. } => DownloadError::SizeLimit { limit },
+        StreamError::BodyRead { source, .. } | StreamError::FileWrite { source, .. } => {
+            source.into()
+        }
+        other => DownloadError::Http(other.to_string()),
+    }
 }
 
 pub async fn place(
