@@ -40,9 +40,23 @@ pub async fn get_home_dir() -> Option<PathBuf> {
     };
 }
 
+/// Return the byte offset of a one-based occurrence. Zero has no occurrence.
 pub fn str_nth_occurrence(s: &str, pat: char, n: usize) -> Option<usize> {
     s.char_indices()
         .filter(|(_, c)| *c == pat)
-        .nth(n - 1)
+        .nth(n.checked_sub(1)?)
         .map(|(idx, _)| idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::str_nth_occurrence;
+
+    #[test]
+    fn occurrence_uses_one_based_ordinals_and_utf8_byte_offsets() {
+        assert_eq!(str_nth_occurrence("é/あ/", '/', 0), None);
+        assert_eq!(str_nth_occurrence("é/あ/", '/', 1), Some(2));
+        assert_eq!(str_nth_occurrence("é/あ/", '/', 2), Some(6));
+        assert_eq!(str_nth_occurrence("é/あ/", '/', 3), None);
+    }
 }
