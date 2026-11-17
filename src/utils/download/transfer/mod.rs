@@ -205,16 +205,31 @@ pub async fn place(
 
     let expected = expected.or(cached.as_deref());
 
+    cancel.check()?;
     if let Some(hash) = expected {
+        if !files::hash_valid(hash, 40) {
+            return Err(DownloadError::Invalid("invalid SHA-1".into()));
+        }
         let blob = blobs.join(hash.to_ascii_lowercase());
-        let source = blob.clone();
-        let hash = hash.to_owned();
-        if task::spawn_blocking(move || files::matches(&source, &hash)).await? {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).await?;
+        let target = path.to_owned();
+        let digest = hash.to_owned();
+        let cancellation = crate::utils::cancellation::Cancellation::from_flag(cancel.0.clone());
+        let placed = task::spawn_blocking(move || -> Result<bool> {
+            if !files::matches(&blob, &digest)? {
+                return Ok(false);
             }
-            fs::copy(&blob, path).await?;
-            return Ok(expected.unwrap().into());
+            files::placement::copy_replace(&blob, &target, &cancellation)?;
+            Ok(true)
+        })
+        .await;
+        match placed {
+            Ok(true) => return Ok(hash.into()),
+            Ok(false) => {}
+            Err(DownloadError::Io(error)) if error.kind() == std::io::ErrorKind::Interrupted => {
+                cancel.check()?;
+                return Err(error.into());
+            }
+            Err(error) => return Err(error),
         }
     }
 
@@ -234,16 +249,14 @@ pub async fn place(
 // The downloaded source has already passed checksum verification. Persist
 // atomically replaces a corrupt blob and handles concurrent identical writers.
 async fn cache_blob(source: &Path, destination: &Path) -> Result<()> {
-    let temporary = destination.with_extension(format!("{}.part", uuid::Uuid::new_v4()));
-    if let Err(error) = fs::copy(source, &temporary).await {
-        let _ = fs::remove_file(&temporary).await;
-        return Err(error.into());
-    }
+    let source = source.to_owned();
     let destination = destination.to_owned();
     task::spawn_blocking(move || {
-        tempfile::TempPath::from_path(temporary)
-            .persist(destination)
-            .map_err(|error| error.error)
+        files::placement::copy_replace(
+            &source,
+            &destination,
+            &crate::utils::cancellation::Cancellation::default(),
+        )
     })
     .await?;
     Ok(())
@@ -262,6 +275,30 @@ pub async fn check_file(path: PathBuf, expected: String) -> Result<()> {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    #[async_std::test]
+    async fn cancelled_cache_hit_preserves_existing_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("existing.jar");
+        fs::write(&destination, b"previous").await.unwrap();
+        let hash = format!("{:x}", Sha1::digest(b"cached"));
+        fs::write(temp.path().join(&hash), b"cached").await.unwrap();
+        let cancel = Cancel::default();
+        cancel.cancel();
+
+        assert!(matches!(
+            place(
+                "https://example.invalid/file",
+                &destination,
+                Some(&hash),
+                temp.path(),
+                &cancel
+            )
+            .await,
+            Err(DownloadError::Cancelled)
+        ));
+        assert_eq!(fs::read(destination).await.unwrap(), b"previous");
+    }
+
     #[async_std::test]
     async fn corrupted_blob_is_replaced_and_next_placement_needs_no_network() {
         let temp = tempfile::tempdir().unwrap();

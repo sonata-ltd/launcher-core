@@ -172,6 +172,17 @@ impl InstanceService {
         Ok(rec)
     }
 
+    async fn ensure_content_recovered(&self, id: InstanceId) -> Result<()> {
+        let pending = instance::content::storage::has_pending(&self.db, id)
+            .await
+            .map_err(crate::data::db::DbError::from)?;
+        if pending {
+            return Err(InstanceError::ContentRecoveryPending(id));
+        }
+
+        Ok(())
+    }
+
     pub async fn install(self: &Arc<Self>, id: InstanceId) -> Result<()> {
         let job = {
             let _guard = self
@@ -191,6 +202,8 @@ impl InstanceService {
 
             self.install_jobs.begin(id)?
         };
+
+        self.ensure_content_recovered(id).await?;
 
         let service = Arc::clone(self);
         let (tx, rx) = async_channel::bounded(1);
@@ -417,9 +430,7 @@ impl InstanceService {
             self.running.reserve(id)?
         };
 
-        crate::instance::content::storage::ensure_no_pending(&self.db, id)
-            .await
-            .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
+        self.ensure_content_recovered(id).await?;
         let rec = self.get_instance(id).await?;
         let settings = self.settings.effective(id).await?;
         let java = self.resolve_java(id, &settings).await?;

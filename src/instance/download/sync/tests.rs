@@ -134,7 +134,7 @@ impl Harness {
 }
 
 fn syncer() -> Syncer {
-    Syncer::new(CONCURRENCY, BUFFER_SIZE)
+    Syncer::new(CONCURRENCY, BUFFER_SIZE).unwrap()
 }
 
 fn sha1_hex(body: &[u8]) -> String {

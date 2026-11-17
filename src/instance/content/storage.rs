@@ -9,18 +9,24 @@ use sqlx::Row;
 use uuid::Uuid;
 
 pub async fn ensure_no_pending(db: &Database, instance: InstanceId) -> Result<()> {
-    let pending: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM content_operations WHERE instance_id=? AND state='publishing'",
-    )
-    .bind(instance.get())
-    .fetch_one(&db.pool)
-    .await?;
-    if pending != 0 {
+    if has_pending(db, instance).await? {
         return Err(ContentError::Invalid(
             "Осталась незавершённая установка контента: требуется восстановление".into(),
         ));
     }
     Ok(())
+}
+
+pub(crate) async fn has_pending(
+    db: &Database,
+    instance: InstanceId,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM content_operations WHERE instance_id=? AND state='publishing')",
+    )
+    .bind(instance.get())
+    .fetch_one(&db.pool)
+    .await
 }
 
 pub(crate) async fn prepare(

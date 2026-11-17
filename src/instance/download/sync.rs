@@ -71,15 +71,16 @@ pub struct Syncer {
 impl Default for Syncer {
     fn default() -> Self {
         Self::new(DEFAULT_CONCURRENT_TASKS_COUNT, DEFAULT_BUFFERS_SIZE)
+            .expect("default download buffer count and size are positive")
     }
 }
 
 impl Syncer {
-    pub fn new(concurrency: usize, buffer_size: usize) -> Self {
-        Self {
+    pub fn new(concurrency: usize, buffer_size: usize) -> std::io::Result<Self> {
+        Ok(Self {
             concurrency,
-            buffers: Arc::new(BufferPool::new(concurrency, buffer_size)),
-        }
+            buffers: Arc::new(BufferPool::new(concurrency, buffer_size)?),
+        })
     }
 
     pub async fn run<T, F>(

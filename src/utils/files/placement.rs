@@ -67,23 +67,7 @@ pub fn copy_new(source: &Path, destination: &Path, cancellation: &Cancellation) 
         .create_new(true)
         .open(destination)?;
 
-    let result = (|| {
-        let mut buffer = [0_u8; 64 * 1024];
-
-        loop {
-            cancellation.check()?;
-
-            let count = input.read(&mut buffer)?;
-
-            if count == 0 {
-                break;
-            }
-
-            output.write_all(&buffer[..count])?;
-        }
-
-        output.sync_all()
-    })();
+    let result = copy_contents(&mut input, &mut output, cancellation);
 
     drop(output);
 
@@ -92,4 +76,41 @@ pub fn copy_new(source: &Path, destination: &Path, cancellation: &Cancellation) 
     }
 
     result
+}
+
+/// Replace only after the sibling staging file has been fully written.
+pub(crate) fn copy_replace(
+    source: &Path,
+    destination: &Path,
+    cancellation: &Cancellation,
+) -> io::Result<()> {
+    cancellation.check()?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut input = File::open(source)?;
+    let mut staging = tempfile::NamedTempFile::new_in(parent)?;
+    copy_contents(&mut input, staging.as_file_mut(), cancellation)?;
+    cancellation.check()?;
+    staging.persist(destination).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn copy_contents(
+    input: &mut File,
+    output: &mut File,
+    cancellation: &Cancellation,
+) -> io::Result<()> {
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        cancellation.check()?;
+        let count = input.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        output.write_all(&buffer[..count])?;
+    }
+    output.sync_all()
 }

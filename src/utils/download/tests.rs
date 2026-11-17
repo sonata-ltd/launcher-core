@@ -57,7 +57,7 @@ impl Fixture {
                 url,
                 hash,
             },
-            Arc::new(BufferPool::new(1, DEFAULT_BUFFER_SIZE)),
+            Arc::new(BufferPool::new(1, DEFAULT_BUFFER_SIZE).unwrap()),
         )
     }
 }

@@ -19,6 +19,9 @@ pub enum InstanceError {
     #[error("Failed to run instance: {0}")]
     RunFailed(String),
 
+    #[error("Instance {0} has an unfinished content installation and requires recovery")]
+    ContentRecoveryPending(InstanceId),
+
     #[error("rename failed: {0}")]
     RenameFailed(String),
 

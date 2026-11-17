@@ -40,12 +40,45 @@ pub fn relative(path: &Path) -> Result<()> {
 pub fn child(root: &Path, path: &Path) -> Result<PathBuf> {
     relative(path)?;
     let full = root.join(path);
-    if full.exists() && !full.canonicalize()?.starts_with(root.canonicalize()?) {
-        return Err(FileError::InvalidPath(
-            "artifact symlink escapes root".into(),
-        ));
+    // Resolve existing prefixes even when the final destination is absent.
+    // This check assumes another process isn't replacing directories during I/O.
+    let mut canonical_root = None;
+    for ancestor in root.ancestors() {
+        let ancestor = if ancestor.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            ancestor
+        };
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                let canonical = ancestor.canonicalize()?;
+                if ancestor == root || root.as_os_str().is_empty() {
+                    canonical_root = Some(canonical);
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
+    let Some(canonical_root) = canonical_root else {
+        return Ok(full);
+    };
 
+    let mut prefix = root.to_path_buf();
+    for component in path.components() {
+        prefix.push(component);
+        match fs::symlink_metadata(&prefix) {
+            Ok(_) if !prefix.canonicalize()?.starts_with(&canonical_root) => {
+                return Err(FileError::InvalidPath(
+                    "artifact symlink escapes root".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(full)
 }
 
@@ -269,3 +302,23 @@ pub fn path_key(path: &Path) -> Vec<u8> {
 }
 
 pub mod publish;
+
+#[cfg(all(test, unix))]
+#[test]
+fn child_rejects_missing_targets_beneath_external_or_dangling_links() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let outside = temp.path().join("other");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("external")).unwrap();
+    std::os::unix::fs::symlink(outside.join("absent"), root.join("dangling")).unwrap();
+
+    assert!(child(&root, Path::new("external/new/file")).is_err());
+    assert!(child(&root, Path::new("dangling/new/file")).is_err());
+    assert!(child(&root.join("dangling/new"), Path::new("file")).is_err());
+    assert_eq!(
+        child(&root, Path::new("new/file")).unwrap(),
+        root.join("new/file")
+    );
+}

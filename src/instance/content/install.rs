@@ -12,11 +12,7 @@ use crate::{
     utils::{
         cancellation::Cancellation,
         download::transfer::{self, Cancel},
-        files::{
-            self,
-            digest::digest_file,
-            placement::{self, CopyFallback, PlacementKind},
-        },
+        files::{self, digest::digest_file, placement},
     },
 };
 use std::{fs, path::Path, sync::Arc};
@@ -118,21 +114,11 @@ pub(crate) async fn execute(
             object
         };
         let object_id = crate::instance::content::store::storage::register(&db, &object).await?;
-        let staged_path = stage.path().join(&file.file_name);
+        let target = stage.path().join(&file.file_name);
         let source = object.path.clone();
-        let target = staged_path.clone();
         let token = common_cancel.clone();
-        let placement = async_std::task::spawn_blocking(move || {
-            // Сначала hardlink. Copy допускается как явно выбранная политика
-            // для staging; исходная ошибка остаётся в PlacementResult.
-            placement::place_new(
-                &source,
-                &target,
-                CopyFallback::AllowedAfterLinkFailure,
-                &token,
-            )
-        })
-        .await?;
+        async_std::task::spawn_blocking(move || placement::copy_new(&source, &target, &token))
+            .await?;
         let provider = match release.key.project.provider {
             Provider::Modrinth => "modrinth",
             Provider::CurseForge => "curseforge",
@@ -144,11 +130,7 @@ pub(crate) async fn execute(
             provider: provider.into(),
             project_id: release.key.project.project_id.clone(),
             release_id: release.key.release_id.clone(),
-            placement: match placement.kind {
-                PlacementKind::Hardlink => "hardlink",
-                PlacementKind::Copy => "copy",
-            }
-            .into(),
+            placement: "copy".into(),
         });
         progress(index + 1, false);
     }

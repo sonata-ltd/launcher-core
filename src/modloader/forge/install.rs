@@ -279,11 +279,10 @@ pub async fn run(
         for (path, hash) in step.outputs {
             let path = PathBuf::from(tokens::resolve_argument(&path, &tokens, &libraries)?);
 
-            if !path.starts_with(&libraries) {
-                return Err(ModloaderError::Invalid(
-                    "processor output escapes installation Maven root".into(),
-                ));
-            }
+            let relative = path.strip_prefix(&libraries).map_err(|_| {
+                ModloaderError::Invalid("processor output escapes installation Maven root".into())
+            })?;
+            let path = files::child(&libraries, relative)?;
 
             if let Some(parent) = path.parent() {
                 async_std::fs::create_dir_all(parent).await?;

@@ -10,10 +10,7 @@ use crate::{
     instance::{model::InstanceId, service::InstanceService},
     utils::{
         cancellation::Cancellation,
-        files::{
-            self,
-            placement::{self, CopyFallback},
-        },
+        files::{self, placement},
     },
 };
 use std::{fs, sync::Arc};
@@ -25,7 +22,7 @@ pub(crate) async fn recover(
     filter: Option<InstanceId>,
 ) -> Result<()> {
     let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
-    for (operation, instance, expected_files) in storage::pending(db).await? {
+    for (operation, instance, mut expected_files) in storage::pending(db).await? {
         if filter.is_some_and(|id| id != instance) {
             continue;
         }
@@ -40,7 +37,7 @@ pub(crate) async fn recover(
         let stage = tempfile::Builder::new()
             .prefix(".sonata-recovery-")
             .tempdir_in(&root)?;
-        for file in &expected_files {
+        for file in &mut expected_files {
             files::portable_name::validate_file_name(&file.name)?;
             let path = files::child(&mods, std::path::Path::new(&file.name))?;
             if fs::symlink_metadata(&path).is_ok() {
@@ -67,16 +64,12 @@ pub(crate) async fn recover(
                         "Объект CAS повреждён; восстановление остановлено".into(),
                     ));
                 }
-                placement::place_new(
-                    &object,
-                    &staged,
-                    CopyFallback::AllowedAfterLinkFailure,
-                    &Cancellation::default(),
-                )?;
+                placement::copy_new(&object, &staged, &Cancellation::default())?;
                 files::publish::publish_new(staged, path)?;
                 Ok(())
             })
             .await?;
+            file.placement = "copy".into();
         }
         let id = uuid::Uuid::parse_str(&operation)
             .map_err(|_| ContentError::Invalid("Повреждён id журнала контента".into()))?;

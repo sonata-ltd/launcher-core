@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use getset::Getters;
 use thiserror::Error;
@@ -35,11 +39,14 @@ pub enum AssetSyncError {
     #[error(transparent)]
     Sync(#[from] SyncError),
 
+    #[error("asset {0:?} has no valid SHA-1")]
+    InvalidHash(String),
+
     #[error(transparent)]
     Db(#[from] DbError),
 }
 
-#[derive(Debug, Getters, Default, Clone)]
+#[derive(Debug, Getters, Clone)]
 pub struct AssetInfo {
     #[get = "pub"]
     name: String,
@@ -50,8 +57,8 @@ pub struct AssetInfo {
 }
 
 impl AssetInfo {
-    pub fn new(name: String, hash: String, url: String) -> Self {
-        Self { name, hash, url }
+    fn object_path(&self, objects: &Path) -> PathBuf {
+        objects.join(&self.hash[..2]).join(&self.hash)
     }
 }
 
@@ -89,14 +96,11 @@ impl AssetsData {
         let objects_dir = paths.assets().join("objects");
         let wanted = parse::extract_assets(manifest)?;
 
-        let store = DbAssetStore::new(db);
+        let store = DbAssetStore::new(db, objects_dir.clone());
         let outcome = Syncer::default()
             .run(
                 wanted,
-                |asset| {
-                    let hash = asset.hash();
-                    objects_dir.join(&hash[..2]).join(hash)
-                },
+                |asset| asset.object_path(&objects_dir),
                 &store,
                 op,
                 STAGE_TYPE,
@@ -114,5 +118,46 @@ impl AssetsData {
             total: outcome.cached.len() + outcome.downloaded.len(),
             downloaded: outcome.downloaded.len(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::download::sync::SyncStore;
+    use serde_json::json;
+
+    #[test]
+    fn invalid_hashes_fail_before_building_paths() {
+        for hash in [
+            "aé",
+            "../file",
+            "f",
+            "000000000000000000000000000000000000000g",
+        ] {
+            let manifest = json!({"objects": {"item": {"hash": hash}}});
+            assert!(matches!(
+                parse::extract_assets(&manifest),
+                Err(AssetSyncError::InvalidHash(name)) if name == "item"
+            ));
+        }
+    }
+
+    #[async_std::test]
+    async fn asset_cache_checks_contents_even_when_database_already_has_the_asset() {
+        let temp = tempfile::tempdir().unwrap();
+        let hash = format!("{:x}", <sha1::Sha1 as sha1::Digest>::digest(b"original"));
+        let wanted = parse::extract_assets(&json!({"objects": {"item": {"hash": hash}}})).unwrap();
+        let path = wanted[0].object_path(temp.path());
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        let store = DbAssetStore::new(db, temp.path().to_owned());
+        store.register(&wanted).await.unwrap();
+        assert!(store.cached(&wanted).await.unwrap().is_empty());
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"original").unwrap();
+        assert!(store.cached(&wanted).await.unwrap().contains(&hash));
+        std::fs::write(&path, b"modified").unwrap();
+        assert!(store.cached(&wanted).await.unwrap().is_empty());
     }
 }

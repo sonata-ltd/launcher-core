@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    io,
+    ops::{Deref, DerefMut},
+};
 
 use async_channel::{bounded, Receiver, Sender, TrySendError};
 use async_std::task;
@@ -14,7 +17,13 @@ pub struct BufferPool {
 
 impl BufferPool {
     /// Create a pool with `capacity` buffers of size `buf_size`
-    pub fn new(capacity: usize, buf_size: usize) -> Self {
+    pub fn new(capacity: usize, buf_size: usize) -> io::Result<Self> {
+        if capacity == 0 || buf_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "buffer count and size must be positive",
+            ));
+        }
         let (tx, rx) = bounded(capacity);
 
         for _ in 0..capacity {
@@ -22,7 +31,7 @@ impl BufferPool {
             tx.try_send(buf).expect("Initial fill shound succeed");
         }
 
-        BufferPool { tx, rx }
+        Ok(Self { tx, rx })
     }
 
     pub async fn acquire(&self) -> BufferGuard {

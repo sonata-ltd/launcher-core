@@ -130,13 +130,21 @@ async fn mutation_lease_prevents_launch_and_loader_install() {
 }
 
 #[async_std::test]
-async fn unfinished_publication_blocks_launch_and_recovery_finishes_from_cas() {
+async fn unfinished_publication_blocks_launch_and_install_until_recovery() {
     let fixture = fixture().await;
-    let (operation, _) = prepared(&fixture).await;
+    let (operation, files) = prepared(&fixture).await;
     assert!(storage::ensure_no_pending(&fixture.db, fixture.id)
         .await
         .is_err());
-    assert!(fixture.instances.launch(fixture.id).await.is_err());
+    use crate::instance::error::InstanceError;
+    assert!(matches!(
+        fixture.instances.launch(fixture.id).await,
+        Err(InstanceError::ContentRecoveryPending(id)) if id == fixture.id
+    ));
+    assert!(matches!(
+        fixture.instances.install(fixture.id).await,
+        Err(InstanceError::ContentRecoveryPending(id)) if id == fixture.id
+    ));
     recovery::recover(&fixture.db, &fixture.paths, &fixture.instances, None)
         .await
         .unwrap();
@@ -159,6 +167,17 @@ async fn unfinished_publication_blocks_launch_and_recovery_finishes_from_cas() {
         .await
         .unwrap();
     assert_eq!(count, 1);
+    let placement: String = sqlx::query_scalar("SELECT placement FROM instance_content")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(placement, "copy");
+
+    let store = super::store::ObjectStore::new(fixture.paths.root().join("content-store"));
+    let object_path = store.path_for(&files[0].sha256).unwrap();
+    std::fs::write(fixture.root.join("mods/mod.jar"), b"modified locally").unwrap();
+    assert_eq!(std::fs::read(object_path).unwrap(), b"verified bytes");
+
     storage::clear_completed(&fixture.db, Some(operation))
         .await
         .unwrap();
