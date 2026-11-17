@@ -1,7 +1,4 @@
-use crate::{
-    instance::download::{libs::LibInfo, manifest::fetch_manifest},
-    utils::str_nth_occurrence,
-};
+use crate::instance::download::manifest::fetch_manifest;
 
 use super::*;
 
@@ -34,7 +31,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: sha1.to_string(),
                                                 name: name.to_string(),
-                                                path: self.build_maven_file_path(path),
+                                                path: library_path(self.paths.libraries(), &path)?,
                                                 url: url.to_string(),
                                                 native: true,
                                             });
@@ -51,7 +48,10 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                                 downloadable_libs.push(LibInfo {
                                                     hash: sha1.to_string(),
                                                     name: name.to_string(),
-                                                    path: self.build_maven_file_path(path),
+                                                    path: library_path(
+                                                        self.paths.libraries(),
+                                                        &path,
+                                                    )?,
                                                     url: url.to_string(),
                                                     native: false,
                                                 });
@@ -72,7 +72,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: sha1.to_string(),
                                                 name: name.to_string(),
-                                                path: self.build_maven_file_path(path),
+                                                path: library_path(self.paths.libraries(), &path)?,
                                                 url: url.to_string(),
                                                 native: true,
                                             });
@@ -90,7 +90,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: sha1.to_string(),
                                                 name: name.to_string(),
-                                                path: self.build_maven_file_path(path),
+                                                path: library_path(self.paths.libraries(), &path)?,
                                                 url: url.to_string(),
                                                 native: false,
                                             });
@@ -153,11 +153,10 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 self.manifest.get("version").and_then(|v| v.as_str()),
             ) {
                 let file_name = version_name.to_owned() + "-client.jar";
-                let path = format!(
-                    "{}/com/mojang/minecraft/{}",
-                    self.paths.libraries().display(),
-                    file_name
-                );
+                let path = library_path(
+                    self.paths.libraries(),
+                    &format!("com/mojang/minecraft/{file_name}"),
+                )?;
 
                 tracing::debug!(jar_name = %jar_name, "main jar found");
 
@@ -175,11 +174,10 @@ impl<'a, 'b> LibsData<'a, 'b> {
     }
 }
 
-fn get_path_from_url(url: &str) -> Option<&str> {
-    let third_slash_pos = match str_nth_occurrence(url, '/', 3) {
-        Some(pos) => pos,
-        None => return None,
-    };
-
-    Some(&url[third_slash_pos..])
+fn get_path_from_url(value: &str) -> Option<String> {
+    let url = http_types::Url::parse(value).ok()?;
+    if matches!(url.scheme(), "http" | "https") && url.path() != "/" {
+        return Some(url.path().to_owned());
+    }
+    None
 }

@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use getset::Getters;
 use serde::Deserialize;
@@ -217,9 +222,25 @@ impl<'a, 'b> LibsData<'a, 'b> {
         Ok(LibsOutcome { classpath, natives })
     }
 
+    #[deprecated(note = "use a checked relative path for file destinations")]
+    #[allow(deprecated)]
     pub fn build_maven_file_path(&self, maven_path: &str) -> String {
         maven::build_file_path(self.paths.libraries(), maven_path)
     }
+}
+
+fn library_path(root: &Path, descriptor_path: &str) -> Result<String, LibsSyncError> {
+    if descriptor_path.contains('\\') {
+        return Err(LibsSyncError::ManifestMalformed(
+            "invalid library path separator".into(),
+        ));
+    }
+    let relative = Path::new(descriptor_path.trim_start_matches('/'));
+    files::child(root, relative)
+        .map_err(|error| LibsSyncError::ManifestMalformed(error.to_string()))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| LibsSyncError::ManifestMalformed("non-Unicode library path".into()))
 }
 
 fn construct_os_name() -> Result<&'static str, LibsSyncError> {
@@ -241,6 +262,18 @@ fn construct_os_name() -> Result<&'static str, LibsSyncError> {
 #[cfg(test)]
 mod prepared_tests {
     use super::*;
+
+    #[test]
+    fn legacy_descriptor_paths_are_checked_without_reinterpreting_coordinates() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            PathBuf::from(library_path(root.path(), "/org/example/library.jar").unwrap()),
+            root.path().join("org/example/library.jar")
+        );
+        assert!(library_path(root.path(), "/../library.jar").is_err());
+        assert!(library_path(root.path(), "C:\\outside.jar").is_err());
+    }
+
     #[async_std::test]
     async fn prepared_files_repair_missing_db_rows_without_network() {
         let temp = tempfile::tempdir().unwrap();

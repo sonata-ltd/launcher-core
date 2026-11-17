@@ -1,5 +1,5 @@
 use crate::{
-    instance::download::libs::{LibInfo, LibsData, LibsSyncError},
+    instance::download::libs::{library_path, LibInfo, LibsData, LibsSyncError},
     version::rules::{rules_allow, RuleContext},
 };
 
@@ -34,7 +34,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                         downloadable_libs.push(LibInfo {
                             hash: lib_hash.to_string(),
                             name: lib_name.to_string(),
-                            path: self.build_maven_file_path(lib_path),
+                            path: library_path(self.paths.libraries(), lib_path)?,
                             url: lib_url.to_string(),
                             native: false,
                         });
@@ -62,7 +62,10 @@ impl<'a, 'b> LibsData<'a, 'b> {
                                             downloadable_libs.push(LibInfo {
                                                 hash: lib_hash.to_string(),
                                                 name: lib_name.to_string(),
-                                                path: self.build_maven_file_path(lib_path),
+                                                path: library_path(
+                                                    self.paths.libraries(),
+                                                    lib_path,
+                                                )?,
                                                 url: lib_url.to_string(),
                                                 native: true,
                                             });
@@ -85,7 +88,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
                     downloadable_libs.push(LibInfo {
                         hash: hash.to_string(),
                         name,
-                        path: self.build_maven_file_path(&path),
+                        path: library_path(self.paths.libraries(), &path)?,
                         url: client_url.to_string(),
                         native: false,
                     });
