@@ -274,7 +274,7 @@ async fn second_service_cannot_use_the_same_launcher_root() {
 #[test]
 fn transfer_and_filesystem_steps_observe_the_same_cancellation_flag() {
     let token = crate::utils::download::transfer::Cancel::default();
-    let file_token = Cancellation::from_flag(token.0.clone());
+    let file_token = token.clone();
     token.cancel();
     assert!(file_token.check().is_err());
 }

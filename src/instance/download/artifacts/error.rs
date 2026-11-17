@@ -39,6 +39,12 @@ pub enum ArtifactError {
     Rules(#[from] RuleError),
 }
 
+impl From<crate::utils::cancellation::Cancelled> for ArtifactError {
+    fn from(error: crate::utils::cancellation::Cancelled) -> Self {
+        Self::Download(error.into())
+    }
+}
+
 impl ArtifactError {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Download(error) if error.is_cancelled())

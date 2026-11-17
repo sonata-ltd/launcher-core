@@ -37,6 +37,12 @@ pub enum InitError {
     Artifact(#[from] ArtifactError),
 }
 
+impl From<crate::utils::cancellation::Cancelled> for InitError {
+    fn from(error: crate::utils::cancellation::Cancelled) -> Self {
+        Self::Download(error.into())
+    }
+}
+
 impl InitError {
     pub fn is_cancelled(&self) -> bool {
         match self {

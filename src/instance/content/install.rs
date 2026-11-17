@@ -12,7 +12,6 @@ use crate::{
     },
     instance::model::InstanceId,
     utils::{
-        cancellation::Cancellation,
         download::transfer::{self, Cancel},
         files::{self, digest::digest_file, placement},
     },
@@ -44,7 +43,6 @@ pub(super) async fn execute(
         .tempdir_in(root)?;
     let download_stage = tempfile::tempdir()?;
     let mut prepared = Vec::new();
-    let common_cancel = Cancellation::from_flag(cancel.0.clone());
     for (index, action) in releases.iter().enumerate() {
         let release = &action.release;
         cancel.check()?;
@@ -53,7 +51,7 @@ pub(super) async fn execute(
         let (object_id, sha256, placement) = if action.adopt_existing {
             let target = files::child(&mods, Path::new(&file.file_name))?;
             let expected = file.clone();
-            let token = common_cancel.clone();
+            let token = cancel.clone();
             let hashes = async_std::task::spawn_blocking(move || -> Result<_> {
                 let (hashes, _) = digest_file(&target, &token, |_| {})?;
                 if !expected.matches(&hashes) {
@@ -77,7 +75,7 @@ pub(super) async fn execute(
             let cached_object = if let Some(hash) = cached_hash {
                 let path = store.path_for(&hash)?;
                 if path.try_exists()? {
-                    let token = common_cancel.clone();
+                    let token = cancel.clone();
                     let expected = file.clone();
                     Some(
                         async_std::task::spawn_blocking(move || -> Result<_> {
@@ -106,7 +104,7 @@ pub(super) async fn execute(
                 let download = download_stage.path().join(format!("{index}.jar"));
                 transfer::download(&file.url, &download, file.sha1.as_deref(), cancel).await?;
                 let source = download.clone();
-                let token = common_cancel.clone();
+                let token = cancel.clone();
                 let expected = file.clone();
                 let store_copy = store.clone();
                 let object = async_std::task::spawn_blocking(move || -> Result<_> {
@@ -125,7 +123,7 @@ pub(super) async fn execute(
                 crate::instance::content::store::storage::register(&db, &object).await?;
             let target = stage.path().join(&file.file_name);
             let source = object.path.clone();
-            let token = common_cancel.clone();
+            let token = cancel.clone();
             async_std::task::spawn_blocking(move || placement::copy_new(&source, &target, &token))
                 .await?;
             (object_id, object.digests.sha256, Placement::Copy)

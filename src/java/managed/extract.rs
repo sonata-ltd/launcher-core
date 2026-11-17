@@ -1,4 +1,5 @@
-use super::{model::*, transfer::Cancellation};
+use super::model::*;
+use crate::utils::cancellation::Cancellation;
 use std::{
     fs,
     io::{self, Read, Write},
@@ -14,7 +15,7 @@ struct CheckedReader<R> {
 
 impl<R: Read> Read for CheckedReader<R> {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
-        self.cancel.check().map_err(io::Error::other)?;
+        self.cancel.check()?;
         self.inner.read(bytes)
     }
 }
@@ -37,7 +38,7 @@ pub(super) fn extract(
                 };
                 let mut archive = tar::Archive::new(reader);
                 for entry in archive.entries()? {
-                    cancel.check().map_err(io::Error::other)?;
+                    cancel.check()?;
                     let mut entry = entry?;
                     let path = entry.path()?.into_owned();
                     validate_path(&path)?;
@@ -78,7 +79,7 @@ pub(super) fn extract(
             ArchiveFormat::Zip => {
                 let mut zip = zip::ZipArchive::new(file)?;
                 for i in 0..zip.len() {
-                    cancel.check().map_err(io::Error::other)?;
+                    cancel.check()?;
                     let mut entry = zip.by_index(i)?;
                     let relative = entry
                         .enclosed_name()
@@ -108,7 +109,7 @@ pub(super) fn extract(
                         .open(&path)?;
                     let mut buffer = [0; 64 * 1024];
                     loop {
-                        cancel.check().map_err(io::Error::other)?;
+                        cancel.check()?;
                         let n = entry.read(&mut buffer)?;
                         if n == 0 {
                             break;

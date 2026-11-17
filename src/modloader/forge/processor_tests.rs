@@ -22,11 +22,9 @@ async fn short_process_flushes_stdout_stderr_and_unterminated_last_line() {
     let command = command(dir.path(), "printf 'stdout\\n'; printf 'stderr' >&2");
     let log = command.log.clone();
     let mut updates = Vec::new();
-    run(command, &AtomicBool::new(false), |lines| {
-        updates.push(lines)
-    })
-    .await
-    .unwrap();
+    run(command, &Cancellation::new(), |lines| updates.push(lines))
+        .await
+        .unwrap();
     let last = updates.last().unwrap();
     assert_eq!(
         last.iter()
@@ -42,11 +40,9 @@ async fn failed_process_flushes_diagnostics_before_returning_error() {
     let dir = tempfile::tempdir().unwrap();
     let command = command(dir.path(), "printf 'failure details' >&2; exit 7");
     let mut updates = Vec::new();
-    let error = run(command, &AtomicBool::new(false), |lines| {
-        updates.push(lines)
-    })
-    .await
-    .unwrap_err();
+    let error = run(command, &Cancellation::new(), |lines| updates.push(lines))
+        .await
+        .unwrap_err();
     assert!(matches!(error, ModloaderError::Processor(_)));
     assert_eq!(updates.last().unwrap()[0].text, "failure details");
 }
@@ -56,12 +52,12 @@ async fn cancellation_keeps_output_already_produced() {
     let dir = tempfile::tempdir().unwrap();
     // The shell itself stays alive: no descendant can retain the log after kill.
     let command = command(dir.path(), "printf 'ready\\n'; while :; do :; done");
-    let cancel = AtomicBool::new(false);
+    let cancel = Cancellation::new();
     let mut updates = Vec::new();
     let error = async_std::future::timeout(
         Duration::from_secs(5),
         run(command, &cancel, |lines| {
-            cancel.store(true, Ordering::Release);
+            cancel.cancel();
             updates.push(lines);
         }),
     )

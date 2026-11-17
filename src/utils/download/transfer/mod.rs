@@ -8,32 +8,13 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use sha1::{Digest, Sha1};
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
     time::Duration,
 };
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Default)]
-pub struct Cancel(pub Arc<AtomicBool>);
-
-impl Cancel {
-    pub fn check(&self) -> Result<()> {
-        if self.0.load(Ordering::Acquire) {
-            Err(DownloadError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-}
+pub use crate::utils::cancellation::Cancellation as Cancel;
 
 pub async fn download(
     url: &str,
@@ -78,15 +59,16 @@ pub async fn download(
             let mut response = loop {
                 cancel.check()?;
 
-                let response = async_std::future::timeout(
-                    Duration::from_secs(30),
-                    surf::get(current.as_str())
-                        .header("User-Agent", "SonataLauncher/0.1")
-                        .header("Accept-Encoding", "identity"),
-                )
-                .await
-                .map_err(|_| DownloadError::Timeout("response"))?
-                .map_err(|e| DownloadError::Http(e.to_string()))?;
+                let response = cancel
+                    .run(async_std::future::timeout(
+                        Duration::from_secs(30),
+                        surf::get(current.as_str())
+                            .header("User-Agent", "SonataLauncher/0.1")
+                            .header("Accept-Encoding", "identity"),
+                    ))
+                    .await?
+                    .map_err(|_| DownloadError::Timeout("response"))?
+                    .map_err(|e| DownloadError::Http(e.to_string()))?;
 
                 if !response.status().is_redirection() {
                     break response;
@@ -121,10 +103,13 @@ pub async fn download(
             loop {
                 cancel.check()?;
 
-                let count =
-                    async_std::future::timeout(Duration::from_secs(30), reader.read(&mut buffer))
-                        .await
-                        .map_err(|_| DownloadError::Timeout("body"))??;
+                let count = cancel
+                    .run(async_std::future::timeout(
+                        Duration::from_secs(30),
+                        reader.read(&mut buffer),
+                    ))
+                    .await?
+                    .map_err(|_| DownloadError::Timeout("body"))??;
 
                 if count == 0 {
                     break;
@@ -184,7 +169,9 @@ pub async fn download(
             }
         }
 
-        task::sleep(Duration::from_millis(500 * 2u64.pow(attempt))).await;
+        cancel
+            .run(task::sleep(Duration::from_millis(500 * 2u64.pow(attempt))))
+            .await?;
     }
 
     Err(last.unwrap_or_else(|| DownloadError::Http("download failed".into())))
@@ -213,7 +200,7 @@ pub async fn place(
         let blob = blobs.join(hash.to_ascii_lowercase());
         let target = path.to_owned();
         let digest = hash.to_owned();
-        let cancellation = crate::utils::cancellation::Cancellation::from_flag(cancel.0.clone());
+        let cancellation = cancel.clone();
         let placed = task::spawn_blocking(move || -> Result<bool> {
             if !files::matches(&blob, &digest)? {
                 return Ok(false);

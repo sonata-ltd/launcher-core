@@ -1,59 +1,10 @@
 use async_std::{fs::File, future::timeout};
-use futures::{
-    future::{select, Either},
-    AsyncReadExt, AsyncWriteExt,
-};
+use futures::{AsyncReadExt, AsyncWriteExt};
 use sha2::{Digest, Sha256};
-use std::{
-    future::Future,
-    path::Path,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use super::model::*;
-
-#[derive(Clone)]
-pub(super) struct Cancellation {
-    flag: Arc<AtomicBool>,
-    tx: async_channel::Sender<()>,
-    rx: async_channel::Receiver<()>,
-}
-
-impl Cancellation {
-    pub fn new() -> Self {
-        let (tx, rx) = async_channel::bounded(1);
-        Self {
-            flag: Arc::new(AtomicBool::new(false)),
-            tx,
-            rx,
-        }
-    }
-
-    pub fn cancel(&self) {
-        self.flag.store(true, Ordering::SeqCst);
-        let _ = self.tx.try_send(());
-    }
-
-    pub fn check(&self) -> Result<()> {
-        if self.flag.load(Ordering::SeqCst) {
-            Err(ManagedJavaError::new("cancelled", "Cancellation requested"))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub async fn wait<T>(&self, future: impl Future<Output = Result<T>>) -> Result<T> {
-        self.check()?;
-        match select(Box::pin(future), Box::pin(self.rx.recv())).await {
-            Either::Left((result, _)) => result,
-            Either::Right(_) => Err(ManagedJavaError::new("cancelled", "Cancellation requested")),
-        }
-    }
-}
+use crate::utils::cancellation::Cancellation;
 
 pub(super) async fn download(
     package: &ManagedJavaPackage,
@@ -72,7 +23,7 @@ pub(super) async fn download(
             ));
         }
         let response = cancel
-            .wait(async {
+            .run(async {
                 timeout(
                     Duration::from_secs(30),
                     surf::get(url.as_str()).header("Accept-Encoding", "identity"),
@@ -83,7 +34,7 @@ pub(super) async fn download(
                 })?
                 .map_err(|e| ManagedJavaError::new("download", format!("{url}: {e}")))
             })
-            .await?;
+            .await??;
         if !response.status().is_redirection() {
             break response;
         }
@@ -123,7 +74,7 @@ pub(super) async fn stream_body(
     let mut downloaded = 0;
     loop {
         let n = cancel
-            .wait(async {
+            .run(async {
                 timeout(Duration::from_secs(30), reader.read(&mut buffer))
                     .await
                     .map_err(|_| {
@@ -131,7 +82,7 @@ pub(super) async fn stream_body(
                     })?
                     .map_err(|e| ManagedJavaError::new("download", e))
             })
-            .await?;
+            .await??;
         if n == 0 {
             break;
         }
@@ -143,13 +94,13 @@ pub(super) async fn stream_body(
             ));
         }
         cancel
-            .wait(async {
+            .run(async {
                 writer
                     .write_all(&buffer[..n])
                     .await
                     .map_err(|e| ManagedJavaError::new("download", e))
             })
-            .await?;
+            .await??;
         hash.update(&buffer[..n]);
         progress(downloaded);
     }

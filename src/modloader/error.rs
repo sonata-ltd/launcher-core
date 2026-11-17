@@ -41,6 +41,12 @@ pub enum ModloaderError {
     Rules(#[from] crate::version::rules::RuleError),
 }
 
+impl From<crate::utils::cancellation::Cancelled> for ModloaderError {
+    fn from(error: crate::utils::cancellation::Cancelled) -> Self {
+        Self::Download(error.into())
+    }
+}
+
 impl ModloaderError {
     pub fn is_cancelled(&self) -> bool {
         match self {

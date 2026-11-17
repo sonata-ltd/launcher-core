@@ -1,6 +1,7 @@
 use super::output::OutputTail;
 use crate::data::registry::operation::message::output::OutputLine;
 use crate::modloader::error::{ModloaderError, Result};
+use crate::utils::cancellation::Cancellation;
 use async_std::{process::Command, task};
 use sha1::{Digest, Sha1};
 use std::{
@@ -8,7 +9,6 @@ use std::{
     io::{BufReader, Read},
     path::PathBuf,
     process::Stdio,
-    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -68,10 +68,10 @@ fn all_outputs_match(outputs: &[(PathBuf, String)]) -> Result<bool> {
 
 pub async fn run(
     command: ProcessorCommand,
-    cancel: &AtomicBool,
+    cancel: &Cancellation,
     mut on_output: impl FnMut(Vec<OutputLine>) + Send,
 ) -> Result<()> {
-    if cancel.load(Ordering::Acquire) {
+    if cancel.is_cancelled() {
         return Err(ModloaderError::Cancelled);
     }
 
@@ -128,7 +128,7 @@ pub async fn run(
             break;
         }
 
-        let cancelled = cancel.load(Ordering::Acquire);
+        let cancelled = cancel.is_cancelled();
         if cancelled || started.elapsed() > Duration::from_secs(15 * 60) {
             let killed = child.kill();
             if killed.is_ok() {
@@ -144,7 +144,7 @@ pub async fn run(
             });
         }
 
-        task::sleep(Duration::from_millis(100)).await;
+        let _ = cancel.run(task::sleep(Duration::from_millis(100))).await;
     }
 
     let outputs = command.outputs;

@@ -32,4 +32,10 @@ pub enum ContentError {
     Download(#[from] crate::utils::download::transfer::error::DownloadError),
 }
 
+impl From<crate::utils::cancellation::Cancelled> for ContentError {
+    fn from(error: crate::utils::cancellation::Cancelled) -> Self {
+        Self::Download(error.into())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, ContentError>;

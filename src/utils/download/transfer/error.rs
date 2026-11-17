@@ -34,6 +34,12 @@ pub enum DownloadError {
     File(#[from] FileError),
 }
 
+impl From<crate::utils::cancellation::Cancelled> for DownloadError {
+    fn from(_: crate::utils::cancellation::Cancelled) -> Self {
+        Self::Cancelled
+    }
+}
+
 impl DownloadError {
     pub fn is_cancelled(&self) -> bool {
         matches!(self, Self::Cancelled)

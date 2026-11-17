@@ -20,8 +20,8 @@ use crate::java::{
     service::JavaService,
     utils::detect_properties,
 };
+use crate::utils::cancellation::Cancellation;
 pub use model::*;
-use transfer::Cancellation;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Record {
@@ -356,7 +356,7 @@ impl ManagedJavaService {
         };
         if cancelled {
             fs::remove_dir_all(&final_path).await.map_err(storage)?;
-            return cancel.check();
+            return cancel.check().map_err(Into::into);
         }
         self.persist(id).await?;
         if let Err(error) = fs::remove_dir_all(&staging).await {

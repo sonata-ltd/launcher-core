@@ -109,6 +109,12 @@ pub struct ManagedJavaError {
     pub retryable: bool,
 }
 
+impl From<crate::utils::cancellation::Cancelled> for ManagedJavaError {
+    fn from(error: crate::utils::cancellation::Cancelled) -> Self {
+        Self::new("cancelled", error)
+    }
+}
+
 impl ManagedJavaError {
     pub fn new(code: &str, details: impl std::fmt::Display) -> Self {
         Self {

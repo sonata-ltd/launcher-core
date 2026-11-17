@@ -312,7 +312,7 @@ pub async fn run(
                 log: prepared.extracted.join(format!("processor-{index}.log")),
                 outputs,
             },
-            &cancel.0,
+            cancel,
             &mut publish_output,
         )
         .await?;
