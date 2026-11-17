@@ -1,4 +1,10 @@
-use super::{args::offline_uuid, arguments, natives::Natives, traits::StartupTraits, LaunchError};
+use super::{
+    args::offline_uuid,
+    arguments,
+    natives::{NativeDirectory, Natives},
+    traits::StartupTraits,
+    LaunchError,
+};
 use crate::{
     data::layout::LauncherPaths,
     instance::{
@@ -24,6 +30,7 @@ pub struct LaunchCommand {
     pub java: PathBuf,
     pub game_dir: PathBuf,
     pub args: Vec<String>,
+    natives: NativeDirectory,
 }
 
 fn validate_java(java: &JavaRuntime, policy: &JavaPolicy) -> Result<()> {
@@ -138,9 +145,10 @@ async fn prepare_command(
         .await
         .map_err(|e| InstanceError::RunFailed(e.to_string()))?;
 
-    let natives = game
-        .join(".sonata-natives")
-        .join(uuid::Uuid::new_v4().to_string());
+    let native_root = game.join(".sonata-natives");
+    let natives = async_std::task::spawn_blocking(move || NativeDirectory::create(&native_root))
+        .await
+        .map_err(LaunchError::Natives)?;
 
     let mut classpath = Vec::new();
     for item in &profile.artifacts {
@@ -211,7 +219,7 @@ async fn prepare_command(
         ),
         (
             "natives_directory".into(),
-            natives.to_string_lossy().into_owned(),
+            natives.as_ref().to_string_lossy().into_owned(),
         ),
         ("classpath".into(), classpath.clone()),
         (
@@ -268,7 +276,10 @@ async fn prepare_command(
     if !has_cp {
         args.extend(["-cp".into(), classpath]);
     }
-    args.push(format!("-Djava.library.path={}", natives.display()));
+    args.push(format!(
+        "-Djava.library.path={}",
+        natives.as_ref().display()
+    ));
     args.extend(settings.jvm_args.clone());
 
     for startup in StartupTraits::extract(&profile.manifest) {
@@ -311,15 +322,19 @@ async fn prepare_command(
         java: java.exec_path.clone().into(),
         game_dir: game,
         args,
+        natives,
     })
 }
 
-pub fn spawn(command: LaunchCommand) -> Result<async_std::process::Child> {
-    async_std::process::Command::new(command.java)
+pub(crate) fn spawn(
+    command: LaunchCommand,
+) -> Result<(async_std::process::Child, NativeDirectory)> {
+    let child = async_std::process::Command::new(command.java)
         .current_dir(command.game_dir)
         .args(command.args)
         .spawn()
-        .map_err(|error| LaunchError::Spawn(error).into())
+        .map_err(LaunchError::Spawn)?;
+    Ok((child, command.natives))
 }
 
 // Official Forge metadata ignores <version>.jar, but our Maven layout uses

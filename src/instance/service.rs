@@ -382,7 +382,8 @@ impl InstanceService {
             }
             None => return Err(InstanceError::NotInstalled(id)),
         };
-        reservation.commit(resolved::spawn(command)?);
+        let (child, natives) = resolved::spawn(command)?;
+        reservation.commit_with_natives(child, natives);
 
         Ok(())
     }

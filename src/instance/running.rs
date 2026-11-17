@@ -17,6 +17,7 @@ use crate::{
     instance::{
         error::{InstanceError, Result},
         event::InstanceEvent,
+        launch::natives::NativeDirectory,
         model::InstanceId,
     },
 };
@@ -110,7 +111,15 @@ pub struct Reservation {
 }
 
 impl Reservation {
-    pub fn commit(mut self, child: Child) {
+    pub fn commit(self, child: Child) {
+        self.commit_process(child, None);
+    }
+
+    pub(crate) fn commit_with_natives(self, child: Child, natives: NativeDirectory) {
+        self.commit_process(child, Some(natives));
+    }
+
+    fn commit_process(mut self, child: Child, natives: Option<NativeDirectory>) {
         let owner = self.owner.take().expect("a reservation commits once");
         let id = self.id;
         let pid = child.id();
@@ -123,7 +132,7 @@ impl Reservation {
 
         owner.bus.publish(InstanceEvent::Started { id, pid });
 
-        task::spawn(watch(owner, id, child, rx));
+        task::spawn(watch(owner, id, child, rx, natives));
     }
 }
 
@@ -141,7 +150,13 @@ enum Wake {
     Kill,
 }
 
-async fn watch(owner: RunningInstances, id: InstanceId, mut child: Child, kill: Receiver<()>) {
+async fn watch(
+    owner: RunningInstances,
+    id: InstanceId,
+    mut child: Child,
+    kill: Receiver<()>,
+    natives: Option<NativeDirectory>,
+) {
     let wake = {
         let exited = child.status();
         let killed = async {
@@ -169,6 +184,11 @@ async fn watch(owner: RunningInstances, id: InstanceId, mut child: Child, kill: 
             child.status().await
         }
     };
+
+    if let Some(natives) = natives {
+        let exited = status.is_ok();
+        task::spawn_blocking(move || natives.finish(exited)).await;
+    }
 
     let code = match status {
         Ok(status) => {
@@ -256,6 +276,36 @@ mod tests {
             InstanceEvent::Exited { code: Some(3), .. }
         ));
         assert!(running.snapshot().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn native_directory_survives_running_process_and_is_removed_before_exit_event() {
+        let root = tempfile::tempdir().unwrap();
+        let natives = NativeDirectory::create(root.path()).unwrap();
+        let path = natives.as_ref().to_owned();
+        std::fs::write(path.join("libtest.so"), b"test").unwrap();
+        let bus = EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let running = RunningInstances::new(bus);
+        let id = 1.into();
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        running
+            .reserve(id)
+            .unwrap()
+            .commit_with_natives(child, natives);
+        assert!(path.join("libtest.so").exists());
+        running.kill(id).unwrap();
+        async_std::future::timeout(std::time::Duration::from_secs(3), async {
+            while !matches!(
+                next_instance_event(&mut rx).await,
+                InstanceEvent::Exited { .. }
+            ) {}
+        })
+        .await
+        .unwrap();
+        assert!(!path.exists());
+        assert!(running.phase(id).is_none());
     }
 
     #[cfg(unix)]
