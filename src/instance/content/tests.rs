@@ -7,7 +7,7 @@ use crate::{
     },
     instance::content::{
         model::{Candidate, Dependency, DependencyKind, ProjectKey, Provider, ReleaseKey},
-        resolve::graph::{solve, Requirement, ResolveError},
+        resolve::graph::{solve, solve_with_installed, Requirement, ResolveError},
     },
     utils::{
         cancellation::Cancellation,
@@ -631,4 +631,41 @@ fn identical_provider_local_ids_do_not_merge_projects_across_providers() {
         },
     ];
     assert_eq!(solve(&roots, &catalog, 10).unwrap().len(), 2);
+}
+
+#[test]
+fn installed_projects_satisfy_requirements_and_prevent_incompatible_candidates() {
+    let installed = HashMap::from([(
+        project("existing"),
+        candidate(
+            "existing",
+            "1",
+            vec![Dependency {
+                project: project("root"),
+                exact_release: Some("blocked-by-installed".into()),
+                kind: DependencyKind::Incompatible,
+            }],
+        ),
+    )]);
+    let candidates = HashMap::from([(
+        project("root"),
+        vec![
+            candidate("root", "blocked-by-installed", vec![]),
+            candidate(
+                "root",
+                "bad",
+                vec![Dependency {
+                    project: project("existing"),
+                    exact_release: None,
+                    kind: DependencyKind::Incompatible,
+                }],
+            ),
+            candidate("root", "also-bad", vec![required("existing", Some("2"))]),
+            candidate("root", "good", vec![required("existing", Some("1"))]),
+        ],
+    )]);
+    let selected =
+        solve_with_installed(&[requirement("root", None)], &candidates, installed, 16).unwrap();
+    assert_eq!(selected[&project("root")].key.release_id, "good");
+    assert_eq!(selected[&project("existing")].key.release_id, "1");
 }

@@ -14,6 +14,8 @@ pub(crate) struct PublishedFile {
     pub project_id: String,
     pub release_id: String,
     pub placement: String,
+    #[serde(default)]
+    pub dependencies: Option<Vec<super::model::Dependency>>,
 }
 
 #[derive(Serialize, Deserialize)]

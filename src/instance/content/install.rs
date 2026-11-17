@@ -140,6 +140,7 @@ pub(super) async fn execute(
             project_id: release.key.project.project_id.clone(),
             release_id: release.key.release_id.clone(),
             placement: placement.into(),
+            dependencies: Some(release.dependencies.clone()),
         });
         progress(index + 1, false);
     }

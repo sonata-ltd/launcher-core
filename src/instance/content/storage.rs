@@ -93,11 +93,13 @@ pub(crate) async fn complete(
             "download_hash"
         };
         let provider_id: i64 = sqlx::query_scalar(
-            "INSERT INTO content_provider_files(object_id,provider,project_id,release_id,file_key,match_evidence)
-             VALUES(?,?,?,?,?,?) ON CONFLICT(object_id,provider,project_id,release_id,file_key)
+            "INSERT INTO content_provider_files(object_id,provider,project_id,release_id,file_key,match_evidence,dependencies_json)
+             VALUES(?,?,?,?,?,?,?) ON CONFLICT(object_id,provider,project_id,release_id,file_key)
              DO UPDATE SET match_evidence=CASE WHEN content_provider_files.match_evidence='download_hash'
-                 THEN content_provider_files.match_evidence ELSE excluded.match_evidence END RETURNING id"
-        ).bind(file.object_id).bind(&file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name).bind(evidence)
+                 THEN content_provider_files.match_evidence ELSE excluded.match_evidence END,
+             dependencies_json=COALESCE(excluded.dependencies_json,content_provider_files.dependencies_json)
+             RETURNING id"
+        ).bind(file.object_id).bind(&file.provider).bind(&file.project_id).bind(&file.release_id).bind(&file.name).bind(evidence).bind(file.dependencies.as_ref().map(serde_json::to_string).transpose()?)
             .fetch_one(&mut *transaction).await?;
         sqlx::query("INSERT INTO instance_content(instance_id,object_id,kind,relative_path,path_key,mod_enabled,placement,preferred_provider_file_id)
                      VALUES(?,?,'mod',?,?,1,?,?)
@@ -218,9 +220,52 @@ pub(super) struct RegisteredMod {
     pub object_sha256: String,
     pub provider: super::model::Provider,
     pub project_id: String,
+    pub release_id: String,
+    pub size_bytes: i64,
+    pub dependencies_json: Option<String>,
 }
 
 impl RegisteredMod {
+    pub(super) fn project(&self) -> super::model::ProjectKey {
+        super::model::ProjectKey {
+            provider: self.provider,
+            project_id: self.project_id.clone(),
+        }
+    }
+
+    pub(super) fn dependencies(&self) -> Result<Vec<super::model::Dependency>> {
+        self.dependencies_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map(|deps| deps.unwrap_or_default())
+            .map_err(Into::into)
+    }
+
+    pub(super) fn verified_path<'a>(
+        &self,
+        snapshot: &'a super::inventory::ModSnapshot,
+    ) -> Option<&'a std::path::Path> {
+        let recorded = std::path::Path::new(&self.relative_path);
+        if snapshot
+            .archives
+            .get(recorded)
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(&self.object_sha256))
+        {
+            return snapshot
+                .archives
+                .get_key_value(recorded)
+                .map(|(path, _)| path.as_path());
+        }
+        let mut paths = snapshot
+            .archives
+            .iter()
+            .filter(|(_, hash)| hash.eq_ignore_ascii_case(&self.object_sha256))
+            .map(|(path, _)| path.as_path());
+        let first = paths.next()?;
+        paths.next().is_none().then_some(first)
+    }
+
     pub(super) fn matches(
         &self,
         project: &super::model::ProjectKey,
@@ -228,10 +273,7 @@ impl RegisteredMod {
     ) -> bool {
         self.provider == project.provider
             && self.project_id == project.project_id
-            && snapshot
-                .archives
-                .get(std::path::Path::new(&self.relative_path))
-                .is_some_and(|hash| hash.eq_ignore_ascii_case(&self.object_sha256))
+            && self.verified_path(snapshot).is_some()
     }
 }
 
@@ -240,7 +282,8 @@ pub(super) async fn registered_mods(
     instance: InstanceId,
 ) -> Result<Vec<RegisteredMod>> {
     Ok(sqlx::query_as(
-        "SELECT i.relative_path, o.sha256 AS object_sha256, p.provider, p.project_id
+        "SELECT i.relative_path, o.sha256 AS object_sha256, p.provider, p.project_id, p.release_id,
+                o.size_bytes, p.dependencies_json
          FROM instance_content AS i
          JOIN content_objects AS o ON o.id=i.object_id
          JOIN content_provider_files AS p ON p.id=i.preferred_provider_file_id

@@ -92,6 +92,7 @@ async fn prepared(fixture: &Fixture) -> (uuid::Uuid, Vec<PublishedFile>) {
         project_id: "project".into(),
         release_id: "version".into(),
         placement: "hardlink".into(),
+        dependencies: None,
     }];
     let id = uuid::Uuid::new_v4();
     storage::prepare(&fixture.db, id, fixture.id, &files)

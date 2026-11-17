@@ -20,12 +20,21 @@ pub fn solve(
     candidates: &HashMap<ProjectKey, Vec<Candidate>>,
     max_decisions: usize,
 ) -> Result<HashMap<ProjectKey, Candidate>, ResolveError> {
+    solve_with_installed(roots, candidates, HashMap::new(), max_decisions)
+}
+
+pub(in crate::instance::content) fn solve_with_installed(
+    roots: &[Requirement],
+    candidates: &HashMap<ProjectKey, Vec<Candidate>>,
+    installed: HashMap<ProjectKey, Candidate>,
+    max_decisions: usize,
+) -> Result<HashMap<ProjectKey, Candidate>, ResolveError> {
     let mut decisions_left = max_decisions;
     let mut unsupported_seen = false;
 
     let result = search(
         roots.to_vec(),
-        HashMap::new(),
+        installed,
         candidates,
         &mut decisions_left,
         &mut unsupported_seen,

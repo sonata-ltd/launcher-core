@@ -153,15 +153,58 @@ impl InstanceContentService {
         let (root, compatibility) = self.context(instance).await?;
         let snapshot = super::inventory::snapshot(root.clone()).await?;
         let registered = storage::registered_mods(&self.db, instance).await?;
+        let mut installed = HashMap::new();
+        let mut already_present = Vec::new();
+        for entry in &registered {
+            let Some(path) = entry.verified_path(&snapshot) else {
+                continue;
+            };
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
+            {
+                continue;
+            }
+            let project = entry.project();
+            let candidate = super::model::Candidate {
+                key: super::model::ReleaseKey {
+                    project: project.clone(),
+                    release_id: entry.release_id.clone(),
+                },
+                dependencies: entry.dependencies()?,
+            };
+            if let Some(previous) = installed.insert(project.clone(), candidate) {
+                if previous.key.release_id != entry.release_id {
+                    return Err(ContentError::Invalid(
+                        "Несколько активных версий одного проекта".into(),
+                    ));
+                }
+                continue;
+            }
+            if roots.contains(&project) {
+                already_present.push(PreviewItem {
+                    title: project.project_id.clone(),
+                    file_name: path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    project,
+                    is_root: true,
+                    size_bytes: entry.size_bytes as u64,
+                    already_installed: true,
+                });
+            }
+        }
         let all_releases = async_std::future::timeout(
             Duration::from_secs(90),
-            catalog_plan::resolve(&self.catalog, &roots, &compatibility),
+            catalog_plan::resolve_with_installed(&self.catalog, &roots, &compatibility, installed),
         )
         .await
         .map_err(|_| ContentError::Transport("Подбор зависимостей превысил 90 секунд".into()))??;
         let mut names = std::collections::HashSet::new();
         let mut releases = Vec::new();
-        let mut items = Vec::new();
+        let mut items = already_present;
         for release in all_releases {
             files::portable_name::validate_file_name(&release.file.file_name)?;
             // Переносимое консервативное ограничение для создаваемых имён.

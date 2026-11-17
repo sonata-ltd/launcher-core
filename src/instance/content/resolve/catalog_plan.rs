@@ -2,7 +2,7 @@
 use crate::instance::content::{
     catalog::{types::*, ContentCatalog, RequestBudget},
     error::{ContentError, Result},
-    model::{DependencyKind, ProjectKey},
+    model::{Candidate, DependencyKind, ProjectKey},
     resolve::graph::{self, Requirement},
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -11,6 +11,15 @@ pub async fn resolve(
     catalog: &ContentCatalog,
     roots: &[ProjectKey],
     compatibility: &Compatibility,
+) -> Result<Vec<CatalogRelease>> {
+    resolve_with_installed(catalog, roots, compatibility, HashMap::new()).await
+}
+
+pub(in crate::instance::content) async fn resolve_with_installed(
+    catalog: &ContentCatalog,
+    roots: &[ProjectKey],
+    compatibility: &Compatibility,
+    installed: HashMap<ProjectKey, Candidate>,
 ) -> Result<Vec<CatalogRelease>> {
     if roots.is_empty() || roots.len() > 16 {
         return Err(ContentError::Invalid("Выберите от 1 до 16 модов".into()));
@@ -29,6 +38,9 @@ pub async fn resolve(
     let mut releases: HashMap<ProjectKey, Vec<CatalogRelease>> = HashMap::new();
     let mut budget = RequestBudget::default();
     while let Some((project, exact)) = queue.pop_front() {
+        if installed.contains_key(&project) {
+            continue;
+        }
         if !visited.insert((project.clone(), exact.clone())) {
             continue;
         }
@@ -109,11 +121,16 @@ pub async fn resolve(
             exact_release: None,
         })
         .collect();
-    let selected = graph::solve(&requirements, &candidates, 4096).map_err(|error| {
-        ContentError::Invalid(format!("Не удалось подобрать зависимости: {error:?}"))
-    })?;
+    let installed_projects: HashSet<_> = installed.keys().cloned().collect();
+    let selected = graph::solve_with_installed(&requirements, &candidates, installed, 4096)
+        .map_err(|error| {
+            ContentError::Invalid(format!("Не удалось подобрать зависимости: {error:?}"))
+        })?;
     let mut result = Vec::new();
     for candidate in selected.into_values() {
+        if installed_projects.contains(&candidate.key.project) {
+            continue;
+        }
         let release = releases
             .get(&candidate.key.project)
             .and_then(|versions| versions.iter().find(|release| release.key == candidate.key))
