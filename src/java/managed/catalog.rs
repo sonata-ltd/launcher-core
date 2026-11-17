@@ -33,7 +33,7 @@ struct Package {
     checksum: String,
 }
 
-pub(super) async fn fetch(target: JavaTarget) -> Result<Vec<ManagedJavaPackage>> {
+pub(super) async fn fetch(target: JavaTarget) -> Result<ManagedJavaCatalog> {
     let releases = download_in_json("https://api.adoptium.net/v3/info/available_releases")
         .await
         .map_err(|e| ManagedJavaError::new("catalog", e))?;
@@ -48,25 +48,42 @@ pub(super) async fn fetch(target: JavaTarget) -> Result<Vec<ManagedJavaPackage>>
         let target = target.clone();
         async move {
             let url = format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={}&image_type=jre&os={}&vendor=eclipse", target.arch, target.os);
-            match fetch_assets(&url).await {
+            let result = match fetch_assets(&url).await {
                 Ok(value) => parse(value, &target, major),
                 Err(e) => Err(ManagedJavaError::new("catalog", format!("{url}: {e}"))),
-            }
+            };
+            (major, result)
         }
     }).buffer_unordered(4).collect::<Vec<_>>().await;
+    combine_responses(responses)
+}
+
+pub(super) fn combine_responses(
+    responses: Vec<(u32, Result<Vec<ManagedJavaPackage>>)>,
+) -> Result<ManagedJavaCatalog> {
     let mut packages = Vec::new();
-    let mut errors = Vec::new();
-    for response in responses {
+    let mut warnings = Vec::new();
+    let mut succeeded = false;
+    for (major, response) in responses {
         match response {
-            Ok(mut found) => packages.append(&mut found),
-            Err(error) => errors.push(error.diagnostic()),
+            Ok(mut found) => {
+                succeeded = true;
+                packages.append(&mut found);
+            }
+            Err(error) => warnings.push(ManagedJavaCatalogWarning { major, error }),
         }
     }
-    if !errors.is_empty() {
-        return Err(ManagedJavaError::new("catalog", errors.join("\n\n")));
+    warnings.sort_by_key(|warning| warning.major);
+    if !succeeded && !warnings.is_empty() {
+        let details = warnings
+            .iter()
+            .map(|warning| format!("Java {}: {}", warning.major, warning.error.diagnostic()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        return Err(ManagedJavaError::new("catalog", details));
     }
     packages.sort_by(|a, b| b.major.cmp(&a.major));
-    Ok(packages)
+    Ok(ManagedJavaCatalog { packages, warnings })
 }
 
 pub(super) fn parse(

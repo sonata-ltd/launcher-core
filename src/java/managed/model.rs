@@ -49,6 +49,18 @@ pub struct ManagedJavaPackage {
     pub format: ArchiveFormat,
 }
 
+#[derive(Debug, Clone)]
+pub struct ManagedJavaCatalog {
+    pub packages: Vec<ManagedJavaPackage>,
+    pub warnings: Vec<ManagedJavaCatalogWarning>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ManagedJavaCatalogWarning {
+    pub major: u32,
+    pub error: ManagedJavaError,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManagedJavaStage {
     Downloading,

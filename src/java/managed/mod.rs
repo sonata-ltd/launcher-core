@@ -38,7 +38,7 @@ pub struct ManagedJavaService {
     root: PathBuf,
     entries: Mutex<HashMap<Uuid, Entry>>,
     initialized: AsyncMutex<bool>,
-    catalog: AsyncMutex<Vec<ManagedJavaPackage>>,
+    catalog: AsyncMutex<Option<ManagedJavaCatalog>>,
 }
 
 impl ManagedJavaService {
@@ -47,18 +47,29 @@ impl ManagedJavaService {
             root,
             entries: Mutex::new(HashMap::new()),
             initialized: AsyncMutex::new(false),
-            catalog: AsyncMutex::new(Vec::new()),
+            catalog: AsyncMutex::new(None),
         }
     }
 
     pub async fn catalog(&self, refresh: bool) -> Result<Vec<ManagedJavaPackage>> {
-        let mut cache = self.catalog.lock().await;
-        if !refresh && !cache.is_empty() {
-            return Ok(cache.clone());
+        let report = self.catalog_report(refresh).await?;
+        for warning in &report.warnings {
+            tracing::warn!(major = warning.major, error = %warning.error.diagnostic(), "Java catalog is incomplete");
         }
-        let packages = catalog::fetch(JavaTarget::host()?).await?;
-        *cache = packages;
-        Ok(cache.clone())
+        Ok(report.packages)
+    }
+
+    /// Returns the available packages along with failures for individual Java versions.
+    pub async fn catalog_report(&self, refresh: bool) -> Result<ManagedJavaCatalog> {
+        let mut cache = self.catalog.lock().await;
+        if !refresh {
+            if let Some(report) = cache.as_ref() {
+                return Ok(report.clone());
+            }
+        }
+        let report = catalog::fetch(JavaTarget::host()?).await?;
+        *cache = Some(report.clone());
+        Ok(report)
     }
 
     pub async fn installations(&self) -> Result<Vec<ManagedJavaSnapshot>> {
@@ -90,8 +101,8 @@ impl ManagedJavaService {
             .catalog
             .lock()
             .await
-            .iter()
-            .find(|p| p.id == package_id)
+            .as_ref()
+            .and_then(|report| report.packages.iter().find(|p| p.id == package_id))
             .cloned()
             .ok_or_else(|| {
                 ManagedJavaError::new(

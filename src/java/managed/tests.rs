@@ -808,3 +808,18 @@ async fn returned_failure_matches_snapshot_when_saving_diagnostics_fails() {
     assert!(error.details.contains("Saving failure details failed"));
     assert_eq!(service.installation(id).await.unwrap().error, Some(error));
 }
+
+#[test]
+fn java_catalog_retains_packages_when_only_one_major_fails() {
+    let found = package();
+    let failure = ManagedJavaError::new("catalog", "provider timed out");
+    let report = catalog::combine_responses(vec![
+        (17, Err(failure.clone())),
+        (21, Ok(vec![found.clone()])),
+    ])
+    .unwrap();
+    assert_eq!(report.packages, [found]);
+    assert_eq!(report.warnings.len(), 1);
+    assert_eq!(report.warnings[0].major, 17);
+    assert!(catalog::combine_responses(vec![(17, Err(failure))]).is_err());
+}
