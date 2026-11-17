@@ -185,6 +185,7 @@ pub(super) async fn snapshot(
     .await
 }
 
+#[derive(Default)]
 pub(super) struct ModSnapshot {
     pub signature: String,
     pub archives: std::collections::HashMap<PathBuf, String>,

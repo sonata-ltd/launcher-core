@@ -13,23 +13,36 @@ pub struct ContentWatcher {
 
 impl ContentWatcher {
     pub fn new(dirty: Arc<DirtyGeneration>, wake: SyncSender<()>) -> notify::Result<Self> {
-        let watcher =
-            notify::recommended_watcher(
-                move |result: notify::Result<notify::Event>| match result {
-                    Ok(event) => {
-                        if event.need_rescan() || !matches!(event.kind, EventKind::Access(_)) {
-                            dirty.mark_changed();
-                            let _ = wake.try_send(());
-                        }
-                    }
-                    Err(_) => {
-                        dirty.mark_changed();
-                        let _ = wake.try_send(());
-                    }
-                },
-            )?;
+        Self::with_wake(
+            dirty,
+            |_| true,
+            move || {
+                let _ = wake.try_send(());
+            },
+        )
+    }
+
+    pub(super) fn with_wake(
+        dirty: Arc<DirtyGeneration>,
+        relevant: impl Fn(&notify::Event) -> bool + Send + 'static,
+        wake: impl Fn() + Send + 'static,
+    ) -> notify::Result<Self> {
+        let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+            let changed = result.map_or(true, |event| {
+                event.need_rescan()
+                    || (!matches!(event.kind, EventKind::Access(_)) && relevant(&event))
+            });
+            if changed {
+                dirty.mark_changed();
+                wake();
+            }
+        })?;
 
         Ok(Self { watcher })
+    }
+
+    pub(super) fn forget_directory(&mut self, directory: &Path) {
+        let _ = self.watcher.unwatch(directory);
     }
 
     pub fn watch_directory(&mut self, directory: &Path) -> notify::Result<()> {

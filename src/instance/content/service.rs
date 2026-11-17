@@ -44,6 +44,7 @@ pub struct InstanceContentService {
     catalog: ContentCatalog,
     instances: Arc<InstanceRegistry>,
     activity: Arc<InstanceActivity>,
+    mod_index: Arc<super::index::ModIndex>,
     paths: Arc<LauncherPaths>,
     db: Arc<Database>,
     store: Arc<ObjectStore>,
@@ -96,6 +97,7 @@ impl InstanceContentService {
             operations,
             catalog: ContentCatalog::new(curseforge_key),
             instances: registry,
+            mod_index: instances.mod_index(),
             activity,
             paths: paths.clone(),
             db,
@@ -467,6 +469,8 @@ impl InstanceContentService {
             ));
         }
         storage::reconcile_registered_mods(&self.db, plan.preview.instance_id, &snapshot).await?;
+        self.mod_index
+            .watch(&self.db, &self.activity, plan.preview.instance_id, &root);
         let result = install::execute(
             self.db.clone(),
             self.store.clone(),

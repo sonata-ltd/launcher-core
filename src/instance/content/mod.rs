@@ -1,6 +1,7 @@
 pub mod api;
 pub mod catalog;
 pub mod error;
+pub(super) mod index;
 pub mod install;
 pub mod inventory;
 mod journal;

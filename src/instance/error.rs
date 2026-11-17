@@ -22,6 +22,13 @@ pub enum InstanceError {
     #[error("Instance {0} has an unfinished content installation and requires recovery")]
     ContentRecoveryPending(InstanceId),
 
+    #[error("could not verify installed mods for instance {id}: {source}")]
+    ContentInventory {
+        id: InstanceId,
+        #[source]
+        source: crate::instance::content::error::ContentError,
+    },
+
     #[error("rename failed: {0}")]
     RenameFailed(String),
 

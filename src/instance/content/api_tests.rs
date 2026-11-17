@@ -747,3 +747,51 @@ async fn reconcile_tracks_disabled_renames_and_marks_a_removed_file_missing() {
         .unwrap();
     assert_eq!(presence, "missing");
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[async_std::test]
+async fn registered_mods_are_reconciled_before_launch_and_on_filesystem_notifications() {
+    use std::time::Duration;
+
+    let fixture = fixture().await;
+    let (id, files) = prepared(&fixture).await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"verified bytes").unwrap();
+    storage::complete(&fixture.db, id, fixture.id, &files)
+        .await
+        .unwrap();
+
+    let activity = fixture.instances.activity();
+    let index = fixture.instances.mod_index();
+    let _launch = activity.reserve_launch(fixture.id).unwrap();
+    // No watcher is active yet. The launch gate still detects a removed mod.
+    std::fs::remove_file(&target).unwrap();
+    index
+        .before_launch(&fixture.db, &activity, fixture.id, fixture.root.clone())
+        .await
+        .unwrap();
+    let query = "SELECT presence FROM instance_content";
+    let status: String = sqlx::query_scalar(query)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(status, "missing");
+    drop(_launch);
+
+    // The background index updates SQLite from a native notification.
+    std::fs::write(&target, b"verified bytes").unwrap();
+    async_std::future::timeout(Duration::from_secs(5), async {
+        loop {
+            let presence: String = sqlx::query_scalar(query)
+                .fetch_one(&fixture.db.pool)
+                .await
+                .unwrap();
+            if presence == "present" {
+                break;
+            }
+            async_std::task::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap();
+}

@@ -48,6 +48,7 @@ pub struct InstanceService {
     operations: Arc<OperationRegistry>,
     paths: Arc<LauncherPaths>,
     activity: Arc<InstanceActivity>,
+    mod_index: Arc<instance::content::index::ModIndex>,
     bus: EventBus,
 }
 
@@ -71,6 +72,7 @@ impl InstanceService {
             operations,
             paths,
             activity: Arc::new(InstanceActivity::new(bus.clone())),
+            mod_index: Arc::default(),
             bus,
         }
     }
@@ -79,11 +81,17 @@ impl InstanceService {
         Arc::clone(&self.activity)
     }
 
+    pub(super) fn mod_index(&self) -> Arc<instance::content::index::ModIndex> {
+        Arc::clone(&self.mod_index)
+    }
+
     /// Removes the instance registration. Game files are kept on disk.
     pub async fn unregister(&self, id: InstanceId) -> Result<()> {
         let _activity = self.activity.reserve_content_change(id)?;
         self.ensure_content_recovered(id).await?;
-        self.registry.delete(id).await
+        self.registry.delete(id).await?;
+        self.mod_index.forget(id);
+        Ok(())
     }
 
     pub async fn create(
@@ -369,6 +377,12 @@ impl InstanceService {
         let java = self.resolve_java(id, &settings).await?;
 
         if let Some(profile) = instance::init::storage::load(&self.db, id).await? {
+            let root =
+                crate::utils::files::child(self.paths.instances(), std::path::Path::new(&rec.dir))?;
+            self.mod_index
+                .before_launch(&self.db, &self.activity, id, root)
+                .await
+                .map_err(|error| InstanceError::ContentInventory { id, source: error })?;
             let command = crate::instance::launch::resolved::prepare(
                 &rec,
                 &settings,

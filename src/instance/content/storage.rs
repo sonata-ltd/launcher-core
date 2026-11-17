@@ -286,6 +286,13 @@ impl RegisteredMod {
     }
 }
 
+pub(super) async fn has_registered_mods(db: &Database, instance: InstanceId) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM instance_content WHERE instance_id=? AND kind='mod' AND preferred_provider_file_id IS NOT NULL)",
+    )
+    .bind(instance.get()).fetch_one(&db.pool).await?)
+}
+
 pub(super) async fn registered_mods(
     db: &Database,
     instance: InstanceId,
