@@ -1,4 +1,7 @@
-use crate::{utils::download::http, utils::files};
+use crate::utils::{
+    download::{http, metadata_cache},
+    files,
+};
 
 use super::error::{ModloaderError, Result};
 use serde_json::Value;
@@ -43,9 +46,7 @@ impl Repository {
         }
 
         let expected = pinned.or(expected);
-        let path = self
-            .cache
-            .join(format!("{}.json", files::sha256(url.as_bytes())));
+        let path = metadata_cache::entry_path(&self.cache, url);
         let cached = async_std::fs::read(&path).await.ok();
         let valid = |bytes: &[u8]| {
             expected.is_none_or(|hash| files::sha256(bytes).eq_ignore_ascii_case(hash))
@@ -72,8 +73,7 @@ impl Repository {
                     )));
                 }
 
-                let body = bytes.clone();
-                async_std::task::spawn_blocking(move || files::atomic_write(&path, &body)).await?;
+                metadata_cache::publish(path, bytes.clone()).await?;
                 Ok(bytes)
             }
             Err(error) => match cached {

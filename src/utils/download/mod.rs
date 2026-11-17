@@ -18,6 +18,7 @@ use crate::utils::download::error::{DownloadError, Result};
 pub mod buffer;
 pub mod error;
 pub mod json;
+pub(crate) mod metadata_cache;
 pub(crate) mod stream;
 pub mod sweep;
 #[cfg(test)]

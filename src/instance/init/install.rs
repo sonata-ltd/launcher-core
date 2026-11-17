@@ -313,11 +313,13 @@ async fn install<'a>(
 
     context.cancel.check()?;
 
-    let (assets, _) = get_assets_manifest(
-        &game_components.manifest,
-        context.paths.assets().join("indexes"),
-    )
-    .await?;
+    let (assets, _) = context
+        .cancel
+        .run(get_assets_manifest(
+            &game_components.manifest,
+            context.paths.assets().join("indexes"),
+        ))
+        .await??;
 
     AssetsData::sync_with_cancellation(
         &assets,
