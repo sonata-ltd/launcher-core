@@ -1,0 +1,192 @@
+use std::{path::PathBuf, process::exit};
+
+use sonata_launcher_core::{
+    data::GlobalState,
+    instance::{model::InstanceId, settings::SettingsPatch},
+    java::model::{JavaSource, NewJavaRuntime},
+    Config,
+};
+
+mod progress;
+
+const USAGE: &str = "\
+sonata-launcher-core cli usage:
+
+    java-add <version> <exec_path> <home_path> [vendor]
+    java-discover
+    java-list
+    create   <name> <version> <loader> <manifest_url> <provider>
+    create-modded <name> <mc> <loader> <loader-version> <manifest-url> <provider>
+    register-cleanroom <release-descriptor.json>
+    register-cleanroom-url <loader-version> <official-mmc-zip-url> <java-majors-comma-separated>
+    set-java <instance_id> <java_id>
+    install  <instance_id>
+    launch   <instance_id>
+    list
+";
+
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+
+    let config = Config {
+        database_url: std::env::var("DATABASE_URL").ok(),
+        ..Config::init()
+    };
+
+    let state = GlobalState::new(config).await?;
+
+    let reporter = progress::spawn_reporter(&state.bus);
+    let outcome = dispatch(&state, &argv).await;
+
+    reporter.finish().await;
+
+    outcome
+}
+
+async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+    match argv {
+        ["java-add", version, exec_path, home_path, rest @ ..] => {
+            let java = state
+                .add_java(NewJavaRuntime {
+                    version: Some((*version).to_string()),
+                    major: None,
+                    arch: None,
+                    exec_path: Some(PathBuf::from(exec_path)),
+                    home_path: Some(PathBuf::from(home_path)),
+                    vendor: rest.first().map(|v| (*v).to_string()),
+                    source: JavaSource::Manual,
+                })
+                .await?;
+
+            println!("java runtime registered: id={} {}", java.id, java.version);
+        }
+
+        ["java-discover"] => {
+            let added = state.rediscover_java().await?;
+            println!("java runtimes found: {added}");
+        }
+
+        ["java-list"] => {
+            for java in state.java().list_all().await? {
+                println!(
+                    "{:>3}  java {:<3} {:<14} {:<8} {:<10} {}",
+                    java.id,
+                    java.major,
+                    java.version,
+                    java.arch.as_deref().unwrap_or("?"),
+                    java.source.as_str(),
+                    java.exec_path,
+                );
+            }
+        }
+
+        ["create", name, version, manifest_url, provider] => {
+            let rec = state
+                .instances()
+                .create(
+                    (*name).to_string(),
+                    (*version).to_string(),
+                    (*manifest_url).to_string(),
+                    (*provider).to_string(),
+                )
+                .await?;
+
+            println!("instance created: id={} dir={}", rec.id, rec.dir);
+        }
+
+        ["create-modded", name, mc, loader, version, url, provider] => {
+            use sonata_launcher_core::modloader::model::{LoaderKind, LoaderSpec};
+            let kind = LoaderKind::ALL
+                .into_iter()
+                .find(|kind| kind.as_str() == *loader)
+                .ok_or("unknown loader")?;
+            let rec = state
+                .instances()
+                .create_with_loader(
+                    (*name).into(),
+                    (*mc).into(),
+                    LoaderSpec {
+                        kind,
+                        version: Some((*version).into()),
+                    },
+                    (*url).into(),
+                    (*provider).into(),
+                )
+                .await?;
+            println!("instance created: id={} dir={}", rec.id, rec.dir);
+        }
+        ["register-cleanroom-url", version, url, majors] => {
+            let majors = majors
+                .split(',')
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()?;
+            sonata_launcher_core::modloader::cleanroom::import_archive(
+                &state.modloaders().repository,
+                (*version).into(),
+                (*url).into(),
+                majors,
+            )
+            .await?;
+            println!("Cleanroom release registered from archive");
+        }
+        ["register-cleanroom", descriptor] => {
+            let bytes = async_std::fs::read(descriptor).await?;
+            let release = serde_json::from_slice(&bytes)?;
+            sonata_launcher_core::modloader::cleanroom::register(
+                &state.modloaders().repository,
+                release,
+            )
+            .await?;
+            println!("Cleanroom release registered");
+        }
+        ["set-java", id, java_id] => {
+            let view = state
+                .options()
+                .patch_settings(
+                    parse_id(id)?,
+                    SettingsPatch {
+                        java_runtime: Some(Some(java_id.parse()?)),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            println!("effective settings: {:#?}", view.effective);
+        }
+
+        ["install", id] => {
+            state.instances().install(parse_id(id)?).await?;
+            println!("install finished");
+        }
+
+        ["launch", id] => {
+            state.instances().launch(parse_id(id)?).await?;
+        }
+
+        ["list"] => {
+            let instances = state.instances().list().await?;
+
+            if instances.len() <= 0 {
+                println!("no installed instances");
+            } else {
+                for instance in instances {
+                    println!("{}", instance.name);
+                }
+            }
+        }
+
+        _ => {
+            eprint!("{USAGE}");
+            exit(2);
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_id(raw: &str) -> Result<InstanceId, std::num::ParseIntError> {
+    raw.parse::<i64>().map(InstanceId::from)
+}

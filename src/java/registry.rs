@@ -1,0 +1,112 @@
+use std::{path::PathBuf, sync::Arc};
+
+use async_std::sync::RwLock;
+use linked_hash_map::LinkedHashMap;
+
+use crate::data::db::DbError;
+use crate::java::{
+    error::{JavaError, JavaResult},
+    model::{JavaRuntime, NewJavaRuntime},
+    storage::JavaStore,
+};
+
+pub struct JavaRegistry {
+    cache: RwLock<LinkedHashMap<i64, Arc<JavaRuntime>>>,
+    limit: usize,
+    store: Arc<dyn JavaStore>,
+}
+
+impl JavaRegistry {
+    pub fn new(store: Arc<dyn JavaStore>, limit: usize) -> Self {
+        Self {
+            cache: RwLock::new(LinkedHashMap::new()),
+            limit,
+            store,
+        }
+    }
+
+    pub async fn register(&self, new: NewJavaRuntime) -> JavaResult<Arc<JavaRuntime>> {
+        let Some(exec_path) = &new.exec_path else {
+            return Err(DbError::InsufficientData("exec_path is None".into()).into());
+        };
+
+        if self.store.exists_by_path(exec_path).await? {
+            return Err(JavaError::AlreadyRegistered(
+                exec_path.display().to_string(),
+            ));
+        }
+
+        let java = self.store.insert(&new).await?;
+
+        Ok(self.upsert(java).await)
+    }
+
+    /// Registers every runtime whose `exec_path` is new; returns those.
+    pub async fn register_many(
+        &self,
+        new: Vec<NewJavaRuntime>,
+    ) -> JavaResult<Vec<Arc<JavaRuntime>>> {
+        let added = self.store.insert_many(&new).await?;
+        let mut out = Vec::with_capacity(added.len());
+
+        for java in added {
+            out.push(self.upsert(java).await);
+        }
+
+        Ok(out)
+    }
+
+    pub async fn backfill_major(&self) -> JavaResult<()> {
+        Ok(self.store.backfill_major().await?)
+    }
+
+    pub async fn list_all(&self) -> JavaResult<Vec<Arc<JavaRuntime>>> {
+        let all = self.store.list_all().await?;
+        let mut out = Vec::with_capacity(all.len());
+
+        for java in all {
+            out.push(self.upsert(java).await);
+        }
+
+        Ok(out)
+    }
+
+    pub async fn get(&self, id: i64) -> JavaResult<Option<Arc<JavaRuntime>>> {
+        {
+            let cache = self.cache.read().await;
+
+            if let Some(java) = cache.get(&id) {
+                return Ok(Some(Arc::clone(java)));
+            }
+        }
+
+        let Some(java) = self.store.get_by_id(id).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(self.upsert(java).await))
+    }
+
+    pub async fn exists_by_exec_path(&self, path: &PathBuf) -> JavaResult<bool> {
+        Ok(self.store.exists_by_path(path).await?)
+    }
+
+    async fn upsert(&self, java: JavaRuntime) -> Arc<JavaRuntime> {
+        let id = java.id;
+        let java = Arc::new(java);
+
+        let mut cache = self.cache.write().await;
+
+        if let Some(existing) = cache.get(&id) {
+            return Arc::clone(existing);
+        }
+
+        cache.insert(id, Arc::clone(&java));
+
+        while cache.len() > self.limit {
+            cache.pop_front();
+        }
+
+        java
+    }
+}

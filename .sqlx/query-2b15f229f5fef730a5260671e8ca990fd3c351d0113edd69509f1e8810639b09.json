@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                INSERT INTO instances (name, dir, version, loader, loader_version, manifest_url, meta_provider)\n                VALUES (?, ?, ?, ?, ?, ?, ?)\n                RETURNING id AS \"id: InstanceId\",\n                    name, dir, version, loader AS \"loader: LoaderKind\", loader_version, manifest_url, meta_provider\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id: InstanceId",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "name",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "dir",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "version",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "loader: LoaderKind",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "loader_version",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "manifest_url",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "meta_provider",
+        "ordinal": 7,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "2b15f229f5fef730a5260671e8ca990fd3c351d0113edd69509f1e8810639b09"
+}

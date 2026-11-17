@@ -1,0 +1,52 @@
+use serde::{Deserialize, Serialize};
+use strum::Display;
+use ts_rs::TS;
+
+use crate::data::registry::operation::message::status::{Outcome, Progress};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Display)]
+pub enum OperationStage {
+    FetchManifest,
+    DownloadLibs,
+    DownloadAssets,
+    VerifyFiles,
+    RunModloaderProcessors,
+    ScanInstances,
+    DownloadContent,
+    PublishContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StageStatus {
+    Pending,
+    Running,
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageSnapshot {
+    pub stage: OperationStage,
+    pub status: StageStatus,
+    pub progress: Progress,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageResult {
+    pub status: Outcome,
+    pub stage: OperationStage,
+    pub duration_secs: f64,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<StageError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+pub struct StageError {
+    // pub code: ErrorCode,
+
+    // TODO: Add fields
+}
