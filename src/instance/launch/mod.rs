@@ -35,6 +35,16 @@ pub enum LaunchError {
     #[error("no java runtime selected")]
     JavaRuntimeMissing,
 
+    #[error("Java {actual} is incompatible with this profile (supported majors: {supported:?}, allow newer: {allow_newer})")]
+    IncompatibleJavaVersion {
+        actual: u32,
+        supported: Vec<u32>,
+        allow_newer: bool,
+    },
+
+    #[error("Java architecture {actual} is incompatible with host architecture {host}")]
+    IncompatibleJavaArchitecture { actual: String, host: &'static str },
+
     #[error("no version manifest provided")]
     ManifestMissing,
 

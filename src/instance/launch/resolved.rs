@@ -1,4 +1,4 @@
-use super::{args::offline_uuid, arguments, traits::StartupTraits};
+use super::{args::offline_uuid, arguments, traits::StartupTraits, LaunchError};
 use crate::{
     data::layout::LauncherPaths,
     instance::{
@@ -9,8 +9,8 @@ use crate::{
         settings::EffectiveSettings,
         Result,
     },
-    java::model::JavaRuntime,
-    modloader::archive,
+    java::{model::JavaRuntime, select},
+    modloader::{archive, model::JavaPolicy},
     utils::files,
 };
 use serde_json::Value;
@@ -20,6 +20,28 @@ pub struct LaunchCommand {
     pub java: PathBuf,
     pub game_dir: PathBuf,
     pub args: Vec<String>,
+}
+
+fn validate_java(java: &JavaRuntime, policy: &JavaPolicy) -> Result<()> {
+    if !policy.accepts(java.major) {
+        return Err(LaunchError::IncompatibleJavaVersion {
+            actual: java.major,
+            supported: policy.majors.clone(),
+            allow_newer: policy.allow_newer,
+        }
+        .into());
+    }
+
+    let host = select::host_arch();
+    if let Some(actual) = java.arch.as_ref().filter(|_| !select::arch_ok(java, host)) {
+        return Err(LaunchError::IncompatibleJavaArchitecture {
+            actual: actual.clone(),
+            host,
+        }
+        .into());
+    }
+
+    Ok(())
 }
 
 pub async fn prepare(
@@ -38,16 +60,7 @@ pub async fn prepare(
         ));
     }
 
-    // if !profile.java.accepts(java.major)
-    //     || java
-    //         .arch
-    //         .as_deref()
-    //         .is_some_and(|arch| select::normalize_arch(arch) != select::host_arch())
-    // {
-    //     return Err(InstanceError::RunFailed(
-    //         "selected Java is incompatible with installed profile".into(),
-    //     ));
-    // }
+    validate_java(java, &profile.java)?;
 
     let maven = files::child(paths.libraries(), &profile.libraries_root)?;
     let game = paths.instances().join(&rec.dir);
@@ -311,6 +324,68 @@ mod forge_ignore_tests {
             "artifacts":[{"path":"com/mojang/minecraft/1.20/minecraft-1.20-client.jar","sha1":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","classpath":true,"native":false}],"metadata":[]
         })).unwrap()
     }
+    #[async_std::test]
+    async fn prepare_rejects_incompatible_java_before_creating_the_game_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::resolve(&crate::Config {
+            root_override: Some(temp.path().to_owned()),
+            ..crate::Config::init()
+        })
+        .await
+        .unwrap();
+        let rec = InstanceRecord {
+            id: 1.into(),
+            name: "Example".into(),
+            dir: "example".into(),
+            version: "1.20".into(),
+            loader: crate::modloader::model::LoaderKind::Forge,
+            loader_version: Some("46.0.14".into()),
+            manifest_url: String::new(),
+            meta_provider: "prism".into(),
+        };
+        let settings = EffectiveSettings {
+            java_runtime: Some(1),
+            memory_min: 512,
+            memory_max: 4096,
+            jvm_args: vec![],
+        };
+        let mut java = JavaRuntime {
+            id: 1,
+            version: "21".into(),
+            major: 21,
+            arch: None,
+            exec_path: "java".into(),
+            home_path: String::new(),
+            vendor: None,
+            source: Default::default(),
+        };
+        assert!(matches!(
+            prepare(&rec, &settings, &java, &paths, profile()).await,
+            Err(InstanceError::Launch(
+                LaunchError::IncompatibleJavaVersion { actual: 21, .. }
+            ))
+        ));
+        java.major = 17;
+        java.arch = Some(
+            if select::host_arch() == "x86_64" {
+                "aarch64"
+            } else {
+                "x86_64"
+            }
+            .into(),
+        );
+        assert!(matches!(
+            prepare(&rec, &settings, &java, &paths, profile()).await,
+            Err(InstanceError::Launch(
+                LaunchError::IncompatibleJavaArchitecture { .. }
+            ))
+        ));
+        assert!(!paths.instances().join(&rec.dir).exists());
+
+        java.arch = None;
+        assert!(validate_java(&java, &profile().java).is_ok());
+    }
+
     #[test]
     fn adapts_official_version_name_filter_to_actual_maven_filename() {
         let mut args = vec![

@@ -54,7 +54,7 @@ pub fn host_arch() -> &'static str {
     normalize_arch(std::env::consts::ARCH)
 }
 
-fn arch_ok(java: &JavaRuntime, host: &str) -> bool {
+pub(crate) fn arch_ok(java: &JavaRuntime, host: &str) -> bool {
     java.arch
         .as_deref()
         .is_none_or(|arch| normalize_arch(arch) == host)
