@@ -26,6 +26,9 @@ pub mod traits;
 
 #[derive(Debug, Error)]
 pub enum LaunchError {
+    #[error(transparent)]
+    Arguments(#[from] arguments::ArgumentError),
+
     #[error("classpath contains the platform path separator: {0}")]
     ClasspathSeparator(String),
 

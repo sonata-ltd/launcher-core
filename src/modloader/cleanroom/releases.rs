@@ -1,6 +1,6 @@
 use crate::{
-    instance::download::transfer::{self, Cancel},
     modloader::error::{ModloaderError, Result},
+    utils::download::transfer::{self, Cancel},
     utils::files,
 };
 use serde::{Deserialize, Serialize};

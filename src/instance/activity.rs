@@ -6,13 +6,11 @@ use std::{
 
 use super::{
     error::{InstanceError, Result},
+    install_jobs::{InstallJobs, Job},
     model::InstanceId,
     running::{Reservation, RunningInstances},
 };
-use crate::{
-    bus::EventBus,
-    modloader::jobs::{InstallJobs, Job},
-};
+use crate::bus::EventBus;
 
 pub(super) struct InstanceActivity {
     pub(super) running: RunningInstances,
@@ -83,7 +81,9 @@ impl InstanceActivity {
             ));
         }
 
-        Ok(self.install_jobs.begin(id)?)
+        self.install_jobs
+            .begin(id)
+            .map_err(|error| InstanceError::CreationFailed(error.to_string()))
     }
 
     pub(super) fn reserve_launch(&self, id: InstanceId) -> Result<Reservation> {

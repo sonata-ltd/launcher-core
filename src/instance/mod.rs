@@ -4,6 +4,7 @@ pub mod download;
 pub mod error;
 pub mod event;
 pub mod init;
+pub(crate) mod install_jobs;
 pub mod launch;
 pub mod model;
 pub mod mods;

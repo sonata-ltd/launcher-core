@@ -1,8 +1,22 @@
-use crate::modloader::error::{ModloaderError, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub use crate::instance::rules::{rules_allow, RuleContext};
+use crate::version::rules::RuleError;
+pub use crate::version::rules::{rules_allow, RuleContext};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ArgumentError {
+    #[error("unclosed runtime placeholder")]
+    UnclosedPlaceholder,
+    #[error("unknown runtime placeholder: {0}")]
+    UnknownPlaceholder(String),
+    #[error("invalid runtime argument: {0}")]
+    Invalid(&'static str),
+    #[error(transparent)]
+    Rules(#[from] RuleError),
+}
+
+type Result<T> = std::result::Result<T, ArgumentError>;
 
 pub fn substitute(input: &str, variables: &HashMap<String, String>) -> Result<String> {
     let mut rest = input;
@@ -12,15 +26,15 @@ pub fn substitute(input: &str, variables: &HashMap<String, String>) -> Result<St
         out.push_str(&rest[..start]);
 
         let tail = &rest[start + 2..];
-        let end = tail
-            .find('}')
-            .ok_or_else(|| ModloaderError::Invalid("unclosed runtime placeholder".into()))?;
+        let end = tail.find('}').ok_or(ArgumentError::UnclosedPlaceholder)?;
 
         let key = &tail[..end];
 
-        out.push_str(variables.get(key).ok_or_else(|| {
-            ModloaderError::Invalid(format!("unknown runtime placeholder: {key}"))
-        })?);
+        out.push_str(
+            variables
+                .get(key)
+                .ok_or_else(|| ArgumentError::UnknownPlaceholder(key.to_owned()))?,
+        );
 
         rest = &tail[end + 1..];
     }
@@ -40,13 +54,13 @@ pub fn flatten(
             Value::String(raw) => output.push(substitute(raw, variables)?),
             Value::Object(object) => {
                 if object.keys().any(|key| key != "rules" && key != "value") {
-                    return Err(ModloaderError::Unsupported("unknown argument field".into()));
+                    return Err(ArgumentError::Invalid("unknown argument field"));
                 }
 
                 let rules = object
                     .get("rules")
                     .and_then(Value::as_array)
-                    .ok_or_else(|| ModloaderError::Invalid("argument has no rules array".into()))?;
+                    .ok_or(ArgumentError::Invalid("argument has no rules array"))?;
 
                 if !rules_allow(rules, context)? {
                     continue;
@@ -57,23 +71,17 @@ pub fn flatten(
                     Some(Value::Array(values)) => {
                         for raw in values {
                             output.push(substitute(
-                                raw.as_str().ok_or_else(|| {
-                                    ModloaderError::Invalid(
-                                        "argument array contains non-string".into(),
-                                    )
-                                })?,
+                                raw.as_str().ok_or(ArgumentError::Invalid(
+                                    "argument array contains non-string",
+                                ))?,
                                 variables,
                             )?);
                         }
                     }
-                    _ => {
-                        return Err(ModloaderError::Invalid(
-                            "invalid conditional argument".into(),
-                        ))
-                    }
+                    _ => return Err(ArgumentError::Invalid("invalid conditional value")),
                 }
             }
-            _ => return Err(ModloaderError::Invalid("invalid runtime argument".into())),
+            _ => return Err(ArgumentError::Invalid("expected a string or object")),
         }
     }
 
@@ -126,6 +134,17 @@ mod tests {
 
     #[test]
     fn unknown_runtime_variable_is_an_error() {
-        assert!(substitute("${missing}", &HashMap::new()).is_err());
+        assert!(matches!(
+            substitute("${missing}", &HashMap::new()),
+            Err(ArgumentError::UnknownPlaceholder(key)) if key == "missing"
+        ));
+        assert!(matches!(
+            flatten(
+                &[json!({"rules": [{"action": "invalid"}], "value": "arg"})],
+                &linux(),
+                &HashMap::new()
+            ),
+            Err(ArgumentError::Rules(RuleError::UnsupportedAction(_)))
+        ));
     }
 }

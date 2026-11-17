@@ -1,12 +1,12 @@
 use std::path::Path;
 
-use crate::instance::download::transfer::Cancel;
 use crate::modloader::{
     self,
     components::Components,
     error::{ModloaderError, Result},
     repository::Repository,
 };
+use crate::utils::download::transfer::Cancel;
 
 mod package;
 mod releases;

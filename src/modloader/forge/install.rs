@@ -1,7 +1,6 @@
 use crate::data::registry::operation::message::output::ProcessorOutput;
 use crate::{
     data::registry::operation::message::stage::OperationStage,
-    instance::download::transfer::{self, Cancel},
     modloader::{
         archive, components,
         error::{ModloaderError, Result},
@@ -12,6 +11,7 @@ use crate::{
         },
         repository::Repository,
     },
+    utils::download::transfer::{self, Cancel},
     utils::{files, maven::MavenCoordinate},
 };
 use serde_json::Value;

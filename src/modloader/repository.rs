@@ -1,4 +1,4 @@
-use crate::{instance::download::http, utils::files};
+use crate::{utils::download::http, utils::files};
 
 use super::error::{ModloaderError, Result};
 use serde_json::Value;

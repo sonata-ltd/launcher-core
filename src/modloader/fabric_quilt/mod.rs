@@ -1,8 +1,8 @@
 use crate::{
-    instance::download::transfer::Cancel,
     modloader::{
         self, components::Components, error::Result, model::LoaderKind, repository::Repository,
     },
+    utils::download::transfer::Cancel,
 };
 
 mod metadata;

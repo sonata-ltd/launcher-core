@@ -175,7 +175,7 @@ pub async fn prepare(
         format!("-Xmx{}M", settings.memory_max),
     ];
 
-    args.extend(arguments::flatten(&jvm, &context, &variables)?);
+    args.extend(arguments::flatten(&jvm, &context, &variables).map_err(LaunchError::from)?);
 
     let has_cp = args.iter().any(|arg| {
         matches!(arg.as_str(), "-cp" | "-classpath" | "--class-path")
@@ -204,7 +204,7 @@ pub async fn prepare(
         variables.insert("path".into(), path.to_string_lossy().into_owned());
 
         if let Some(argument) = logging.get("argument").and_then(Value::as_str) {
-            args.push(arguments::substitute(argument, &variables)?);
+            args.push(arguments::substitute(argument, &variables).map_err(LaunchError::from)?);
         }
     }
 
@@ -219,7 +219,7 @@ pub async fn prepare(
             .into(),
     );
 
-    args.extend(arguments::flatten(&game_args, &context, &variables)?);
+    args.extend(arguments::flatten(&game_args, &context, &variables).map_err(LaunchError::from)?);
 
     Ok(LaunchCommand {
         java: java.exec_path.clone().into(),

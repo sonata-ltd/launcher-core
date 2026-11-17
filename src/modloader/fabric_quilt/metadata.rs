@@ -2,7 +2,7 @@ use http_types::Url;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{instance::download::http::get_bytes, modloader::model::MetadataPin, utils::files};
+use crate::{modloader::model::MetadataPin, utils::download::http::get_bytes, utils::files};
 
 use crate::modloader::{
     error::{ModloaderError, Result},

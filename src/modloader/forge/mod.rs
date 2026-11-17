@@ -7,7 +7,6 @@ use serde_json::Value;
 use crate::data::registry::operation::handle::OperationHandle;
 use crate::data::registry::operation::message::stage::{OperationStage, StageResult};
 use crate::data::registry::operation::message::status::Outcome;
-use crate::instance::download::transfer::Cancel;
 use crate::java;
 use crate::java::model::JavaRuntime;
 use crate::modloader::components;
@@ -20,6 +19,7 @@ use crate::modloader::{
     catalog::ModloaderCatalog,
     model::{LoaderKind, LoaderSpec},
 };
+use crate::utils::download::transfer::Cancel;
 use crate::utils::files;
 use crate::utils::maven::MavenCoordinate;
 

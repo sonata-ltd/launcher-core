@@ -35,10 +35,10 @@ pub enum ModloaderError {
     File(#[from] FileError),
 
     #[error(transparent)]
-    Download(#[from] crate::instance::download::error::DownloadError),
+    Download(#[from] crate::utils::download::transfer::error::DownloadError),
 
     #[error(transparent)]
-    Rules(#[from] crate::instance::rules::RuleError),
+    Rules(#[from] crate::version::rules::RuleError),
 }
 
 impl ModloaderError {
@@ -54,7 +54,7 @@ impl ModloaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instance::download::error::DownloadError;
+    use crate::utils::download::transfer::error::DownloadError;
 
     #[test]
     fn recognizes_processor_and_wrapped_download_cancellation() {

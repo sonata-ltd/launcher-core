@@ -7,11 +7,11 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    instance::download::transfer::{self, Cancel},
     modloader::{
         archive, cleanroom::releases::CleanroomRelease, components, error::ModloaderError,
         error::Result, model::MetadataPin, repository::Repository,
     },
+    utils::download::transfer::{self, Cancel},
     utils::files,
 };
 

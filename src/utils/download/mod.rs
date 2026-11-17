@@ -1,3 +1,4 @@
+pub mod http;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::time::Duration;
