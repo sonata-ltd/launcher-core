@@ -5,6 +5,7 @@ use crate::{
     data::db::{Database, DbError},
     instance::{
         error::InstanceError,
+        event::InstanceEvent,
         model::InstanceId,
         options::{
             error::{OptionsError, Result},
@@ -98,6 +99,7 @@ impl OptionsService {
             .await?
             .ok_or(OptionsError::InstanceNotFound(id))?;
         drop(updates);
+        self.bus.publish(InstanceEvent::OverviewChanged(id));
         self.publish(id, PageView::Overview(view.clone()));
 
         Ok(view)
@@ -105,7 +107,7 @@ impl OptionsService {
 
     pub async fn patch_settings(&self, id: InstanceId, patch: SettingsPatch) -> Result<Settings> {
         self.settings
-            .patch(id, &patch)
+            .patch_and_notify(id, &patch, &self.bus)
             .await
             .map_err(map_instance_error)?;
 
@@ -164,12 +166,14 @@ mod tests {
             instances.create(create("Taken", "other-dir")).await,
             Err(InstanceError::NameTaken)
         ));
+        let bus = EventBus::new(8);
+        let mut events = bus.subscribe();
         let service = OptionsService::new(
             db.clone(),
             instances.clone(),
             Arc::new(SettingsService::new(db.clone())),
             Arc::new(JavaRegistry::new(Arc::new(DbJavaStore::new(db)), 4)),
-            EventBus::new(8),
+            bus,
         );
 
         let patch = |name: &str| OverviewPatch {
@@ -189,5 +193,21 @@ mod tests {
         assert_eq!(view.name, "Updated");
         assert_eq!(view.tags, "new");
         assert_eq!(instances.get(one.id).await.unwrap().name, "Updated");
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            crate::bus::event::CoreEvent::Instance(InstanceEvent::OverviewChanged(id)) if id == one.id
+        ));
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            crate::bus::event::CoreEvent::Option(_)
+        ));
+        service
+            .patch_settings(one.id, SettingsPatch::default())
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            crate::bus::event::CoreEvent::Instance(InstanceEvent::SettingsChanged(id)) if id == one.id
+        ));
     }
 }

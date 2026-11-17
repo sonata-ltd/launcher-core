@@ -795,3 +795,25 @@ async fn registered_mods_are_reconciled_before_launch_and_on_filesystem_notifica
     .await
     .unwrap();
 }
+
+#[async_std::test]
+async fn scan_projection_reports_a_checked_path_only_when_the_instance_directory_exists() {
+    let fixture = fixture().await;
+    let record = fixture
+        .instances
+        .get_registry()
+        .get(fixture.id)
+        .await
+        .unwrap();
+    assert!(record.to_scan_msg().data.integrity.instance_path.is_none());
+    let scan = crate::instance::scan::inspect(&record, &fixture.paths).await;
+    assert_eq!(
+        scan.data.integrity.instance_path.as_deref(),
+        fixture.root.to_str()
+    );
+
+    std::fs::remove_dir(fixture.root.join("mods")).unwrap();
+    std::fs::remove_dir(&fixture.root).unwrap();
+    let scan = crate::instance::scan::inspect(&record, &fixture.paths).await;
+    assert!(scan.data.integrity.instance_path.is_none());
+}

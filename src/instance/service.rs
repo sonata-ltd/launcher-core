@@ -141,7 +141,8 @@ impl InstanceService {
         };
 
         let rec = self.registry.create(new).await?;
-        self.bus.publish(rec.to_scan_msg());
+        self.bus
+            .publish(instance::scan::inspect(&rec, &self.paths).await);
 
         Ok(rec)
     }
@@ -431,7 +432,9 @@ impl InstanceService {
     pub async fn rename(&self, id: InstanceId, new_name: &str) -> Result<Arc<InstanceRecord>> {
         let rec = self.registry.rename(id, new_name).await?;
 
-        self.bus.publish(rec.to_scan_msg());
+        self.bus.publish(InstanceEvent::OverviewChanged(id));
+        self.bus
+            .publish(instance::scan::inspect(&rec, &self.paths).await);
 
         Ok(rec)
     }
@@ -453,11 +456,7 @@ impl InstanceService {
     }
 
     pub async fn update_settings(&self, id: InstanceId, patch: &SettingsPatch) -> Result<()> {
-        let res = self.settings.patch(id, patch).await?;
-
-        self.bus.publish(InstanceEvent::SettingsChanged(id));
-
-        Ok(res)
+        self.settings.patch_and_notify(id, patch, &self.bus).await
     }
 
     pub async fn global_settings(&self) -> Result<GlobalSettings> {

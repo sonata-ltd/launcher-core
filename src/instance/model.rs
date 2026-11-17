@@ -2,10 +2,7 @@ use std::{ffi::OsString, fmt};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    instance::scan::{ScanData, ScanInfo, ScanIntegrity, ScanMessage},
-    modloader::model::LoaderKind,
-};
+use crate::{instance::scan::ScanMessage, modloader::model::LoaderKind};
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(transparent)]
@@ -44,20 +41,7 @@ pub struct InstanceRecord {
 
 impl InstanceRecord {
     pub fn to_scan_msg(&self) -> ScanMessage {
-        ScanMessage {
-            data: ScanData {
-                integrity: ScanIntegrity {
-                    // TODO: Implement path checking
-                    instance_path: Some("".into()),
-                },
-                info: Some(ScanInfo {
-                    id: self.id,
-                    name: self.name.clone(),
-                    version: self.version.clone(),
-                    loader: self.loader.as_str().to_owned(),
-                }),
-            },
-        }
+        super::scan::project(self, None)
     }
 }
 

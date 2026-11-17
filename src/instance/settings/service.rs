@@ -44,6 +44,18 @@ impl SettingsService {
         EffectiveSettings::try_resolve(&global, &instance)
     }
 
+    /// Applies a patch and emits the same domain event for every service caller.
+    pub(in crate::instance) async fn patch_and_notify(
+        &self,
+        id: InstanceId,
+        patch: &SettingsPatch,
+        bus: &crate::bus::EventBus,
+    ) -> Result<()> {
+        self.patch(id, patch).await?;
+        bus.publish(crate::instance::event::InstanceEvent::SettingsChanged(id));
+        Ok(())
+    }
+
     pub async fn patch(&self, id: InstanceId, patch: &SettingsPatch) -> Result<()> {
         let _updates = self.updates.lock().await;
         if patch.memory_min.is_some() || patch.memory_max.is_some() || patch.jvm_args.is_some() {

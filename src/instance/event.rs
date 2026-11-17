@@ -7,4 +7,5 @@ pub enum InstanceEvent {
     LaunchFailed(InstanceId),
     Exited { id: InstanceId, code: Option<i32> },
     SettingsChanged(InstanceId),
+    OverviewChanged(InstanceId),
 }
