@@ -220,48 +220,19 @@ impl<'a, 'b> LibsData<'a, 'b> {
 }
 
 fn construct_os_name() -> Result<&'static str, LibsSyncError> {
-    // Linux
-    #[cfg(all(target_os = "linux", target_arch = "x86"))]
-    return Ok("linux");
-
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return Ok("linux");
-
-    #[cfg(all(target_os = "linux", target_arch = "arm"))]
-    return Ok("linux-arm32");
-
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    return Ok("linux-arm64");
-
-    // macOS
-    #[cfg(all(target_os = "macos", target_arch = "x86"))]
-    return Ok("osx");
-
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    return Ok("osx");
-
-    #[cfg(all(target_os = "macos", target_arch = "arm"))]
-    return Ok("osx");
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return Ok("osx-arm64");
-
-    // Windows
-    #[cfg(all(target_os = "windows", target_arch = "x86"))]
-    return Ok("windows");
-
-    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-    return Ok("windows");
-
-    #[cfg(all(target_os = "windows", target_arch = "arm"))]
-    return Ok("windows-arm32");
-
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    return Ok("windows-arm64");
-
-    // If OS/arch combination is not supported
-    #[allow(unreachable_code)]
-    Err(LibsSyncError::OsNotAvailable)
+    use crate::utils::platform::{Arch, HostPlatform, Os};
+    let host = HostPlatform::current();
+    match (host.os, host.arch) {
+        (Os::Linux, Arch::X86 | Arch::X86_64) => Ok("linux"),
+        (Os::Linux, Arch::Arm) => Ok("linux-arm32"),
+        (Os::Linux, Arch::Aarch64) => Ok("linux-arm64"),
+        (Os::MacOs, Arch::X86 | Arch::X86_64 | Arch::Arm) => Ok("osx"),
+        (Os::MacOs, Arch::Aarch64) => Ok("osx-arm64"),
+        (Os::Windows, Arch::X86 | Arch::X86_64) => Ok("windows"),
+        (Os::Windows, Arch::Arm) => Ok("windows-arm32"),
+        (Os::Windows, Arch::Aarch64) => Ok("windows-arm64"),
+        _ => Err(LibsSyncError::OsNotAvailable),
+    }
 }
 
 #[cfg(test)]

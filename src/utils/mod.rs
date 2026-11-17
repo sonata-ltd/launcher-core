@@ -9,6 +9,7 @@ pub mod cancellation;
 pub mod download;
 pub mod files;
 pub mod maven;
+pub(crate) mod platform;
 pub mod url;
 
 pub async fn get_home_dir() -> Option<PathBuf> {

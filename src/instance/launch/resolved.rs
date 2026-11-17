@@ -2,16 +2,13 @@ use super::{args::offline_uuid, arguments, traits::StartupTraits, LaunchError};
 use crate::{
     data::layout::LauncherPaths,
     instance::{
-        download::{artifacts, transfer},
-        error::InstanceError,
-        init::model::InstalledProfile,
-        model::InstanceRecord,
-        settings::EffectiveSettings,
-        Result,
+        download::transfer, error::InstanceError, init::model::InstalledProfile,
+        model::InstanceRecord, settings::EffectiveSettings, Result,
     },
     java::{model::JavaRuntime, select},
     modloader::{archive, model::JavaPolicy},
     utils::files,
+    version::rules::RuleContext,
 };
 use serde_json::Value;
 use std::{collections::HashMap, path::PathBuf};
@@ -151,10 +148,7 @@ pub async fn prepare(
         ("launcher_version".into(), env!("CARGO_PKG_VERSION").into()),
     ]);
 
-    let mut context = artifacts::host();
-
-    let os_version = os_version();
-    context.os_version = &os_version;
+    let context = RuleContext::host();
 
     let jvm = profile
         .manifest
@@ -226,39 +220,6 @@ pub async fn prepare(
         game_dir: game,
         args,
     })
-}
-
-fn os_version() -> String {
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .unwrap_or_default()
-            .trim()
-            .into()
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("sw_vers")
-            .arg("-productVersion")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().into())
-            .unwrap_or_default()
-    }
-    #[cfg(windows)]
-    {
-        windows_registry::LOCAL_MACHINE
-            .open("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion")
-            .ok()
-            .and_then(|key| key.get_string("CurrentBuildNumber").ok())
-            .map(|v| format!("10.0.{v}"))
-            .unwrap_or_default()
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    {
-        String::new()
-    }
 }
 
 pub fn spawn(command: LaunchCommand) -> Result<async_std::process::Child> {

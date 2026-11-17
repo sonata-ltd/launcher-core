@@ -24,18 +24,7 @@ use std::{
 };
 
 pub fn host() -> RuleContext<'static> {
-    RuleContext {
-        os: if cfg!(windows) {
-            "windows"
-        } else if cfg!(target_os = "macos") {
-            "osx"
-        } else {
-            "linux"
-        },
-        arch: std::env::consts::ARCH,
-        os_version: "",
-        features: HashMap::new(),
-    }
+    RuleContext::host()
 }
 
 #[derive(Clone)]

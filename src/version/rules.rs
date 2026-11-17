@@ -1,3 +1,4 @@
+use crate::utils::platform::{Arch, HostPlatform, Os};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
@@ -41,12 +42,18 @@ struct RuleOs {
     version: Option<String>,
 }
 
-fn normalize_arch(value: &str) -> &str {
-    match value {
-        "amd64" | "x86_64" => "x86_64",
-        "arm64" | "aarch64" => "aarch64",
-        "i386" | "i686" | "x86" => "x86",
-        other => other,
+impl RuleContext<'static> {
+    pub fn host() -> Self {
+        let platform = HostPlatform::current();
+        Self {
+            os: match platform.os {
+                Os::MacOs => "osx",
+                other => other.name(),
+            },
+            arch: platform.arch.name(),
+            os_version: platform.os_version(),
+            features: HashMap::new(),
+        }
     }
 }
 
@@ -59,7 +66,7 @@ fn matches_rule(rule: &Rule, context: &RuleContext<'_>) -> Result<bool> {
         if os
             .arch
             .as_deref()
-            .is_some_and(|arch| normalize_arch(arch) != normalize_arch(context.arch))
+            .is_some_and(|arch| Arch::parse(arch) != Arch::parse(context.arch))
         {
             return Ok(false);
         }
@@ -113,6 +120,26 @@ pub fn rules_allow(values: &[Value], context: &RuleContext<'_>) -> Result<bool> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn install_uses_the_same_host_version_and_aliases_as_launch() {
+        let install = crate::instance::download::artifacts::host();
+        let launch = RuleContext::host();
+        assert_eq!(
+            (install.os, install.arch, install.os_version),
+            (launch.os, launch.arch, launch.os_version)
+        );
+        #[cfg(target_os = "linux")]
+        if let Ok(release) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+            assert_eq!(install.os_version, release.trim());
+        }
+
+        let x86 = RuleContext {
+            arch: "i586",
+            ..launch
+        };
+        assert!(rules_allow(&[json!({"action": "allow", "os": {"arch": "i386"}})], &x86,).unwrap());
+    }
 
     #[test]
     fn malformed_rules_unknown_actions_and_invalid_regex_are_distinct() {

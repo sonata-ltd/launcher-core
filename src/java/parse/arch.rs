@@ -1,70 +1,18 @@
-use std::env::consts::{ARCH, OS};
+use crate::utils::platform::{Arch, HostPlatform, Os};
 
-const UNSUPPORTED_ARCH_MSG: &str = "your system architecture is unsupported";
-const UNSUPPORTED_OS_MSG: &str = "your system is unsupported";
-
-struct ManifestArches;
-
-impl ManifestArches {
-    pub const LINUX: &'static str = "linux";
-    pub const LINUX_X32: &'static str = "linux-i386";
-    pub const MACOS: &'static str = "mac-os";
-    pub const MACOS_ARM64: &'static str = "mac-os-arm64";
-    pub const WINDOWS_X32: &'static str = "windows-x32";
-    pub const WINDOWS_X64: &'static str = "windows-x64";
-    pub const WINDOWS_ARM64: &'static str = "windows-arm64";
-}
-
-pub fn manifest_osarch<'a>() -> Option<&'a str> {
-    let os = OS;
-
-    if os == "linux" {
-        match ARCH {
-            "x86" => {
-                return Some(ManifestArches::LINUX_X32);
-            }
-            "x86_64" => {
-                return Some(ManifestArches::LINUX);
-            }
-            _ => {
-                tracing::error!("{}", UNSUPPORTED_ARCH_MSG);
-                return None;
-            }
+pub fn manifest_osarch() -> Option<&'static str> {
+    let host = HostPlatform::current();
+    match (host.os, host.arch) {
+        (Os::Linux, Arch::X86) => Some("linux-i386"),
+        (Os::Linux, Arch::X86_64) => Some("linux"),
+        (Os::MacOs, Arch::X86 | Arch::X86_64) => Some("mac-os"),
+        (Os::MacOs, Arch::Aarch64) => Some("mac-os-arm64"),
+        (Os::Windows, Arch::X86) => Some("windows-x32"),
+        (Os::Windows, Arch::X86_64) => Some("windows-x64"),
+        (Os::Windows, Arch::Aarch64) => Some("windows-arm64"),
+        _ => {
+            tracing::error!(os = host.os.name(), arch = host.arch.name(), "unsupported Java manifest platform");
+            None
         }
-    } else if os == "macos" {
-        match ARCH {
-            "x86" => {
-                return Some(ManifestArches::MACOS);
-            }
-            "x86_64" => {
-                return Some(ManifestArches::MACOS);
-            }
-            "aarch64" => {
-                return Some(ManifestArches::MACOS_ARM64);
-            }
-            _ => {
-                tracing::error!("{}", UNSUPPORTED_ARCH_MSG);
-                return None;
-            }
-        }
-    } else if os == "windows" {
-        match ARCH {
-            "x86" => {
-                return Some(ManifestArches::WINDOWS_X32);
-            }
-            "x86_64" => {
-                return Some(ManifestArches::WINDOWS_X64);
-            }
-            "aarch64" => {
-                return Some(ManifestArches::WINDOWS_ARM64);
-            }
-            _ => {
-                tracing::error!("{}", UNSUPPORTED_ARCH_MSG);
-                return None;
-            }
-        }
-    } else {
-        tracing::error!("{}", UNSUPPORTED_OS_MSG);
-        return None;
     }
 }

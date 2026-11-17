@@ -15,19 +15,22 @@ pub struct JavaTarget {
 
 impl JavaTarget {
     pub fn host() -> Result<Self> {
-        let os = match std::env::consts::OS {
-            "linux" if cfg!(target_env = "musl") => "alpine-linux",
-            "linux" => "linux",
-            "windows" => "windows",
-            "macos" => "mac",
-            other => return Err(ManagedJavaError::new("unsupported_platform", other)),
+        use crate::utils::platform::{Arch, HostPlatform, Os};
+
+        let host = HostPlatform::current();
+        let os = match host.os {
+            Os::Linux if host.musl => "alpine-linux",
+            Os::Linux => "linux",
+            Os::Windows => "windows",
+            Os::MacOs => "mac",
+            Os::Other(other) => return Err(ManagedJavaError::new("unsupported_platform", other)),
         };
-        let arch = match super::super::select::host_arch() {
-            "x86_64" => "x64",
-            "x86" => "x32",
-            "aarch64" => "aarch64",
-            "arm" => "arm",
-            other => return Err(ManagedJavaError::new("unsupported_platform", other)),
+        let arch = match host.arch {
+            Arch::X86_64 => "x64",
+            Arch::X86 => "x32",
+            Arch::Aarch64 => "aarch64",
+            Arch::Arm => "arm",
+            Arch::Other(other) => return Err(ManagedJavaError::new("unsupported_platform", other)),
         };
         Ok(Self {
             os: os.into(),

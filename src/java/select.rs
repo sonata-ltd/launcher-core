@@ -41,17 +41,11 @@ pub enum Fit {
 }
 
 pub fn normalize_arch(arch: &str) -> &str {
-    match arch {
-        "amd64" | "x86_64" => "x86_64",
-        "aarch64" | "arm64" => "aarch64",
-        "x86" | "i386" | "i486" | "i586" | "i686" => "x86",
-        "arm" | "armv7" | "armv7l" => "arm",
-        other => other,
-    }
+    crate::utils::platform::Arch::parse(arch).name()
 }
 
 pub fn host_arch() -> &'static str {
-    normalize_arch(std::env::consts::ARCH)
+    crate::utils::platform::HostPlatform::current().arch.name()
 }
 
 pub(crate) fn arch_ok(java: &JavaRuntime, host: &str) -> bool {
