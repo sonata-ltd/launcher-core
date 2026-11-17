@@ -41,6 +41,7 @@ pub struct File {
     pub file_name: String,
     pub release_type: u32,
     pub is_available: bool,
+    pub is_server_pack: Option<bool>,
     pub file_date: String,
     pub file_length: u64,
     pub download_url: Option<String>,

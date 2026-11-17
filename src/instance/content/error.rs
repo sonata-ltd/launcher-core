@@ -4,6 +4,10 @@ use thiserror::Error;
 pub enum ContentError {
     #[error("{0}")]
     Invalid(String),
+    #[error("{0}")]
+    CandidateUnavailable(String),
+    #[error("content catalog request limit ({0}) reached")]
+    CatalogRequestLimit(usize),
     #[error("unsupported content journal version {0}")]
     UnsupportedJournalVersion(u32),
     #[error("RecoveryConflict: {name} differs from the unfinished publication")]

@@ -9,6 +9,33 @@ use crate::instance::content::{
 };
 use types::{CatalogRelease, Compatibility, SearchPage};
 
+const MAX_PLAN_REQUESTS: usize = 128;
+
+pub(crate) struct RequestBudget {
+    remaining: usize,
+}
+
+impl Default for RequestBudget {
+    fn default() -> Self {
+        Self {
+            remaining: MAX_PLAN_REQUESTS,
+        }
+    }
+}
+
+impl RequestBudget {
+    async fn get<T: serde::de::DeserializeOwned>(
+        &mut self,
+        request: surf::RequestBuilder,
+    ) -> Result<T> {
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(ContentError::CatalogRequestLimit(MAX_PLAN_REQUESTS))?;
+        Ok(crate::utils::download::json::get(request).await?)
+    }
+}
+
 pub struct ContentCatalog {
     modrinth: modrinth::Modrinth,
     curseforge: curseforge::CurseForge,
@@ -45,15 +72,25 @@ impl ContentCatalog {
         project: &ProjectKey,
         compatibility: &Compatibility,
     ) -> Result<Vec<CatalogRelease>> {
+        self.releases_bounded(project, compatibility, &mut RequestBudget::default())
+            .await
+    }
+
+    pub(crate) async fn releases_bounded(
+        &self,
+        project: &ProjectKey,
+        compatibility: &Compatibility,
+        budget: &mut RequestBudget,
+    ) -> Result<Vec<CatalogRelease>> {
         match project.provider {
             Provider::Modrinth => {
                 self.modrinth
-                    .releases(&project.project_id, compatibility)
+                    .releases_bounded(&project.project_id, compatibility, budget)
                     .await
             }
             Provider::CurseForge => {
                 self.curseforge
-                    .releases(&project.project_id, compatibility)
+                    .releases_bounded(&project.project_id, compatibility, budget)
                     .await
             }
         }
@@ -66,11 +103,33 @@ impl ContentCatalog {
         release: &str,
         compatibility: &Compatibility,
     ) -> Result<CatalogRelease> {
+        self.exact_release_bounded(
+            provider,
+            project,
+            release,
+            compatibility,
+            &mut RequestBudget::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn exact_release_bounded(
+        &self,
+        provider: Provider,
+        project: &str,
+        release: &str,
+        compatibility: &Compatibility,
+        budget: &mut RequestBudget,
+    ) -> Result<CatalogRelease> {
         match provider {
-            Provider::Modrinth => self.modrinth.exact_release(release, compatibility).await,
+            Provider::Modrinth => {
+                self.modrinth
+                    .exact_release_bounded(release, compatibility, budget)
+                    .await
+            }
             Provider::CurseForge => {
                 self.curseforge
-                    .exact_release(project, release, compatibility)
+                    .exact_release_bounded(project, release, compatibility, budget)
                     .await
             }
         }

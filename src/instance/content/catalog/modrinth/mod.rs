@@ -74,6 +74,16 @@ impl Modrinth {
         project: &str,
         compatibility: &Compatibility,
     ) -> Result<Vec<CatalogRelease>> {
+        self.releases_bounded(project, compatibility, &mut super::RequestBudget::default())
+            .await
+    }
+
+    pub(super) async fn releases_bounded(
+        &self,
+        project: &str,
+        compatibility: &Compatibility,
+        budget: &mut super::RequestBudget,
+    ) -> Result<Vec<CatalogRelease>> {
         let mut url = Self::url(&["project", project, "version"])?;
         url.query_pairs_mut()
             .append_pair(
@@ -84,12 +94,31 @@ impl Modrinth {
                 "loaders",
                 &serde_json::json!([compatibility.loader]).to_string(),
             );
-        let mut versions: Vec<dto::Version> = json::get(self.request(url)?).await?;
+        let mut versions: Vec<dto::Version> = budget.get(self.request(url)?).await?;
         versions.retain(|version| compatible(version, compatibility));
         versions.sort_by(|left, right| right.date_published.cmp(&left.date_published));
+        self.normalize_releases(versions, compatibility, budget)
+            .await
+    }
+
+    async fn normalize_releases(
+        &self,
+        versions: Vec<dto::Version>,
+        compatibility: &Compatibility,
+        budget: &mut super::RequestBudget,
+    ) -> Result<Vec<CatalogRelease>> {
         let mut releases = Vec::new();
-        for version in versions.into_iter().take(16) {
-            releases.push(self.normalize(version, compatibility).await?);
+        for version in versions.into_iter().take(64) {
+            match self.normalize(version, compatibility, budget).await {
+                Ok(release) => releases.push(release),
+                Err(ContentError::CandidateUnavailable(reason)) => {
+                    tracing::debug!(%reason, "skipping unavailable Modrinth release")
+                }
+                Err(error) => return Err(error),
+            }
+            if releases.len() == 16 {
+                break;
+            }
         }
         Ok(releases)
     }
@@ -99,27 +128,64 @@ impl Modrinth {
         release: &str,
         compatibility: &Compatibility,
     ) -> Result<CatalogRelease> {
-        let version: dto::Version =
-            json::get(self.request(Self::url(&["version", release])?)?).await?;
+        self.exact_release_bounded(release, compatibility, &mut super::RequestBudget::default())
+            .await
+    }
+
+    pub(super) async fn exact_release_bounded(
+        &self,
+        release: &str,
+        compatibility: &Compatibility,
+        budget: &mut super::RequestBudget,
+    ) -> Result<CatalogRelease> {
+        let version = self.version(release, budget).await?;
         if !compatible(&version, compatibility) {
-            return Err(ContentError::Invalid(format!(
+            return Err(ContentError::CandidateUnavailable(format!(
                 "Точная зависимость {} не подходит экземпляру",
                 version.name
             )));
         }
-        self.normalize(version, compatibility).await
+        self.normalize(version, compatibility, budget).await
+    }
+
+    async fn version(&self, id: &str, budget: &mut super::RequestBudget) -> Result<dto::Version> {
+        match budget
+            .get(self.request(Self::url(&["version", id])?)?)
+            .await
+        {
+            Ok(version) => Ok(version),
+            Err(ContentError::Http(404)) => Err(ContentError::CandidateUnavailable(format!(
+                "Modrinth release {id} was not found"
+            ))),
+            Err(error) => Err(error),
+        }
     }
 
     async fn normalize(
         &self,
         version: dto::Version,
         compatibility: &Compatibility,
+        budget: &mut super::RequestBudget,
     ) -> Result<CatalogRelease> {
         if version.dependencies.len() > 64 {
-            return Err(ContentError::Invalid(
+            return Err(ContentError::CandidateUnavailable(
                 "Релиз содержит слишком много зависимостей".into(),
             ));
         }
+        let selected = select_file(&version.files).ok_or_else(|| {
+            ContentError::CandidateUnavailable(format!(
+                "В {} нет устанавливаемого JAR",
+                version.name
+            ))
+        })?;
+        let file = DownloadFile {
+            file_name: selected.filename.clone(),
+            url: selected.url.clone(),
+            size_bytes: selected.size,
+            sha1: selected.hashes.sha1.clone(),
+            sha512: selected.hashes.sha512.clone(),
+        };
+        file.validate()?;
         let mut dependencies = Vec::new();
         for dependency in &version.dependencies {
             let kind = match dependency.dependency_type.as_str() {
@@ -137,16 +203,15 @@ impl Modrinth {
             } else if let Some(exact) = &dependency.version_id {
                 // version-only dependency: получаем проект, не угадываем его
                 // по имени файла. Этот запрос не обходит граф рекурсивно.
-                let target: dto::Version =
-                    json::get(self.request(Self::url(&["version", exact])?)?).await?;
+                let target = self.version(exact, budget).await?;
                 if matches!(kind, DependencyKind::Required) && !compatible(&target, compatibility) {
-                    return Err(ContentError::Invalid(
+                    return Err(ContentError::CandidateUnavailable(
                         "Точная зависимость несовместима с экземпляром".into(),
                     ));
                 }
                 target.project_id
             } else {
-                return Err(ContentError::Invalid(
+                return Err(ContentError::CandidateUnavailable(
                     "Зависимость без project_id/version_id требует ручной установки".into(),
                 ));
             };
@@ -156,9 +221,6 @@ impl Modrinth {
                 kind,
             });
         }
-        let file = select_file(&version.files).ok_or_else(|| {
-            ContentError::Invalid(format!("В {} нет устанавливаемого JAR", version.name))
-        })?;
         Ok(CatalogRelease {
             key: ReleaseKey {
                 project: project_key(Provider::Modrinth, version.project_id),
@@ -166,13 +228,7 @@ impl Modrinth {
             },
             title: version.name,
             dependencies,
-            file: DownloadFile {
-                file_name: file.filename.clone(),
-                url: file.url.clone(),
-                size_bytes: file.size,
-                sha1: file.hashes.sha1.clone(),
-                sha512: file.hashes.sha512.clone(),
-            },
+            file,
         })
     }
 }
@@ -205,6 +261,37 @@ fn select_file(files: &[dto::File]) -> Option<&dto::File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[async_std::test]
+    async fn a_release_with_an_unresolvable_dependency_does_not_hide_alternatives() {
+        let version = serde_json::json!({
+            "id": "valid", "project_id": "project", "name": "Example",
+            "version_type": "release", "date_published": "2026-01-01",
+            "game_versions": ["1.21.1"], "loaders": ["fabric"],
+            "files": [{
+                "filename": "mod.jar", "url": "https://example.invalid/mod.jar",
+                "size": 3, "primary": true, "hashes": {"sha512": "a".repeat(128)}
+            }]
+        });
+        let mut invalid = version.clone();
+        invalid["id"] = serde_json::json!("invalid");
+        invalid["dependencies"] = serde_json::json!([{"dependency_type": "required"}]);
+        let versions = serde_json::from_value(serde_json::json!([invalid, version])).unwrap();
+        let compatibility = Compatibility {
+            minecraft: "1.21.1".into(),
+            loader: "fabric".into(),
+        };
+        let releases = Modrinth::new()
+            .normalize_releases(
+                versions,
+                &compatibility,
+                &mut super::super::RequestBudget::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].key.release_id, "valid");
+    }
+
     #[test]
     fn sources_are_never_installed_as_the_primary_mod() {
         let files: Vec<dto::File> = serde_json::from_value(serde_json::json!([

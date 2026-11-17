@@ -41,24 +41,7 @@ pub(crate) async fn execute(
     for (index, release) in releases.iter().enumerate() {
         cancel.check()?;
         let file = &release.file;
-        files::portable_name::validate_file_name(&file.file_name)?;
-        if file.sha1.is_none() && file.sha512.is_none() {
-            return Err(ContentError::Invalid(
-                "Провайдер не предоставил проверяемый хеш".into(),
-            ));
-        }
-        let url = surf::Url::parse(&file.url)
-            .map_err(|_| ContentError::Invalid("Invalid download URL".into()))?;
-        if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-            return Err(ContentError::Invalid(
-                "Загрузка контента требует HTTPS без credentials в URL".into(),
-            ));
-        }
-        if file.size_bytes > 2 * 1024 * 1024 * 1024 {
-            return Err(ContentError::Invalid(
-                "Этот установщик поддерживает архивы до 2 GiB".into(),
-            ));
-        }
+        file.validate()?;
         let cached_hash = crate::instance::content::store::storage::cached_hash(
             &db,
             file.sha1.as_deref(),
