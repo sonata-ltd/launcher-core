@@ -1,4 +1,4 @@
-use super::{args::offline_uuid, arguments, traits::StartupTraits, LaunchError};
+use super::{args::offline_uuid, arguments, natives::Natives, traits::StartupTraits, LaunchError};
 use crate::{
     data::layout::LauncherPaths,
     instance::{
@@ -10,7 +10,7 @@ use crate::{
         Result,
     },
     java::{model::JavaRuntime, policy::JavaPolicy, select},
-    modloader::{archive, model::LoaderSpec},
+    modloader::model::LoaderSpec,
     utils::files,
     version::rules::RuleContext,
 };
@@ -167,11 +167,9 @@ async fn prepare_command(
                 })
                 .unwrap_or_else(|| vec!["META-INF/".into()]);
 
-            let destination = natives.clone();
-            async_std::task::spawn_blocking(move || {
-                archive::extract(&path, &destination, &excludes)
-            })
-            .await?;
+            Natives::extract_archive(path, natives.clone(), excludes)
+                .await
+                .map_err(LaunchError::Natives)?;
         }
     }
     let classpath = std::env::join_paths(classpath)
