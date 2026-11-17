@@ -3,7 +3,11 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use super::model::*;
-use crate::utils::download::download_in_json;
+use crate::utils::download::{
+    download_in_json,
+    http::{self, HttpError},
+    ONESHOT_TIMEOUT,
+};
 
 #[derive(Deserialize)]
 struct Asset {
@@ -145,26 +149,13 @@ pub(super) fn parse(
 }
 
 async fn fetch_assets(url: &str) -> Result<serde_json::Value> {
-    use async_std::future::timeout;
-    use std::time::Duration;
-    timeout(Duration::from_secs(60), async {
-        let mut response = surf::get(url)
-            .await
-            .map_err(|e| ManagedJavaError::new("catalog", e))?;
-        if response.status() == surf::StatusCode::NotFound {
-            return Ok(serde_json::json!([]));
+    const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+    let request = http::request(url).map_err(|error| ManagedJavaError::new("catalog", error))?;
+    match http::fetch(request, MAX_CATALOG_BYTES, ONESHOT_TIMEOUT).await {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).map_err(|error| ManagedJavaError::new("catalog", error))
         }
-        if !response.status().is_success() {
-            return Err(ManagedJavaError::new(
-                "catalog",
-                format!("HTTP {}: {url}", response.status()),
-            ));
-        }
-        response
-            .body_json()
-            .await
-            .map_err(|e| ManagedJavaError::new("catalog", e))
-    })
-    .await
-    .map_err(|_| ManagedJavaError::new("catalog", format!("Catalog request timed out: {url}")))?
+        Err(HttpError::Status(surf::StatusCode::NotFound)) => Ok(serde_json::json!([])),
+        Err(error) => Err(ManagedJavaError::new("catalog", format!("{error}: {url}"))),
+    }
 }

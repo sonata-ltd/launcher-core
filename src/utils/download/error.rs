@@ -20,6 +20,9 @@ pub enum DownloadError {
     #[error("got HTTP {status} when fetching {url}")]
     Http { status: StatusCode, url: String },
 
+    #[error("response from {url} exceeds {limit} bytes")]
+    SizeLimit { url: String, limit: usize },
+
     #[error("malformed JSON in response from {url}")]
     MalformedJson {
         url: String,

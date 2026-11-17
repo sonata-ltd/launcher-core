@@ -44,30 +44,64 @@ pub async fn download(url: String) -> Result<Vec<u8>> {
     })
 }
 
-pub async fn download_in_json<'a>(url: &'a str) -> Result<serde_json::Value> {
-    let mut response = timeout(REQUEST_TIMEOUT, surf::get(url))
+/// Version and asset manifests can exceed the provider catalog response limit.
+pub async fn download_in_json(url: &str) -> Result<serde_json::Value> {
+    use http::HttpError;
+
+    const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
+    let request = http::request(url).map_err(|error| match error {
+        HttpError::InvalidUrl(source) => DownloadError::InvalidUrl {
+            url: url.to_owned(),
+            source,
+        },
+        other => DownloadError::Request {
+            url: url.to_owned(),
+            source: other.into(),
+        },
+    })?;
+    let response = timeout(REQUEST_TIMEOUT, http::send(request))
         .await
         .map_err(|_| DownloadError::Timeout {
-            url: url.to_string(),
+            url: url.to_owned(),
             phase: "response",
             after: REQUEST_TIMEOUT,
         })?
-        .map_err(|e| DownloadError::Request {
-            url: url.to_string(),
-            source: e.into(),
+        .map_err(|error| DownloadError::Request {
+            url: url.to_owned(),
+            source: error.into(),
         })?;
-
-    timeout(ONESHOT_TIMEOUT, response.body_json::<serde_json::Value>())
-        .await
-        .map_err(|_| DownloadError::Timeout {
-            url: url.to_string(),
-            phase: "body",
-            after: ONESHOT_TIMEOUT,
-        })?
-        .map_err(|e| DownloadError::MalformedJson {
-            url: url.to_string(),
-            source: e.into(),
-        })
+    let bytes = timeout(
+        ONESHOT_TIMEOUT,
+        http::read_response(response, MAX_MANIFEST_BYTES),
+    )
+    .await
+    .map_err(|_| DownloadError::Timeout {
+        url: url.to_owned(),
+        phase: "body",
+        after: ONESHOT_TIMEOUT,
+    })?
+    .map_err(|error| match error {
+        HttpError::Status(status) => DownloadError::Http {
+            status,
+            url: url.to_owned(),
+        },
+        HttpError::Body(source) => DownloadError::BodyRead {
+            url: url.to_owned(),
+            source,
+        },
+        HttpError::SizeLimit(limit) => DownloadError::SizeLimit {
+            url: url.to_owned(),
+            limit,
+        },
+        other => DownloadError::Request {
+            url: url.to_owned(),
+            source: other.into(),
+        },
+    })?;
+    serde_json::from_slice(&bytes).map_err(|source| DownloadError::MalformedJson {
+        url: url.to_owned(),
+        source: source.into(),
+    })
 }
 
 pub struct Download<T: Downloadable> {

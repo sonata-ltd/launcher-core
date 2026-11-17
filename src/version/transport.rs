@@ -1,5 +1,8 @@
+use crate::utils::download::{
+    http::{self, HttpError},
+    ONESHOT_TIMEOUT,
+};
 use async_trait::async_trait;
-use futures::AsyncReadExt;
 
 use super::error::{Result, VersionError};
 use super::provider::MetaProvider;
@@ -23,33 +26,23 @@ impl IndexLoader for HttpIndexLoader {
 
 // Separate helper permits local HTTP tests; GUI never supplies an arbitrary URL.
 pub(super) async fn load_url(url: &str) -> Result<Vec<u8>> {
-    let operation = async {
-        let response = surf::get(url)
-            .await
-            .map_err(|error| VersionError::IndexUnavailable(error.to_string()))?;
-        read_response(response).await
-    };
-
-    async_std::future::timeout(crate::utils::download::ONESHOT_TIMEOUT, operation)
+    let request = http::request(url).map_err(map_http_error)?;
+    http::fetch(request, MAX_INDEX_BYTES, ONESHOT_TIMEOUT)
         .await
-        .map_err(|_| VersionError::IndexUnavailable("version index request timed out".into()))?
+        .map_err(map_http_error)
 }
 
-// Test response validation without requiring a local listening socket.
-pub(super) async fn read_response(mut response: surf::Response) -> Result<Vec<u8>> {
-    if !response.status().is_success() {
-        return Err(VersionError::HttpStatus(u16::from(response.status())));
-    }
-    let mut bytes = Vec::new();
-    response
-        .take_body()
-        .into_reader()
-        .take((MAX_INDEX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
+#[cfg(test)]
+pub(super) async fn read_response(response: surf::Response) -> Result<Vec<u8>> {
+    http::read_response(response, MAX_INDEX_BYTES)
         .await
-        .map_err(|error| VersionError::IndexUnavailable(error.to_string()))?;
-    if bytes.len() > MAX_INDEX_BYTES {
-        return Err(VersionError::IndexTooLarge(MAX_INDEX_BYTES));
+        .map_err(map_http_error)
+}
+
+fn map_http_error(error: HttpError) -> VersionError {
+    match error {
+        HttpError::Status(status) => VersionError::HttpStatus(status.into()),
+        HttpError::SizeLimit(limit) => VersionError::IndexTooLarge(limit),
+        other => VersionError::IndexUnavailable(other.to_string()),
     }
-    Ok(bytes)
 }

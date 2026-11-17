@@ -1,5 +1,5 @@
 //! Общий ограниченный JSON transport. Здесь нет знаний о модах и провайдерах.
-use futures::AsyncReadExt;
+use super::http::{self, HttpError};
 use std::time::Duration;
 
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
@@ -36,37 +36,28 @@ pub use error::JsonRequestError;
 pub async fn get<T: DeserializeOwned>(
     request: surf::RequestBuilder,
 ) -> Result<T, JsonRequestError> {
-    async_std::future::timeout(Duration::from_secs(25), async {
-        let response = request
-            .send()
-            .await
-            .map_err(|error| JsonRequestError::Transport(error.to_string()))?;
-        read_response(response).await
-    })
-    .await
-    .map_err(|_| JsonRequestError::Timeout)?
+    let bytes = http::fetch(request, MAX_JSON_BYTES, Duration::from_secs(25))
+        .await
+        .map_err(map_http_error)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// Проверяем ответ отдельно от получения HTTP-соединения. Так лимит тела,
-/// status и JSON можно проверить настоящим Response без локального сервера.
 pub async fn read_response<T: DeserializeOwned>(
-    mut response: surf::Response,
+    response: surf::Response,
 ) -> Result<T, JsonRequestError> {
-    if !response.status().is_success() {
-        return Err(JsonRequestError::Status(u16::from(response.status())));
-    }
-    let mut bytes = Vec::new();
-    response
-        .take_body()
-        .into_reader()
-        .take((MAX_JSON_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
+    let bytes = http::read_response(response, MAX_JSON_BYTES)
         .await
-        .map_err(|error| JsonRequestError::Transport(error.to_string()))?;
-    if bytes.len() > MAX_JSON_BYTES {
-        return Err(JsonRequestError::SizeLimit);
-    }
+        .map_err(map_http_error)?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn map_http_error(error: HttpError) -> JsonRequestError {
+    match error {
+        HttpError::Status(status) => JsonRequestError::Status(status.into()),
+        HttpError::SizeLimit(_) => JsonRequestError::SizeLimit,
+        HttpError::Timeout => JsonRequestError::Timeout,
+        other => JsonRequestError::Transport(other.to_string()),
+    }
 }
 
 #[cfg(test)]
