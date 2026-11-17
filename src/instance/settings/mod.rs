@@ -42,18 +42,55 @@ pub struct EffectiveSettings {
 }
 
 impl EffectiveSettings {
+    /// Resolves a display snapshot, including legacy settings that need correction.
     pub fn resolve(global: &GlobalSettings, instance: &InstanceSettings) -> Self {
-        let jvm_args = instance
-            .jvm_args
-            .as_deref()
-            .unwrap_or(global.jvm_args.as_str());
+        let args = Self::args_source(global, instance);
+        let jvm_args = shlex::split(args)
+            .unwrap_or_else(|| args.split_whitespace().map(str::to_owned).collect());
+        Self::from_parts(global, instance, jvm_args)
+    }
 
+    pub fn try_resolve(
+        global: &GlobalSettings,
+        instance: &InstanceSettings,
+    ) -> super::Result<Self> {
+        Self::validate_memory(global, instance)?;
+        let jvm_args = Self::parse_jvm_args(global, instance)?;
+        Ok(Self::from_parts(global, instance, jvm_args))
+    }
+
+    fn args_source<'a>(global: &'a GlobalSettings, instance: &'a InstanceSettings) -> &'a str {
+        instance.jvm_args.as_deref().unwrap_or(&global.jvm_args)
+    }
+
+    fn from_parts(
+        global: &GlobalSettings,
+        instance: &InstanceSettings,
+        jvm_args: Vec<String>,
+    ) -> Self {
         Self {
             java_runtime: instance.java_runtime.or(global.java_runtime),
             memory_min: instance.memory_min.unwrap_or(global.memory_min),
             memory_max: instance.memory_max.unwrap_or(global.memory_max),
-            jvm_args: jvm_args.split_whitespace().map(str::to_owned).collect(),
+            jvm_args,
         }
+    }
+
+    fn validate_memory(global: &GlobalSettings, instance: &InstanceSettings) -> super::Result<()> {
+        let min_mib = instance.memory_min.unwrap_or(global.memory_min);
+        let max_mib = instance.memory_max.unwrap_or(global.memory_max);
+        if min_mib <= 0 || max_mib < min_mib {
+            return Err(super::error::InstanceError::InvalidMemoryRange { min_mib, max_mib });
+        }
+        Ok(())
+    }
+
+    fn parse_jvm_args(
+        global: &GlobalSettings,
+        instance: &InstanceSettings,
+    ) -> super::Result<Vec<String>> {
+        shlex::split(Self::args_source(global, instance))
+            .ok_or(super::error::InstanceError::InvalidJvmArguments)
     }
 }
 

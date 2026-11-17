@@ -127,6 +127,9 @@ fn map_instance_error(e: InstanceError) -> OptionsError {
         InstanceError::JavaRuntimeMissing(java_id) => OptionsError::JavaRuntimeNotFound(java_id),
         InstanceError::DB(db) => OptionsError::Db(db),
         InstanceError::Java(java) => OptionsError::Java(java),
+        error @ (InstanceError::InvalidMemoryRange { .. } | InstanceError::InvalidJvmArguments) => {
+            OptionsError::InvalidSettings(error)
+        }
         other => OptionsError::Internal(other.to_string()),
     }
 }

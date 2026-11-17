@@ -1,6 +1,10 @@
 use thiserror::Error;
 
-use crate::{data::db::DbError, instance::model::InstanceId, java::error::JavaError};
+use crate::{
+    data::db::DbError,
+    instance::{error::InstanceError, model::InstanceId},
+    java::error::JavaError,
+};
 
 #[derive(Debug, Error)]
 pub enum OptionsError {
@@ -18,6 +22,9 @@ pub enum OptionsError {
 
     #[error("malformed patch: {0}")]
     MalformedPatch(#[from] serde_json::Error),
+
+    #[error(transparent)]
+    InvalidSettings(InstanceError),
 
     #[error("instance operation failed: {0}")]
     Internal(String),

@@ -29,6 +29,12 @@ pub enum InstanceError {
         source: crate::instance::content::error::ContentError,
     },
 
+    #[error("invalid effective memory range: minimum {min_mib} MiB, maximum {max_mib} MiB")]
+    InvalidMemoryRange { min_mib: i64, max_mib: i64 },
+
+    #[error("invalid JVM arguments: unclosed quotes or trailing escape")]
+    InvalidJvmArguments,
+
     #[error("rename failed: {0}")]
     RenameFailed(String),
 
