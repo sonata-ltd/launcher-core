@@ -17,6 +17,7 @@ use crate::instance::Result;
 pub struct InstanceRegistry {
     cache: Mutex<HashMap<InstanceId, Arc<InstanceRecord>>>,
     store: Arc<dyn InstanceStore>,
+    updates: async_std::sync::Mutex<()>,
 }
 
 impl InstanceRegistry {
@@ -24,15 +25,17 @@ impl InstanceRegistry {
         Self {
             cache: Mutex::new(HashMap::new()),
             store,
+            updates: Default::default(),
         }
     }
 
     pub async fn create(&self, new: NewInstance) -> Result<Arc<InstanceRecord>> {
+        let _updates = self.lock_updates().await;
         if self.store.exists_by_dir(&new.dir).await? {
             return Err(InstanceError::NameTaken);
         }
 
-        let rec = self.store.insert(&new).await?;
+        let rec = self.store.insert(&new).await.map_err(map_name_conflict)?;
 
         let new_rec = Arc::new(rec);
         self.cache
@@ -44,6 +47,11 @@ impl InstanceRegistry {
     }
 
     pub async fn get(&self, id: InstanceId) -> Result<Arc<InstanceRecord>> {
+        let _updates = self.lock_updates().await;
+        self.get_locked(id).await
+    }
+
+    async fn get_locked(&self, id: InstanceId) -> Result<Arc<InstanceRecord>> {
         {
             let cache = self.cache.lock().unwrap();
 
@@ -62,6 +70,7 @@ impl InstanceRegistry {
     }
 
     pub async fn list(&self) -> Result<Vec<Arc<InstanceRecord>>> {
+        let _updates = self.lock_updates().await;
         let rows = self.store.list_all().await?;
 
         let mut out = Vec::with_capacity(rows.len());
@@ -78,19 +87,18 @@ impl InstanceRegistry {
     }
 
     pub async fn rename(&self, id: InstanceId, new_name: &str) -> Result<Arc<InstanceRecord>> {
-        let current = self.get(id).await?;
+        let _updates = self.lock_updates().await;
+        let current = self.get_locked(id).await?;
 
         if current.name == new_name {
             return Ok(current);
         }
 
+        self.invalidate(id);
         self.store
             .update_name(id, new_name)
             .await
-            .map_err(|e| match e {
-                DbError::Conflict(_) => InstanceError::NameTaken,
-                other => InstanceError::DB(other),
-            })?;
+            .map_err(map_name_conflict)?;
 
         let mut updated = (*current).clone();
         updated.name = new_name.to_string();
@@ -104,10 +112,19 @@ impl InstanceRegistry {
     }
 
     pub async fn delete(&self, id: InstanceId) -> Result<()> {
+        let _updates = self.lock_updates().await;
         self.store.delete(id).await?;
-        let _ = self.cache.lock().unwrap().remove(&id);
+        self.invalidate(id);
 
         Ok(())
+    }
+
+    pub(super) async fn lock_updates(&self) -> async_std::sync::MutexGuard<'_, ()> {
+        self.updates.lock().await
+    }
+
+    pub(super) fn invalidate(&self, id: InstanceId) {
+        self.cache.lock().unwrap().remove(&id);
     }
 
     fn upsert(&self, record: InstanceRecord) -> Arc<InstanceRecord> {
@@ -117,5 +134,12 @@ impl InstanceRegistry {
             .unwrap()
             .insert(record.id, Arc::clone(&record));
         record
+    }
+}
+
+fn map_name_conflict(error: DbError) -> InstanceError {
+    match error {
+        DbError::Conflict(_) => InstanceError::NameTaken,
+        other => InstanceError::DB(other),
     }
 }

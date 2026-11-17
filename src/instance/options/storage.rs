@@ -66,6 +66,7 @@ impl OptionsStore for DbOptionsStore {
     async fn patch_overview(&self, id: InstanceId, patch: &OverviewPatch) -> Result<bool> {
         let export_type = patch.export_type.map(|e| e.to_string());
 
+        let mut tx = self.db.pool.begin().await?;
         let res = sqlx::query!(
             r#"
                 UPDATE instances_overview
@@ -77,9 +78,20 @@ impl OptionsStore for DbOptionsStore {
             export_type,
             id
         )
-        .execute(&self.db.pool)
+        .execute(&mut *tx)
         .await?;
 
-        Ok(res.rows_affected() > 0)
+        if res.rows_affected() == 0 {
+            return Ok(false);
+        }
+        if let Some(name) = &patch.name {
+            sqlx::query("UPDATE instances SET name=?, updated_at=datetime('now') WHERE id=?")
+                .bind(name)
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 }

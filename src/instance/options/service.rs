@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     bus::EventBus,
-    data::db::Database,
+    data::db::{Database, DbError},
     instance::{
         error::InstanceError,
         model::InstanceId,
@@ -76,15 +76,20 @@ impl OptionsService {
             return self.overview(id).await;
         }
 
-        if patch.has_fields() && !self.storage.patch_overview(id, &patch).await? {
-            return Err(OptionsError::InstanceNotFound(id));
+        let updates = self.instances.lock_updates().await;
+        if patch.name.is_some() {
+            self.instances.invalidate(id);
         }
-
-        if let Some(name) = patch.name.as_deref() {
-            self.instances
-                .rename(id, name)
+        let applied =
+            self.storage
+                .patch_overview(id, &patch)
                 .await
-                .map_err(map_instance_error)?;
+                .map_err(|error| match error {
+                    DbError::Conflict(_) => OptionsError::NameTaken,
+                    other => OptionsError::Db(other),
+                })?;
+        if !applied {
+            return Err(OptionsError::InstanceNotFound(id));
         }
 
         let view = self
@@ -92,6 +97,7 @@ impl OptionsService {
             .overview(id)
             .await?
             .ok_or(OptionsError::InstanceNotFound(id))?;
+        drop(updates);
         self.publish(id, PageView::Overview(view.clone()));
 
         Ok(view)
@@ -122,5 +128,63 @@ fn map_instance_error(e: InstanceError) -> OptionsError {
         InstanceError::DB(db) => OptionsError::Db(db),
         InstanceError::Java(java) => OptionsError::Java(java),
         other => OptionsError::Internal(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        instance::{model::NewInstance, storage::DbInstanceStore},
+        java::storage::DbJavaStore,
+        modloader::model::LoaderKind,
+    };
+
+    #[async_std::test]
+    async fn overview_patch_rolls_back_tags_on_name_conflict_and_refreshes_registry() {
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        let instances = Arc::new(InstanceRegistry::new(Arc::new(DbInstanceStore::new(
+            db.clone(),
+        ))));
+        let create = |name: &str, dir: &str| NewInstance {
+            name: name.into(),
+            dir: dir.into(),
+            version: "1.21.1".into(),
+            loader: LoaderKind::Vanilla,
+            loader_version: None,
+            manifest_url: String::new(),
+            meta_provider: "prism".into(),
+        };
+        let one = instances.create(create("First", "first")).await.unwrap();
+        instances.create(create("Taken", "taken")).await.unwrap();
+        assert!(matches!(
+            instances.create(create("Taken", "other-dir")).await,
+            Err(InstanceError::NameTaken)
+        ));
+        let service = OptionsService::new(
+            db.clone(),
+            instances.clone(),
+            Arc::new(SettingsService::new(db.clone())),
+            Arc::new(JavaRegistry::new(Arc::new(DbJavaStore::new(db)), 4)),
+            EventBus::new(8),
+        );
+
+        let patch = |name: &str| OverviewPatch {
+            name: Some(name.into()),
+            tags: Some("new".into()),
+            export_type: None,
+        };
+        assert!(matches!(
+            service.patch_overview(one.id, patch("Taken")).await,
+            Err(OptionsError::NameTaken)
+        ));
+        assert!(service.overview(one.id).await.unwrap().tags.is_empty());
+        let view = service
+            .patch_overview(one.id, patch("Updated"))
+            .await
+            .unwrap();
+        assert_eq!(view.name, "Updated");
+        assert_eq!(view.tags, "new");
+        assert_eq!(instances.get(one.id).await.unwrap().name, "Updated");
     }
 }
