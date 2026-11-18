@@ -1,9 +1,10 @@
 use std::{
-    fs,
-    io::{self, Read},
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use crate::utils::process::{may_be_alive as process_may_be_alive, read_owner as read_pid};
 
 const OWNER_PID: &str = ".sonata-owner";
 const SPAWN_INTENT: &str = ".sonata-starting";
@@ -136,54 +137,6 @@ fn can_remove(directory: &Path, process_alive: &impl Fn(u32) -> bool) -> bool {
         }
         _ => false,
     }
-}
-
-fn read_pid(path: &Path) -> Option<u32> {
-    if !fs::symlink_metadata(path).ok()?.is_file() {
-        return None;
-    }
-    let mut pid = String::new();
-    fs::File::open(path)
-        .ok()?
-        .take(32)
-        .read_to_string(&mut pid)
-        .ok()?;
-    pid.parse().ok().filter(|pid| *pid != 0)
-}
-
-#[cfg(unix)]
-fn process_may_be_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return true;
-    };
-    // Signal 0 checks existence and permissions without signalling the process.
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
-}
-
-#[cfg(windows)]
-fn process_may_be_alive(pid: u32) -> bool {
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE},
-        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
-    };
-    // The returned handle belongs to this thread and is closed below.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle.is_null() {
-        return io::Error::last_os_error().raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32);
-    }
-    let mut code = 0;
-    // `code` is valid writable storage until GetExitCodeProcess returns.
-    unsafe {
-        let queried = GetExitCodeProcess(handle, &mut code);
-        CloseHandle(handle);
-        queried == 0 || code == STILL_ACTIVE as u32
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn process_may_be_alive(_: u32) -> bool {
-    true
 }
 
 pub struct Natives {}

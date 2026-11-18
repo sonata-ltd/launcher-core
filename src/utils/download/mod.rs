@@ -156,6 +156,11 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
             })?;
 
         let temporary = tempfile::TempPath::from_path(temp_path(save_dir, file_name));
+        let _owner =
+            sweep::PartialOwner::create(&temporary).map_err(|source| DownloadError::FileWrite {
+                path: temporary.to_path_buf(),
+                source,
+            })?;
         self.fetch_to(&temporary, cancel).await?;
         cancel.check()?;
         let final_path = self.save_path;

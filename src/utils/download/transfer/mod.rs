@@ -70,6 +70,7 @@ pub async fn download(
                     .await
                     .map_err(map_stream_error)?;
             let temporary = tempfile::TempPath::from_path(super::temp_path(parent, file_name));
+            let _owner = super::sweep::PartialOwner::create(&temporary)?;
             let mut output = fs::File::create(&temporary as &Path).await?;
             let hash = Stream {
                 url: final_url.as_str(),

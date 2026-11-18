@@ -206,7 +206,16 @@ async fn sweep_removes_partials_recursively() {
         .await
         .unwrap();
 
-    let removed = sweep_partials(root, Duration::ZERO).await;
+    for partial in [
+        deep.join(format!(".logging.jar.{UUID}.part")),
+        root.join(format!(".top.jar.{UUID}.part")),
+    ] {
+        fs::write(partial.with_extension("part.sonata-owner"), b"42")
+            .await
+            .unwrap();
+    }
+
+    let removed = super::sweep::sweep_partials_with(root, Duration::ZERO, |_| false).await;
 
     assert_eq!(removed, 2);
     assert_eq!(entries(&deep).await, vec!["logging.jar"]);

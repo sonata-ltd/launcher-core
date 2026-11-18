@@ -49,6 +49,12 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
   транзакция. Retention старых поколений требует отдельного ownership-контракта.
 - Managed Java имеет собственный persistent journal и recovery; данный документ
   не расширяет его гарантии до power-loss durability.
+- Оба downloader создают `<partial>.sonata-owner` до самого partial. Нормальное
+  завершение/отмена/unwind убирает marker, process exit оставляет его. Sweeper
+  требует валидный PID и подтверждение его отсутствия; age — дополнительный
+  порог, не основание считать активную загрузку брошенной. Неизвестные/старые
+  partials без marker, ссылки, живой или повторно использованный PID сохраняются.
+  GC CAS, runtime generations и content staging этим не реализован.
 
 ## Проверки
 

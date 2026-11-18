@@ -11,6 +11,7 @@ pub mod files;
 pub mod maven;
 pub mod object_store;
 pub(crate) mod platform;
+pub(crate) mod process;
 pub mod url;
 
 pub async fn get_home_dir() -> Option<PathBuf> {
