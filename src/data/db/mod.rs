@@ -4,6 +4,9 @@ use sqlx::{
 };
 use thiserror::Error;
 
+#[cfg(test)]
+mod tests;
+
 pub const DEFAULT_DB_NAME: &'static str = "cache.db";
 
 #[derive(Debug, Clone)]
