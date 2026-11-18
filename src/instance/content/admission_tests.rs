@@ -185,9 +185,7 @@ async fn cancelling_admission_wait_does_not_create_a_preparation_or_staging() {
     assert!(matches!(poll!(execute.as_mut()), Poll::Pending));
     assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
     cancel.cancel();
-    assert!(
-        matches!(execute.await, Err(crate::instance::content::error::ContentError::Download(error)) if error.is_cancelled())
-    );
+    assert!(matches!(execute.await, Err(error) if error.is_cancelled()));
     assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
     assert!(content_staging_paths(&fixture.root).is_empty());
     assert!(!fixture.root.join("mods/cached.jar").exists());

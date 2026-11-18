@@ -21,7 +21,13 @@ pub enum DbError {
     Db(#[source] sqlx::Error),
 
     #[error("Conflict: {0}")]
-    Conflict(String),
+    Conflict(#[source] sqlx::Error),
+
+    #[error("foreign key violation: {0}")]
+    ForeignKey(#[source] sqlx::Error),
+
+    #[error("filesystem validation: {0}")]
+    File(#[from] crate::utils::files::FileError),
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
@@ -83,14 +89,10 @@ impl From<sqlx::Error> for DbError {
     fn from(err: sqlx::Error) -> Self {
         match &err {
             sqlx::Error::Database(db_err) => {
-                let msg = db_err.message().to_string();
-
-                if msg.contains("UNIQUE constraint failed") || msg.contains("unique constraint") {
-                    DbError::Conflict(msg)
-                } else if msg.contains("FOREIGN KEY constraint failed")
-                    || msg.contains("foreign key constraint")
-                {
-                    DbError::InvalidInput(msg)
+                if db_err.is_unique_violation() {
+                    DbError::Conflict(err)
+                } else if db_err.is_foreign_key_violation() {
+                    DbError::ForeignKey(err)
                 } else {
                     DbError::Db(err)
                 }

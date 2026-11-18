@@ -27,13 +27,13 @@ pub enum ManifestError {
     ManifestMalformed(String),
 
     #[error("download failed: {0}")]
-    DownloadFailed(String),
+    DownloadFailed(#[source] crate::utils::download::error::DownloadError),
 }
 
 pub async fn fetch_manifest(url: &str) -> Result<serde_json::Value, ManifestError> {
     download_in_json(url)
         .await
-        .map_err(|e| ManifestError::DownloadFailed(e.to_string()))
+        .map_err(ManifestError::DownloadFailed)
 }
 
 pub async fn fetch_and_cache_manifest<P: AsRef<Path>>(

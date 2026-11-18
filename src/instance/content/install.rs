@@ -122,7 +122,7 @@ async fn execute_preparing(
                             let (hashes, _) = digest_file(&path, &token, |_| {})?;
                             if hashes.sha256 != hash || !expected.matches(&hashes) {
                                 return Err(ContentError::Invalid(
-                                    "Объект общего хранилища повреждён".into(),
+                                    "shared byte object is corrupt".into(),
                                 ));
                             }
                             Ok(crate::instance::content::store::StoredObject {
@@ -149,7 +149,7 @@ async fn execute_preparing(
                 import_and_register(&db, store.clone(), download, id, cancel, move |hashes| {
                     if !expected.matches(hashes) {
                         return Err(ContentError::Invalid(
-                            "Размер или хеш скачанного файла не совпадает с API".into(),
+                            "downloaded file size or digest differs from provider metadata".into(),
                         ));
                     }
                     Ok(())
@@ -181,8 +181,8 @@ async fn execute_preparing(
     }
     cancel.check()?;
     if super::inventory::signature(root.to_owned()).await? != expected_signature {
-        return Err(ContentError::Invalid(
-            "Состав mods изменился во время загрузки; постройте план заново".into(),
+        return Err(ContentError::StalePlan(
+            super::error::StalePlanReason::InventoryChanged,
         ));
     }
     storage::prepare(&db, id, instance, &prepared).await?;

@@ -180,7 +180,7 @@ fn start_watch(
                 }
             }
         })
-        .map_err(|error| ContentError::Invalid(error.to_string()))?;
+        .map_err(ContentError::Task)?;
 
     Ok(WatchedInstance {
         instance,

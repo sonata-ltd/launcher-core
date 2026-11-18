@@ -48,7 +48,7 @@ pub enum AppError {
     #[error("failed to initialize runtime retention: {0}")]
     RuntimeRetention(#[from] crate::instance::init::error::InitError),
     #[error(transparent)]
-    Content(#[from] crate::instance::content::error::ContentError),
+    Content(#[from] crate::instance::content::error::ContentInitError),
 
     #[error("failed to initialize launcher paths: {0}")]
     Paths(#[from] LauncherPathsError),
@@ -224,10 +224,18 @@ impl GlobalState {
                 }
                 let _ = tx.send(result).await;
             })
-            .map_err(|error| crate::java::managed::ManagedJavaError::new("shutdown", error))?;
-        rx.recv()
-            .await
-            .map_err(|e| crate::java::managed::ManagedJavaError::new("validation", e))?
+            .map_err(|error| {
+                crate::java::managed::ManagedJavaError::caused_by(
+                    crate::java::managed::ManagedJavaErrorKind::Shutdown,
+                    error,
+                )
+            })?;
+        rx.recv().await.map_err(|e| {
+            crate::java::managed::ManagedJavaError::caused_by(
+                crate::java::managed::ManagedJavaErrorKind::Validation,
+                e,
+            )
+        })?
     }
 
     pub fn java(&self) -> Arc<JavaService> {

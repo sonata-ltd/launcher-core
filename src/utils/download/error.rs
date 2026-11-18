@@ -124,7 +124,7 @@ pub(super) fn transient_status(status: StatusCode) -> bool {
     status.is_server_error() || status == StatusCode::TooManyRequests
 }
 
-pub(super) fn transient_io(error: &io::Error) -> bool {
+pub(crate) fn transient_io(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         io::ErrorKind::ConnectionAborted

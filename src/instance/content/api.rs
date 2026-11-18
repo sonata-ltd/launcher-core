@@ -38,6 +38,8 @@ pub struct ContentJobSnapshot {
     pub completed_files: usize,
     pub total_files: usize,
     pub error: Option<String>,
+    /// Typed in-memory cause for callers; error is only a diagnostic projection.
+    pub cause: Option<std::sync::Arc<super::error::ContentError>>,
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

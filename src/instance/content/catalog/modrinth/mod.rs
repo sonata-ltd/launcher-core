@@ -143,7 +143,7 @@ impl Modrinth {
         let version = self.version(release, budget).await?;
         if !compatible(&version, compatibility) {
             return Err(ContentError::CandidateUnavailable(format!(
-                "Точная зависимость {} не подходит экземпляру",
+                "exact dependency {} is incompatible with the instance",
                 version.name
             )));
         }
@@ -188,14 +188,11 @@ impl Modrinth {
     ) -> Result<CatalogRelease> {
         if version.dependencies.len() > 64 {
             return Err(ContentError::CandidateUnavailable(
-                "Релиз содержит слишком много зависимостей".into(),
+                "release dependency count exceeds the limit".into(),
             ));
         }
         let selected = select_file(&version.files).ok_or_else(|| {
-            ContentError::CandidateUnavailable(format!(
-                "В {} нет устанавливаемого JAR",
-                version.name
-            ))
+            ContentError::CandidateUnavailable(format!("{} has no installable JAR", version.name))
         })?;
         let file = DownloadFile {
             file_name: selected.filename.clone(),
@@ -225,13 +222,13 @@ impl Modrinth {
                 let target = self.version(exact, budget).await?;
                 if matches!(kind, DependencyKind::Required) && !compatible(&target, compatibility) {
                     return Err(ContentError::CandidateUnavailable(
-                        "Точная зависимость несовместима с экземпляром".into(),
+                        "exact dependency is incompatible with the instance".into(),
                     ));
                 }
                 target.project_id.clone()
             } else {
                 return Err(ContentError::CandidateUnavailable(
-                    "Зависимость без project_id/version_id требует ручной установки".into(),
+                    "dependency has neither project_id nor version_id".into(),
                 ));
             };
             dependencies.push(Dependency {

@@ -279,7 +279,7 @@ impl ManagedJavaService {
                 });
             if let Err(error) = result {
                 let error = service.fail(id, error).await;
-                job.finish(if error.code == "cancelled" {
+                job.finish(if error.code == ManagedJavaErrorKind::Cancelled {
                     crate::data::registry::operation::message::status::Outcome::Cancelled
                 } else {
                     crate::data::registry::operation::message::status::Outcome::Failed
@@ -403,9 +403,9 @@ impl ManagedJavaService {
         let (tx, rx) = async_channel::bounded(1);
         ticket.spawn(async move {
             let _operation = operation;
-            let java_use = process::JavaUse::admitted(admission);
+            let java_use = process::JavaUse::admitted(admission).map_err(storage);
             let result: Result<Arc<JavaRuntime>> = std::panic::AssertUnwindSafe(async {
-                let java_use = java_use.as_ref().map_err(storage)?;
+                let java_use = java_use.as_ref().map_err(Clone::clone)?;
                 service.persist(id).await?;
                 let snapshot = service.installation(id).await?;
                 let home = crate::utils::files::child(&service.root, &home).map_err(storage)?;
@@ -421,13 +421,14 @@ impl ManagedJavaService {
                 let detected = detect_properties_retained(executable, java_use)
                     .await
                     .map_err(|e| {
-                        ManagedJavaError::new(
-                            "validation",
-                            format!(
-                            "Executable: {}\nArguments: -XshowSettings:properties -version\n{e}",
-                            extract::executable(&home).display()
-                        ),
-                        )
+                        let mut error =
+                            ManagedJavaError::caused_by(ManagedJavaErrorKind::Validation, e);
+                        error.details = format!(
+                            "Executable: {}\nArguments: -XshowSettings:properties -version\n{}",
+                            extract::executable(&home).display(),
+                            error.details
+                        );
+                        error
                     })?;
                 validate_detected(&home, &snapshot.package, &detected)?;
                 let runtime = registrar.register_managed(detected).await?;
@@ -479,7 +480,7 @@ impl ManagedJavaService {
         });
         rx.recv()
             .await
-            .map_err(|e| ManagedJavaError::new("validation", e))?
+            .map_err(|e| ManagedJavaError::caused_by(ManagedJavaErrorKind::Validation, e))?
     }
 
     async fn install(
@@ -565,7 +566,7 @@ impl ManagedJavaService {
             crate::utils::files::child(&self.root, &final_relative).map_err(storage)?;
         let relative_home = home
             .strip_prefix(&destination)
-            .map_err(|e| ManagedJavaError::new("extract", e))?;
+            .map_err(|e| ManagedJavaError::caused_by(ManagedJavaErrorKind::Extract, e))?;
         let database = match &self.database {
             Some(database) => database
                 .retention_owner()
@@ -650,7 +651,7 @@ impl ManagedJavaService {
         }
         self.update(id, |record| {
             error.stage = Some(record.snapshot.stage);
-            record.snapshot.stage = if error.code == "cancelled" {
+            record.snapshot.stage = if error.code == ManagedJavaErrorKind::Cancelled {
                 ManagedJavaStage::Cancelled
             } else {
                 ManagedJavaStage::Failed
@@ -732,8 +733,8 @@ impl ManagedJavaService {
     }
 }
 
-fn storage(error: impl std::fmt::Display) -> ManagedJavaError {
-    ManagedJavaError::new("storage", error)
+fn storage(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> ManagedJavaError {
+    ManagedJavaError::caused_by_box(ManagedJavaErrorKind::Storage, error.into())
 }
 
 fn read_record(root: &Path, id: Uuid) -> Result<Option<Record>> {
@@ -772,7 +773,8 @@ fn validate_detected(
         .home_path
         .as_ref()
         .ok_or_else(|| ManagedJavaError::new("validation", "Java did not report java.home"))?;
-    let home = dunce::canonicalize(home).map_err(|e| ManagedJavaError::new("validation", e))?;
+    let home = dunce::canonicalize(home)
+        .map_err(|e| ManagedJavaError::caused_by(ManagedJavaErrorKind::Validation, e))?;
     if !actual_home.starts_with(&home) || !detected.exec_path.starts_with(&home) {
         return Err(ManagedJavaError::new(
             "validation",

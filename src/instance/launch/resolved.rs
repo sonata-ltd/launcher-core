@@ -150,7 +150,7 @@ async fn prepare_command(
 
     async_std::fs::create_dir_all(&game)
         .await
-        .map_err(|e| InstanceError::RunFailed(e.to_string()))?;
+        .map_err(InstanceError::Io)?;
 
     let native_root = game.join(".sonata-natives");
     let natives = async_std::task::spawn_blocking(move || NativeDirectory::create(&native_root))
@@ -193,7 +193,7 @@ async fn prepare_command(
         .map_err(|_| LaunchError::ClasspathNotUnicode)?;
 
     let asset_index = super::super::download::manifest::asset_index_id(&profile.manifest)
-        .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
+        .map_err(InstanceError::Manifest)?;
     let mut variables = HashMap::from([
         ("auth_player_name".into(), "Player".into()),
         ("auth_uuid".into(), offline_uuid("Player")),

@@ -80,10 +80,7 @@ async fn recover_one(
             ));
         }
     }
-    let record = instances
-        .get(instance)
-        .await
-        .map_err(|error| ContentError::Invalid(error.to_string()))?;
+    let record = instances.get(instance).await.map_err(ContentError::from)?;
     let root = files::child(paths.instances(), std::path::Path::new(&record.dir))?;
     let mods = files::child(&root, std::path::Path::new("mods"))?;
     fs::create_dir_all(&mods)?;
@@ -131,7 +128,7 @@ async fn recover_one(
             placement::copy_new(&object, &staged, &Cancellation::default())?;
             if !files::sha256_file(&staged)?.eq_ignore_ascii_case(&expected) {
                 return Err(ContentError::Invalid(
-                    "Объект CAS повреждён; восстановление остановлено".into(),
+                    "content byte object is corrupt".into(),
                 ));
             }
             files::publish::publish_new(staged, path)?;

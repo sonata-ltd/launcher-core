@@ -20,9 +20,9 @@ pub(super) async fn download(
     let (mut response, url) = stream::response(&package.url, true, None, cancel)
         .await
         .map_err(download_error)?;
-    let mut file = File::create(path).await.map_err(|error| {
-        ManagedJavaError::new("download", format!("{}: {error}", path.display()))
-    })?;
+    let mut file = File::create(path)
+        .await
+        .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Download, error))?;
     copy_body(
         &mut response,
         &mut file,
@@ -72,20 +72,10 @@ async fn copy_body(
 }
 
 fn download_error(error: DownloadError) -> ManagedJavaError {
-    match error {
-        DownloadError::Cancelled(cancelled) => cancelled.into(),
-        DownloadError::SizeMismatch { expected, actual } if actual > expected => {
-            ManagedJavaError::new(
-                "download",
-                format!("Expected {expected} bytes, received more than expected"),
-            )
-        }
-        DownloadError::BodyRead { source, .. } | DownloadError::FileWrite { source, .. } => {
-            ManagedJavaError::new("download", source)
-        }
-        DownloadError::Request { url, source } => {
-            ManagedJavaError::new("download", format!("{url}: {source}"))
-        }
-        other => ManagedJavaError::new("download", other),
-    }
+    let kind = if matches!(error, DownloadError::Cancelled(_)) {
+        ManagedJavaErrorKind::Cancelled
+    } else {
+        ManagedJavaErrorKind::Download
+    };
+    ManagedJavaError::caused_by(kind, error)
 }

@@ -43,9 +43,7 @@ impl InstanceActivity {
             .map_err(|_| InstanceError::RunFailed("lifecycle lock poisoned".into()))?;
 
         if self.running.phase(id).is_some() || self.install_jobs.busy(id) {
-            return Err(InstanceError::RunFailed(
-                "instance is running or being installed".into(),
-            ));
+            return Err(InstanceError::Busy(id));
         }
 
         let mut jobs = self
@@ -54,9 +52,7 @@ impl InstanceActivity {
             .map_err(|_| InstanceError::RunFailed("content lock poisoned".into()))?;
 
         if !jobs.insert(id) {
-            return Err(InstanceError::RunFailed(
-                "content installation is active".into(),
-            ));
+            return Err(InstanceError::Busy(id));
         }
 
         Ok(ContentChangeGuard {
@@ -76,14 +72,12 @@ impl InstanceActivity {
         }
 
         if self.content_busy(id) {
-            return Err(InstanceError::RunFailed(
-                "content installation active".into(),
-            ));
+            return Err(InstanceError::Busy(id));
         }
 
         self.install_jobs
             .begin(id)
-            .map_err(|error| InstanceError::CreationFailed(error.to_string()))
+            .map_err(|_| InstanceError::Busy(id))
     }
 
     pub(super) fn reserve_launch(&self, id: InstanceId) -> Result<Reservation> {
@@ -93,9 +87,7 @@ impl InstanceActivity {
             .map_err(|_| InstanceError::RunFailed("lifecycle lock poisoned".into()))?;
 
         if self.content_busy(id) {
-            return Err(InstanceError::RunFailed(
-                "content installation is active".into(),
-            ));
+            return Err(InstanceError::Busy(id));
         }
         if self.install_jobs.busy(id) {
             return Err(InstanceError::RunFailed("installation is active".into()));

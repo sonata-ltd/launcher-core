@@ -138,7 +138,8 @@ pub(super) fn extract(
         ));
     }
     cancel.check()?;
-    find_home(destination).map_err(|e| ManagedJavaError::new("extract", e))
+    find_home(destination)
+        .map_err(|e| ManagedJavaError::caused_by(super::ManagedJavaErrorKind::Extract, e))
 }
 
 fn validate_path(path: &Path) -> io::Result<()> {

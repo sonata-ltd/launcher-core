@@ -14,7 +14,7 @@ use crate::{
     data::{db::Database, layout::LauncherPaths},
     instance::content::{
         catalog::{types::*, ContentCatalog},
-        error::{ContentError, Result},
+        error::{BusyReason, ContentError, ContentInitError, Result, StalePlanReason},
         model::{ProjectKey, Provider},
         resolve::catalog_plan,
         store::ObjectStore,
@@ -32,6 +32,16 @@ const ACTIVE_LIMIT: usize = 128;
 const HISTORY_LIMIT: usize = 128;
 const HISTORY_TTL: Duration = Duration::from_secs(3600);
 const PLAN_TTL: Duration = Duration::from_secs(300);
+
+fn terminal_phase(error: Option<&ContentError>, previous: ContentPhase) -> ContentPhase {
+    match error {
+        None => ContentPhase::Completed,
+        Some(error) if error.is_cancelled() && previous == ContentPhase::Downloading => {
+            ContentPhase::Cancelled
+        }
+        Some(_) => ContentPhase::Failed,
+    }
+}
 
 struct StoredPlan {
     preview: InstallPreview,
@@ -56,9 +66,10 @@ impl Job {
             })
     }
 
-    fn finish(&mut self, phase: ContentPhase, error: Option<String>) {
+    fn finish(&mut self, phase: ContentPhase, error: Option<Arc<ContentError>>) {
         self.snapshot.phase = phase;
-        self.snapshot.error = error;
+        self.snapshot.error = error.as_ref().map(ToString::to_string);
+        self.snapshot.cause = error;
         self.completed = Some(Instant::now());
         self.snapshot.finished_at = Some(chrono::Utc::now());
     }
@@ -81,7 +92,7 @@ impl Drop for TerminalGuard {
             .finish(
                 self.id,
                 ContentPhase::Failed,
-                Some("Content worker stopped unexpectedly".into()),
+                Some(Arc::new(ContentError::WorkerPanicked)),
             );
     }
 }
@@ -96,15 +107,13 @@ impl Jobs {
 
     fn admit(&mut self, id: Uuid, job: Job) -> Result<()> {
         if self.active.len() >= ACTIVE_LIMIT {
-            return Err(ContentError::Invalid(
-                "Too many active installations; try again later".into(),
-            ));
+            return Err(BusyReason::ActiveLimit(ACTIVE_LIMIT).into());
         }
         self.active.insert(id, job);
         Ok(())
     }
 
-    fn finish(&mut self, id: Uuid, phase: ContentPhase, error: Option<String>) {
+    fn finish(&mut self, id: Uuid, phase: ContentPhase, error: Option<Arc<ContentError>>) {
         if let Some(mut job) = self.active.remove(&id) {
             job.finish(phase, error);
             self.history.push(id, job);
@@ -154,7 +163,7 @@ impl InstanceContentService {
         instances: Arc<InstanceService>,
         curseforge_key: Option<String>,
         operations: Arc<crate::data::registry::operation::OperationRegistry>,
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, ContentInitError> {
         let root_lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -162,8 +171,11 @@ impl InstanceContentService {
             .truncate(false)
             .open(paths.root().join(".launcher-content.lock"))?;
         let root_lock =
-            crate::utils::object_store::StoreLock::exclusive(root_lock).map_err(|_| {
-                ContentError::Invalid("Другой процесс лаунчера уже использует этот корень".into())
+            crate::utils::object_store::StoreLock::exclusive(root_lock).map_err(|source| {
+                ContentInitError::Lock {
+                    path: paths.root().clone(),
+                    source,
+                }
             })?;
         // The configured launcher root is not the instances resource identity:
         // different roots may override instances to the same directory/alias.
@@ -180,8 +192,9 @@ impl InstanceContentService {
                 .truncate(false)
                 .open(lock_path)?,
         )
-        .map_err(|_| {
-            ContentError::Invalid("Instance directory is already in use by another launcher".into())
+        .map_err(|source| ContentInitError::Lock {
+            path: paths.instances().clone(),
+            source,
         })?;
         let registry = instances.get_registry();
         let activity = instances.activity();
@@ -276,7 +289,7 @@ impl InstanceContentService {
                         .prune();
                 }
             })
-            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+            .map_err(ContentInitError::Task)?;
         Ok(Self {
             operations,
             catalog: ContentCatalog::new(curseforge_key),
@@ -300,14 +313,14 @@ impl InstanceContentService {
             .instances
             .get(instance)
             .await
-            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+            .map_err(ContentError::from)?;
         if matches!(
             record.loader,
             crate::modloader::model::LoaderKind::Vanilla
                 | crate::modloader::model::LoaderKind::Cleanroom
         ) {
             return Err(ContentError::Invalid(
-                "Для этого экземпляра автоматическая установка модов пока не поддерживается".into(),
+                "automatic mod installation is unsupported for this loader".into(),
             ));
         }
         let root = files::child(self.paths.instances(), std::path::Path::new(&record.dir))?;
@@ -365,7 +378,7 @@ impl InstanceContentService {
             if let Some(previous) = installed.insert(project.clone(), candidate) {
                 if previous.key.release_id != entry.release_id {
                     return Err(ContentError::Invalid(
-                        "Несколько активных версий одного проекта".into(),
+                        "multiple active releases of the same project".into(),
                     ));
                 }
                 continue;
@@ -390,7 +403,7 @@ impl InstanceContentService {
             catalog_plan::resolve_with_installed(&self.catalog, &roots, &compatibility, installed),
         )
         .await
-        .map_err(|_| ContentError::Transport("Подбор зависимостей превысил 90 секунд".into()))??;
+        .map_err(|_| ContentError::Timeout(Duration::from_secs(90)))??;
         let mut names = std::collections::HashSet::new();
         let mut releases = Vec::new();
         let mut items = already_present;
@@ -399,7 +412,7 @@ impl InstanceContentService {
             // Переносимое консервативное ограничение для создаваемых имён.
             if !names.insert(release.file.file_name.to_lowercase()) {
                 return Err(ContentError::Invalid(
-                    "Разные проекты создают одинаковое имя файла".into(),
+                    "different projects create the same file name".into(),
                 ));
             }
             let target = root.join("mods").join(&release.file.file_name);
@@ -416,7 +429,7 @@ impl InstanceContentService {
                 .await?;
                 if !matches {
                     return Err(ContentError::Invalid(format!(
-                        "{} уже существует с другим содержимым. Перезапись отключена",
+                        "{} already exists with different bytes",
                         release.file.file_name
                     )));
                 }
@@ -429,8 +442,7 @@ impl InstanceContentService {
                 .any(|entry| entry.matches(&release.key.project, &snapshot));
             if existing && !already_installed {
                 return Err(ContentError::Invalid(
-                    "Уже установлена другая версия проекта; обновление требует отдельного плана"
-                        .into(),
+                    "another release of the project is already installed".into(),
                 ));
             }
             items.push(PreviewItem {
@@ -455,9 +467,7 @@ impl InstanceContentService {
             }
         }
         if super::inventory::signature(root).await? != snapshot.signature {
-            return Err(ContentError::Invalid(
-                "Папка mods изменилась при подготовке плана".into(),
-            ));
+            return Err(ContentError::StalePlan(StalePlanReason::InventoryChanged));
         }
         let signature = snapshot.signature;
         let preview = InstallPreview {
@@ -476,9 +486,7 @@ impl InstanceContentService {
             .map_err(|_| ContentError::Invalid("Plan lock poisoned".into()))?;
         plans.retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
         if plans.len() >= 32 {
-            return Err(ContentError::Invalid(
-                "Слишком много предпросмотров; повторите позднее".into(),
-            ));
+            return Err(BusyReason::PreviewLimit(32).into());
         }
         plans.insert(
             preview.id,
@@ -502,22 +510,20 @@ impl InstanceContentService {
             plans.retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
             plans.remove(&plan_id)
         }
-        .ok_or_else(|| ContentError::Invalid("План устарел; обновите предпросмотр".into()))?;
+        .ok_or(ContentError::StalePlan(StalePlanReason::Expired))?;
         if plan.created.elapsed() >= Duration::from_secs(300) {
-            return Err(ContentError::Invalid(
-                "План устарел; обновите предпросмотр".into(),
-            ));
+            return Err(ContentError::StalePlan(StalePlanReason::Expired));
         }
         if plan.releases.is_empty() {
             return Err(ContentError::Invalid(
-                "Все выбранные файлы уже установлены".into(),
+                "all selected files are already installed".into(),
             ));
         }
         let instance = plan.preview.instance_id;
         let activity = self
             .activity
             .reserve_content_change(instance)
-            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+            .map_err(ContentError::from)?;
         let id = Uuid::new_v4();
         use crate::data::registry::operation::message::stage::OperationStage;
         let operation = self
@@ -548,6 +554,7 @@ impl InstanceContentService {
                         completed_files: 0,
                         total_files: plan.releases.len(),
                         error: None,
+                        cause: None,
                         finished_at: None,
                     },
                     cancel: cancel.clone(),
@@ -565,8 +572,8 @@ impl InstanceContentService {
             use crate::data::registry::operation::message::status::Outcome;
             operation.start_stage_determinable(OperationStage::DownloadContent);
             let result = std::panic::AssertUnwindSafe(service.execute_plan(id, plan, &cancel, &operation)).catch_unwind().await
-                .unwrap_or_else(|_| Err(ContentError::Invalid("Content worker panicked".into())));
-            let mut error = result.err();
+                .unwrap_or_else(|_| Err(ContentError::WorkerPanicked));
+            let mut error = result.err().map(Arc::new);
             if error.is_some() {
                 match recovery::recover(
                     &service.db,
@@ -578,7 +585,7 @@ impl InstanceContentService {
                 {
                     Ok(failures) => {
                         if let Some(failure) = failures.into_iter().next() {
-                            error = Some(failure.error);
+                            error = Some(Arc::new(failure.error));
                         } else if storage::operation_completed(&service.db, id)
                             .await
                             .unwrap_or(false)
@@ -586,37 +593,19 @@ impl InstanceContentService {
                             error = None;
                         }
                     }
-                    Err(recovery_error) => error = Some(recovery_error),
+                    Err(recovery_error) => error = Some(Arc::new(recovery_error)),
                 }
             }
+            let mut phase = terminal_phase(error.as_deref(), ContentPhase::Publishing);
             if let Ok(mut jobs) = service.jobs.lock() {
                 if let Some(job) = jobs.active.get(&id) {
-                    let phase = if error.is_none() {
-                        ContentPhase::Completed
-                    } else if cancel.check().is_err()
-                        && job.snapshot.phase == ContentPhase::Downloading
-                    {
-                        ContentPhase::Cancelled
-                    } else {
-                        ContentPhase::Failed
-                    };
-                    jobs.finish(id, phase, error.as_ref().map(|error| error.to_string()));
+                    phase = terminal_phase(error.as_deref(), job.snapshot.phase);
+                    jobs.finish(id, phase, error.clone());
                 }
             }
-            let cancelled = service
-                .jobs
-                .lock()
-                .ok()
-                .and_then(|jobs| {
-                    jobs.history
-                        .records()
-                        .find(|record| record.id == id)
-                        .map(|record| record.value.snapshot.phase == ContentPhase::Cancelled)
-                })
-                .unwrap_or(false);
             let outcome = if error.is_none() {
                 Outcome::Completed
-            } else if cancelled {
+            } else if phase == ContentPhase::Cancelled {
                 Outcome::Cancelled
             } else {
                 Outcome::Failed
@@ -628,8 +617,8 @@ impl InstanceContentService {
                 }
             }
         }).map_err(|error| {
-            self.jobs.lock().unwrap_or_else(|error| error.into_inner()).finish(id, ContentPhase::Failed, Some(error.to_string()));
-            ContentError::Invalid(error.to_string())
+            self.jobs.lock().unwrap_or_else(|error| error.into_inner()).finish(id, ContentPhase::Failed, Some(Arc::new(ContentError::Task(error.clone()))));
+            ContentError::Task(error)
         })?;
         Ok(id)
     }
@@ -651,16 +640,14 @@ impl InstanceContentService {
         // Context повторно получен, но установка не меняет версию/loader.
         // Под тем же activity lease другие сценарии не могут менять экземпляр.
         if compatibility != plan.compatibility {
-            return Err(ContentError::Invalid(
-                "Версия Minecraft или загрузчик изменились после предпросмотра".into(),
+            return Err(ContentError::StalePlan(
+                StalePlanReason::CompatibilityChanged,
             ));
         }
         storage::ensure_no_pending(&self.db, plan.preview.instance_id).await?;
         let snapshot = super::inventory::snapshot(root.clone()).await?;
         if snapshot.signature != plan.signature {
-            return Err(ContentError::Invalid(
-                "Папка mods изменилась после предпросмотра; постройте план заново".into(),
-            ));
+            return Err(ContentError::StalePlan(StalePlanReason::InventoryChanged));
         }
         storage::reconcile_registered_mods(&self.db, plan.preview.instance_id, &snapshot).await?;
         self.mod_index
@@ -733,7 +720,7 @@ impl InstanceContentService {
         let activity = self
             .activity
             .reserve_content_change(instance)
-            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+            .map_err(ContentError::from)?;
         let service = Arc::clone(self);
 
         // A caller dropping its future must not release the lease mid-publication.
@@ -753,9 +740,9 @@ impl InstanceContentService {
                     None => Ok(()),
                 }
             })
-            .map_err(|error| ContentError::Invalid(error.to_string()))?
+            .map_err(ContentError::Task)?
             .await
-            .map_err(|error| ContentError::Invalid(error.to_string()))?
+            .map_err(ContentError::Task)?
     }
 
     /// Stops recovery of one pending installation and keeps all files in place.
@@ -763,7 +750,7 @@ impl InstanceContentService {
         let _activity = self
             .activity
             .reserve_content_change(instance)
-            .map_err(|error| ContentError::Invalid(error.to_string()))?;
+            .map_err(ContentError::from)?;
         storage::abandon(&self.db, instance, operation).await
     }
 
@@ -775,10 +762,7 @@ impl InstanceContentService {
         if jobs.history.records().any(|record| record.id == id) {
             return Ok(());
         }
-        let job = jobs
-            .active
-            .get(&id)
-            .ok_or_else(|| ContentError::Invalid("Установка не найдена".into()))?;
+        let job = jobs.active.get(&id).ok_or(ContentError::JobNotFound(id))?;
         if job.snapshot.phase == ContentPhase::Downloading {
             job.cancel.cancel();
         }
@@ -794,6 +778,41 @@ impl InstanceContentService {
 mod history_tests {
     use super::*;
 
+    #[test]
+    fn terminal_outcome_uses_failure_cause_not_a_cancelled_token_and_history_keeps_cause() {
+        let cancel = Cancel::default();
+        cancel.cancel();
+        let cause = Arc::new(ContentError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cancelled",
+        )));
+        assert_eq!(
+            terminal_phase(Some(&cause), ContentPhase::Downloading),
+            ContentPhase::Failed
+        );
+        let cancelled = ContentError::from(crate::utils::cancellation::Cancelled);
+        assert_eq!(
+            terminal_phase(Some(&cancelled), ContentPhase::Downloading),
+            ContentPhase::Cancelled
+        );
+        assert_eq!(
+            terminal_phase(Some(&cancelled), ContentPhase::Publishing),
+            ContentPhase::Failed
+        );
+        assert_eq!(
+            terminal_phase(None, ContentPhase::Publishing),
+            ContentPhase::Completed
+        );
+        let mut jobs = Jobs::new();
+        let job = job(Instant::now());
+        let id = job.snapshot.id;
+        jobs.admit(id, job).unwrap();
+        jobs.finish(id, ContentPhase::Failed, Some(cause.clone()));
+        let snapshot = jobs.latest(1.into()).unwrap();
+        assert!(Arc::ptr_eq(snapshot.cause.as_ref().unwrap(), &cause));
+        assert_eq!(snapshot.error, Some(cause.to_string()));
+    }
+
     fn job(created: Instant) -> Job {
         let operations =
             crate::data::registry::operation::OperationRegistry::new(crate::bus::EventBus::new(1));
@@ -807,6 +826,7 @@ mod history_tests {
                 completed_files: 0,
                 total_files: 1,
                 error: None,
+                cause: None,
                 finished_at: None,
             },
             created,
@@ -826,7 +846,10 @@ mod history_tests {
             let mut job = job(now - Duration::from_secs(7200));
             assert!(job.retained_at(now));
             assert!(job.snapshot.finished_at.is_none());
-            job.finish(phase, Some("fixture".into()));
+            job.finish(
+                phase,
+                Some(Arc::new(ContentError::Invalid("fixture".into()))),
+            );
             let completed = job.completed.unwrap();
             assert!(job.snapshot.finished_at.is_some());
             assert!(job.retained_at(completed + Duration::from_secs(3599)));

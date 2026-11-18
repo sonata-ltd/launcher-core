@@ -88,7 +88,7 @@ impl ContentCatalog {
     ) -> Result<SearchPage> {
         if query.len() > 512 {
             return Err(ContentError::Invalid(
-                "Слишком длинный поисковый запрос".into(),
+                "search query exceeds the length limit".into(),
             ));
         }
         match provider {
@@ -170,7 +170,7 @@ impl From<crate::utils::download::json::JsonRequestError> for ContentError {
     fn from(error: crate::utils::download::json::JsonRequestError) -> Self {
         match error {
             crate::utils::download::json::JsonRequestError::Status(status) => Self::Http(status),
-            other => Self::Transport(other.to_string()),
+            other => Self::Transport(other),
         }
     }
 }

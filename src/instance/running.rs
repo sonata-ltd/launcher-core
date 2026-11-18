@@ -58,7 +58,7 @@ impl RunningInstances {
         let ticket = self
             .tasks
             .admit("game preparation/process", None)
-            .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
+            .map_err(InstanceError::Task)?;
         {
             let mut map = self.inner.lock().unwrap();
 

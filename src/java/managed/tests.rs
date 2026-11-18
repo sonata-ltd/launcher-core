@@ -184,7 +184,9 @@ async fn streamed_download_counts_written_bytes_and_checks_length() {
     )
     .await
     .unwrap_err();
-    assert!(error.details.contains("more than expected"));
+    assert!(
+        matches!(std::error::Error::source(&error).unwrap().downcast_ref::<crate::utils::download::error::DownloadError>(), Some(crate::utils::download::error::DownloadError::SizeMismatch { expected: 3, actual }) if *actual > 3)
+    );
 }
 
 #[async_std::test]
@@ -253,6 +255,9 @@ async fn write_errors_reach_the_caller_without_false_progress() {
     .await
     .unwrap_err();
     assert!(error.details.contains("disk full"));
+    assert!(
+        matches!(std::error::Error::source(&error).unwrap().downcast_ref::<crate::utils::download::error::DownloadError>(), Some(crate::utils::download::error::DownloadError::FileWrite { source, .. }) if source.kind() == std::io::ErrorKind::Other)
+    );
 }
 
 pub(in crate::java::managed) fn tar_fixture(path: &Path) {

@@ -18,7 +18,7 @@ pub(super) struct Archive {
 }
 
 fn error(error: io::Error) -> ManagedJavaError {
-    ManagedJavaError::new(
+    ManagedJavaError::caused_by(
         match error.kind() {
             io::ErrorKind::Interrupted => "cancelled",
             io::ErrorKind::InvalidData => "checksum",

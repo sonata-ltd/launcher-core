@@ -40,7 +40,7 @@ struct Package {
 pub(super) async fn fetch(target: JavaTarget) -> Result<ManagedJavaCatalog> {
     let releases = download_in_json("https://api.adoptium.net/v3/info/available_releases")
         .await
-        .map_err(|e| ManagedJavaError::new("catalog", e))?;
+        .map_err(|e| ManagedJavaError::caused_by(ManagedJavaErrorKind::Catalog, e))?;
     let majors: Vec<u32> = releases["available_releases"]
         .as_array()
         .ok_or_else(|| ManagedJavaError::new("catalog", "Missing available_releases"))?
@@ -54,7 +54,7 @@ pub(super) async fn fetch(target: JavaTarget) -> Result<ManagedJavaCatalog> {
             let url = format!("https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={}&image_type=jre&os={}&vendor=eclipse", target.arch, target.os);
             let result = match fetch_assets(&url).await {
                 Ok(value) => parse(value, &target, major),
-                Err(e) => Err(ManagedJavaError::new("catalog", format!("{url}: {e}"))),
+                Err(e) => Err(e),
             };
             (major, result)
         }
@@ -79,12 +79,10 @@ pub(super) fn combine_responses(
     }
     warnings.sort_by_key(|warning| warning.major);
     if !succeeded && !warnings.is_empty() {
-        let details = warnings
-            .iter()
-            .map(|warning| format!("Java {}: {}", warning.major, warning.error.diagnostic()))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        return Err(ManagedJavaError::new("catalog", details));
+        return Err(ManagedJavaError::caused_by(
+            ManagedJavaErrorKind::Catalog,
+            ManagedJavaCatalogFailures { warnings },
+        ));
     }
     packages.sort_by(|a, b| b.major.cmp(&a.major));
     Ok(ManagedJavaCatalog { packages, warnings })
@@ -95,8 +93,8 @@ pub(super) fn parse(
     target: &JavaTarget,
     major: u32,
 ) -> Result<Vec<ManagedJavaPackage>> {
-    let assets: Vec<Asset> =
-        serde_json::from_value(value).map_err(|e| ManagedJavaError::new("catalog", e))?;
+    let assets: Vec<Asset> = serde_json::from_value(value)
+        .map_err(|e| ManagedJavaError::caused_by(ManagedJavaErrorKind::Catalog, e))?;
     let mut packages = Vec::new();
     for asset in assets {
         let b = asset.binary;
@@ -150,12 +148,15 @@ pub(super) fn parse(
 
 async fn fetch_assets(url: &str) -> Result<serde_json::Value> {
     const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
-    let request = http::request(url).map_err(|error| ManagedJavaError::new("catalog", error))?;
+    let request = http::request(url)
+        .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Catalog, error))?;
     match http::fetch(request, MAX_CATALOG_BYTES, ONESHOT_TIMEOUT).await {
-        Ok(bytes) => {
-            serde_json::from_slice(&bytes).map_err(|error| ManagedJavaError::new("catalog", error))
-        }
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Catalog, error)),
         Err(HttpError::Status(surf::StatusCode::NotFound)) => Ok(serde_json::json!([])),
-        Err(error) => Err(ManagedJavaError::new("catalog", format!("{error}: {url}"))),
+        Err(error) => Err(ManagedJavaError::caused_by(
+            ManagedJavaErrorKind::Catalog,
+            error,
+        )),
     }
 }

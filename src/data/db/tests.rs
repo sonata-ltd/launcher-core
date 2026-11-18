@@ -278,3 +278,52 @@ async fn provider_ownership_upgrade_preserves_files_and_enforces_all_mutations()
         .unwrap();
     assert_eq!(count, 0);
 }
+#[async_std::test]
+async fn constraint_mapping_uses_database_metadata_and_keeps_sql_source() {
+    use std::error::Error;
+    let db = super::Database::init("sqlite::memory:").await.unwrap();
+    sqlx::query("CREATE TABLE q07_parent (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL)")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE q07_child (parent INTEGER REFERENCES q07_parent(id))")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO q07_parent VALUES (1, 'same')")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let unique = super::DbError::from(
+        sqlx::query("INSERT INTO q07_parent VALUES (2, 'same')")
+            .execute(&db.pool)
+            .await
+            .unwrap_err(),
+    );
+    assert!(matches!(unique, super::DbError::Conflict(_)));
+    assert!(unique
+        .source()
+        .unwrap()
+        .downcast_ref::<sqlx::Error>()
+        .is_some());
+    let foreign = super::DbError::from(
+        sqlx::query("INSERT INTO q07_child VALUES (999)")
+            .execute(&db.pool)
+            .await
+            .unwrap_err(),
+    );
+    assert!(matches!(foreign, super::DbError::ForeignKey(_)));
+    assert!(foreign
+        .source()
+        .unwrap()
+        .downcast_ref::<sqlx::Error>()
+        .is_some());
+    sqlx::query("CREATE TRIGGER q07_misleading BEFORE INSERT ON q07_child BEGIN SELECT RAISE(ABORT, 'UNIQUE constraint failed'); END").execute(&db.pool).await.unwrap();
+    let misleading = super::DbError::from(
+        sqlx::query("INSERT INTO q07_child VALUES (1)")
+            .execute(&db.pool)
+            .await
+            .unwrap_err(),
+    );
+    assert!(matches!(misleading, super::DbError::Db(_)));
+}

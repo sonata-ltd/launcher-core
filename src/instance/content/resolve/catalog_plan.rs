@@ -22,11 +22,13 @@ pub(in crate::instance::content) async fn resolve_with_installed(
     installed: HashMap<ProjectKey, Candidate>,
 ) -> Result<Vec<CatalogRelease>> {
     if roots.is_empty() || roots.len() > 16 {
-        return Err(ContentError::Invalid("Выберите от 1 до 16 модов".into()));
+        return Err(ContentError::Invalid(
+            "root selection must contain 1 to 16 projects".into(),
+        ));
     }
     if roots.iter().any(|root| root.provider != roots[0].provider) {
         return Err(ContentError::Invalid(
-            "Установите выбор из разных провайдеров отдельными операциями".into(),
+            "mixed-provider root selection is unsupported".into(),
         ));
     }
     let mut queue: VecDeque<_> = roots
@@ -90,7 +92,7 @@ pub(in crate::instance::content) async fn resolve_with_installed(
         for release in choices {
             if release.key.project != project {
                 return Err(ContentError::Invalid(
-                    "Провайдер вернул релиз другого проекта".into(),
+                    "provider returned a release of another project".into(),
                 ));
             }
             for dependency in &release.dependencies {
@@ -123,9 +125,7 @@ pub(in crate::instance::content) async fn resolve_with_installed(
         .collect();
     let installed_projects: HashSet<_> = installed.keys().cloned().collect();
     let selected = graph::solve_with_installed(&requirements, &candidates, installed, 4096)
-        .map_err(|error| {
-            ContentError::Invalid(format!("Не удалось подобрать зависимости: {error:?}"))
-        })?;
+        .map_err(ContentError::Incompatible)?;
     let mut result = Vec::new();
     for candidate in selected.into_values() {
         if installed_projects.contains(&candidate.key.project) {

@@ -27,7 +27,7 @@ pub enum OptionsError {
     InvalidSettings(InstanceError),
 
     #[error("instance operation failed: {0}")]
-    Internal(String),
+    Internal(#[source] Box<InstanceError>),
 
     #[error(transparent)]
     Db(#[from] DbError),

@@ -132,7 +132,7 @@ fn map_instance_error(e: InstanceError) -> OptionsError {
         error @ (InstanceError::InvalidMemoryRange { .. } | InstanceError::InvalidJvmArguments) => {
             OptionsError::InvalidSettings(error)
         }
-        other => OptionsError::Internal(other.to_string()),
+        other => OptionsError::Internal(Box::new(other)),
     }
 }
 
@@ -144,6 +144,21 @@ mod tests {
         java::storage::DbJavaStore,
         modloader::model::LoaderKind,
     };
+
+    #[test]
+    fn options_mapping_keeps_unexpected_instance_cause_without_text_classification() {
+        let error = map_instance_error(InstanceError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "cancelled UNIQUE constraint failed",
+        )));
+        let OptionsError::Internal(source) = error else {
+            panic!("expected typed instance source");
+        };
+        let InstanceError::Io(source) = *source else {
+            panic!("lost IO source");
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::PermissionDenied);
+    }
 
     #[async_std::test]
     async fn overview_patch_rolls_back_tags_on_name_conflict_and_refreshes_registry() {

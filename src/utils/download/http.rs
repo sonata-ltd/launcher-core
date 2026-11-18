@@ -18,6 +18,17 @@ pub(crate) enum HttpError {
     Timeout,
 }
 
+impl HttpError {
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::Request(_) | Self::Timeout => true,
+            Self::Status(status) => super::error::transient_status(*status),
+            Self::Body(error) => super::error::transient_io(error),
+            _ => false,
+        }
+    }
+}
+
 pub(crate) fn request(url: &str) -> std::result::Result<surf::RequestBuilder, HttpError> {
     Ok(surf::get(surf::Url::parse(url)?))
 }

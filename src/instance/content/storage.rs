@@ -25,9 +25,7 @@ enum ModPresence {
 
 pub async fn ensure_no_pending(db: &Database, instance: InstanceId) -> Result<()> {
     if has_pending(db, instance).await? {
-        return Err(ContentError::Invalid(
-            "Осталась незавершённая установка контента: требуется восстановление".into(),
-        ));
+        return Err(ContentError::RecoveryPending(instance));
     }
     Ok(())
 }

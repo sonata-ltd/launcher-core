@@ -182,11 +182,9 @@ impl InstanceService {
 
                 drop(job);
             })
-            .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
+            .map_err(InstanceError::Task)?;
 
-        rx.recv()
-            .await
-            .map_err(|e| InstanceError::CreationFailed(e.to_string()))?
+        rx.recv().await.map_err(InstanceError::WorkerResult)?
     }
 
     pub fn cancel_install(&self, id: InstanceId) {

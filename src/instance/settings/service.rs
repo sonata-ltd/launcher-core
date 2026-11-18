@@ -72,7 +72,7 @@ impl SettingsService {
             }
         }
         let updated = self.storage.patch(id, patch).await.map_err(|e| match e {
-            DbError::InvalidInput(_) => match patch.java_runtime.flatten() {
+            DbError::ForeignKey(_) => match patch.java_runtime.flatten() {
                 Some(java_id) => InstanceError::JavaRuntimeMissing(java_id),
                 None => InstanceError::DB(e),
             },

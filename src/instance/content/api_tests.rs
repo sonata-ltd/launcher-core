@@ -639,20 +639,12 @@ async fn mutation_lease_prevents_launch_and_loader_install() {
         .activity()
         .reserve_content_change(fixture.id)
         .unwrap();
-    assert!(fixture
-        .instances
-        .launch(fixture.id)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("content installation"));
-    assert!(fixture
-        .instances
-        .install(fixture.id)
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("content installation"));
+    assert!(
+        matches!(fixture.instances.launch(fixture.id).await, Err(crate::instance::error::InstanceError::Busy(id)) if id == fixture.id)
+    );
+    assert!(
+        matches!(fixture.instances.install(fixture.id).await, Err(crate::instance::error::InstanceError::Busy(id)) if id == fixture.id)
+    );
     assert!(fixture
         .instances
         .activity()

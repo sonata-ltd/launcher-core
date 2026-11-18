@@ -9,7 +9,9 @@ use serde::de::DeserializeOwned;
 /// в отличие от Client::new, который у curl backend может вызвать panic.
 #[derive(Default)]
 pub struct JsonClient {
-    client: std::sync::OnceLock<Result<surf::Client, String>>,
+    client: std::sync::OnceLock<
+        Result<surf::Client, std::sync::Arc<dyn std::error::Error + Send + Sync>>,
+    >,
 }
 
 impl JsonClient {
@@ -17,7 +19,10 @@ impl JsonClient {
         let client = self
             .client
             .get_or_init(|| {
-                surf::Client::try_from(surf::Config::new()).map_err(|error| error.to_string())
+                surf::Client::try_from(surf::Config::new()).map_err(|error| {
+                    std::sync::Arc::new(error)
+                        as std::sync::Arc<dyn std::error::Error + Send + Sync>
+                })
             })
             .as_ref()
             .map_err(|error| JsonRequestError::Transport(error.clone()))?;
@@ -56,7 +61,13 @@ fn map_http_error(error: HttpError) -> JsonRequestError {
         HttpError::Status(status) => JsonRequestError::Status(status.into()),
         HttpError::SizeLimit(_) => JsonRequestError::SizeLimit,
         HttpError::Timeout => JsonRequestError::Timeout,
-        other => JsonRequestError::Transport(other.to_string()),
+        HttpError::Request(error) => JsonRequestError::Transport(std::sync::Arc::from(Box::<
+            dyn std::error::Error + Send + Sync,
+        >::from(
+            error.into_inner(),
+        ))),
+        HttpError::Body(error) => JsonRequestError::Body(error),
+        HttpError::InvalidUrl(error) => JsonRequestError::InvalidUrl(error),
     }
 }
 

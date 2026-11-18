@@ -13,6 +13,20 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum InstanceError {
+    #[error("instance {0} is busy")]
+    Busy(InstanceId),
+
+    #[error(transparent)]
+    Task(#[from] crate::utils::jobs::supervisor::TaskError),
+
+    #[error("instance worker did not deliver a result: {0}")]
+    WorkerResult(#[from] async_channel::RecvError),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    #[error(transparent)]
+    Manifest(#[from] crate::instance::download::manifest::ManifestError),
     #[error("Failed to create new instance: {0}")]
     CreationFailed(String),
 

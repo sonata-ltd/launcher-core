@@ -8,10 +8,13 @@ pub struct Requirement {
     pub exact_release: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ResolveError {
+    #[error("content dependency conflict")]
     Conflict,
+    #[error("content dependency search limit reached")]
     SearchLimit,
+    #[error("unsupported content dependency relation")]
     UnsupportedRelation,
 }
 

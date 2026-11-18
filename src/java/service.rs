@@ -179,7 +179,7 @@ impl JavaService {
         let java_use = self
             .retain_runtime(&crate::utils::cancellation::Cancellation::new())
             .await
-            .map_err(|error| crate::data::db::DbError::InvalidInput(error.to_string()))?;
+            .map_err(super::error::JavaError::Io)?;
         let result = self.discover_retained(requested, &java_use).await;
         java_use.finish(true);
         result
@@ -254,7 +254,12 @@ impl super::managed::registrar::RuntimeRegistrar for ManagedRegistrar {
             .registry
             .list_all()
             .await
-            .map_err(|error| super::managed::ManagedJavaError::new("registration", error))?
+            .map_err(|error| {
+                super::managed::ManagedJavaError::caused_by(
+                    super::managed::ManagedJavaErrorKind::Registration,
+                    error,
+                )
+            })?
             .into_iter()
             .find(|runtime| runtime.id == id))
     }
@@ -268,7 +273,12 @@ impl super::managed::registrar::RuntimeRegistrar for ManagedRegistrar {
             .registry
             .list_all()
             .await
-            .map_err(|error| super::managed::ManagedJavaError::new("registration", error))?
+            .map_err(|error| {
+                super::managed::ManagedJavaError::caused_by(
+                    super::managed::ManagedJavaErrorKind::Registration,
+                    error,
+                )
+            })?
             .into_iter()
             .find(|runtime| std::path::Path::new(&runtime.exec_path) == exec);
         if let Some(runtime) = existing {
@@ -276,10 +286,12 @@ impl super::managed::registrar::RuntimeRegistrar for ManagedRegistrar {
         }
         let mut new = NewJavaRuntime::from(detected);
         new.source = super::model::JavaSource::Managed;
-        self.registry
-            .register(new)
-            .await
-            .map_err(|error| super::managed::ManagedJavaError::new("registration", error))
+        self.registry.register(new).await.map_err(|error| {
+            super::managed::ManagedJavaError::caused_by(
+                super::managed::ManagedJavaErrorKind::Registration,
+                error,
+            )
+        })
     }
 
     fn validation_committed(&self, _runtime: &JavaRuntime) {
