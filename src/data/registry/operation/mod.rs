@@ -24,6 +24,10 @@ pub mod handle;
 pub mod message;
 pub mod snapshot;
 
+/// Session-local common job identity. Domain UUIDs remain durable installation
+/// identities and are deliberately not persisted as event-stream identities.
+pub type JobId = OperationId;
+
 use crate::utils::jobs::history::History;
 use message::status::Outcome;
 

@@ -14,6 +14,8 @@ pub enum OperationStage {
     ScanInstances,
     DownloadContent,
     PublishContent,
+    InstallJava,
+    ValidateJava,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

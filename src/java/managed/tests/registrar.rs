@@ -217,3 +217,52 @@ async fn panicking_registrar_persists_failed_and_shutdown_waits_for_failure_clea
     );
     assert!(crate::utils::process_pin::allows_cleanup(&service.root.join(".managed")).unwrap());
 }
+
+#[async_std::test]
+async fn validation_correlates_domain_uuid_with_common_terminal_history_without_persisting_session_id(
+) {
+    let (_dir, service, registrar) = fixture().await;
+    let id = registrar.operation;
+    assert!(service.job_id(id).await.unwrap().is_none());
+    service.validate_with(id, registrar).await.unwrap();
+    let job = service.job_id(id).await.unwrap().unwrap();
+    let view = service.operations.reconcile();
+    assert!(view.active.is_empty());
+    assert_eq!(view.completed[0].snapshot.id, job);
+    assert!(matches!(
+        view.completed[0].outcome,
+        crate::data::registry::operation::message::status::Outcome::Completed
+    ));
+    let loaded = ManagedJavaService::new(service.root.clone());
+    assert!(loaded.job_id(id).await.unwrap().is_none());
+    assert_eq!(
+        loaded.installation(id).await.unwrap().stage,
+        ManagedJavaStage::Ready
+    );
+}
+
+#[async_std::test]
+async fn failed_validation_has_common_failed_outcome_and_retry_has_a_distinct_job_id() {
+    let (_dir, service, registrar) = fixture().await;
+    let id = registrar.operation;
+    registrar.fail.store(true, Ordering::SeqCst);
+    service
+        .validate_with(id, registrar.clone())
+        .await
+        .unwrap_err();
+    let failed = service.job_id(id).await.unwrap().unwrap();
+    registrar.fail.store(false, Ordering::SeqCst);
+    service.validate_with(id, registrar).await.unwrap();
+    assert_ne!(service.job_id(id).await.unwrap().unwrap(), failed);
+    let view = service.operations.reconcile();
+    assert!(view.active.is_empty());
+    assert_eq!(view.completed.len(), 2);
+    assert!(matches!(
+        view.completed[0].outcome,
+        crate::data::registry::operation::message::status::Outcome::Failed
+    ));
+    assert!(matches!(
+        view.completed[1].outcome,
+        crate::data::registry::operation::message::status::Outcome::Completed
+    ));
+}

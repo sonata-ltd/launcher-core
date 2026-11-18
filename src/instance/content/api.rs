@@ -42,6 +42,15 @@ pub struct ContentJobSnapshot {
 }
 
 impl ContentJobSnapshot {
+    pub fn outcome(&self) -> Option<crate::data::registry::operation::message::status::Outcome> {
+        use crate::data::registry::operation::message::status::Outcome;
+        match self.phase {
+            ContentPhase::Completed => Some(Outcome::Completed),
+            ContentPhase::Cancelled => Some(Outcome::Cancelled),
+            ContentPhase::Failed => Some(Outcome::Failed),
+            ContentPhase::Downloading | ContentPhase::Publishing => None,
+        }
+    }
     pub fn active(&self) -> bool {
         matches!(
             self.phase,

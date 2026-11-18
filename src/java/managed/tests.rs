@@ -57,6 +57,7 @@ fn insert(service: &ManagedJavaService, record: Record) -> Uuid {
             record,
             cancel: Cancellation::new(),
             owned: true,
+            job_id: None,
         },
     );
     id

@@ -39,9 +39,11 @@ struct Entry {
     record: Record,
     cancel: Cancellation,
     owned: bool,
+    job_id: Option<crate::data::registry::operation::JobId>,
 }
 
 pub struct ManagedJavaService {
+    operations: Arc<crate::data::registry::operation::OperationRegistry>,
     tasks: crate::utils::jobs::supervisor::Tasks,
     root: PathBuf,
     database: Option<Arc<crate::data::db::Database>>,
@@ -53,8 +55,12 @@ pub struct ManagedJavaService {
 
 impl ManagedJavaService {
     pub fn new(root: PathBuf) -> Self {
+        let operations = Arc::new(crate::data::registry::operation::OperationRegistry::new(
+            crate::bus::EventBus::new(16),
+        ));
         Self {
-            tasks: Default::default(),
+            tasks: operations.tasks.clone(),
+            operations,
             root,
             database: None,
             entries: Mutex::new(HashMap::new()),
@@ -71,9 +77,27 @@ impl ManagedJavaService {
         }
     }
 
-    pub(crate) fn with_tasks(mut self, tasks: crate::utils::jobs::supervisor::Tasks) -> Self {
-        self.tasks = tasks;
+    pub(crate) fn with_operations(
+        mut self,
+        operations: Arc<crate::data::registry::operation::OperationRegistry>,
+    ) -> Self {
+        self.tasks = operations.tasks.clone();
+        self.operations = operations;
         self
+    }
+
+    /// Current-session correlation only; recovered records have no session job.
+    pub async fn job_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::data::registry::operation::JobId>> {
+        self.initialize().await?;
+        self.entries
+            .lock()
+            .expect("managed entries poisoned")
+            .get(&id)
+            .map(|entry| entry.job_id)
+            .ok_or_else(|| ManagedJavaError::new("not_found", id))
     }
 
     pub async fn catalog(&self, refresh: bool) -> Result<Vec<ManagedJavaPackage>> {
@@ -188,6 +212,13 @@ impl ManagedJavaService {
         self.initialize().await?;
         let admission = ownership::access(&self.root).await?;
         let id = Uuid::new_v4();
+        let job = self
+            .operations
+            .begin(
+                format!("java.managed.install:{id}"),
+                vec![crate::data::registry::operation::message::stage::OperationStage::InstallJava],
+            )
+            .owned_worker();
         let operation = ownership::operation(&self.root, id)?;
         {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
@@ -220,6 +251,7 @@ impl ManagedJavaService {
                     },
                     cancel: cancel.clone(),
                     owned: true,
+                    job_id: Some(job.id()),
                 },
             );
         }
@@ -246,7 +278,14 @@ impl ManagedJavaService {
                     ))
                 });
             if let Err(error) = result {
-                service.fail(id, error).await;
+                let error = service.fail(id, error).await;
+                job.finish(if error.code == "cancelled" {
+                    crate::data::registry::operation::message::status::Outcome::Cancelled
+                } else {
+                    crate::data::registry::operation::message::status::Outcome::Failed
+                });
+            } else {
+                job.finish(crate::data::registry::operation::message::status::Outcome::Completed);
             }
         });
         Ok(id)
@@ -344,6 +383,21 @@ impl ManagedJavaService {
             entry.owned = true;
             home
         };
+        let job = self
+            .operations
+            .begin(
+                format!("java.managed.validate:{id}"),
+                vec![
+                    crate::data::registry::operation::message::stage::OperationStage::ValidateJava,
+                ],
+            )
+            .owned_worker();
+        self.entries
+            .lock()
+            .expect("managed entries poisoned")
+            .get_mut(&id)
+            .expect("validated entry")
+            .job_id = Some(job.id());
         // Validation is owned by the core even if the caller's future is dropped.
         let service = Arc::clone(self);
         let (tx, rx) = async_channel::bounded(1);
@@ -416,6 +470,11 @@ impl ManagedJavaService {
             if let Ok(java_use) = java_use {
                 java_use.finish(true);
             }
+            job.finish(if result.is_ok() {
+                crate::data::registry::operation::message::status::Outcome::Completed
+            } else {
+                crate::data::registry::operation::message::status::Outcome::Failed
+            });
             let _ = tx.send(result).await;
         });
         rx.recv()
@@ -664,6 +723,7 @@ impl ManagedJavaService {
                     record,
                     cancel: Cancellation::new(),
                     owned: false,
+                    job_id: None,
                 },
             );
         }

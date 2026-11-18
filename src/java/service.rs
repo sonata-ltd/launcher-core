@@ -30,14 +30,17 @@ pub struct JavaService {
 
 impl JavaService {
     pub fn new(db: Arc<Database>, bus: EventBus, own_runtimes: PathBuf) -> Self {
-        Self::with_tasks(db, bus, own_runtimes, Default::default())
+        let operations = Arc::new(crate::data::registry::operation::OperationRegistry::new(
+            bus.clone(),
+        ));
+        Self::with_operations(db, bus, own_runtimes, operations)
     }
 
-    pub(crate) fn with_tasks(
+    pub(crate) fn with_operations(
         db: Arc<Database>,
         bus: EventBus,
         own_runtimes: PathBuf,
-        tasks: crate::utils::jobs::supervisor::Tasks,
+        operations: Arc<crate::data::registry::operation::OperationRegistry>,
     ) -> Self {
         let store: Arc<dyn JavaStore> =
             Arc::new(DbJavaStore::at(Arc::clone(&db), own_runtimes.clone()));
@@ -47,7 +50,8 @@ impl JavaService {
             registry: Arc::new(JavaRegistry::new(store, DEFAULT_JAVAREG_CACHE_SIZE)),
             bus,
             managed: Arc::new(
-                super::managed::ManagedJavaService::at(own_runtimes.clone(), db).with_tasks(tasks),
+                super::managed::ManagedJavaService::at(own_runtimes.clone(), db)
+                    .with_operations(operations),
             ),
             own_runtimes,
             discovery: Mutex::new(()),
