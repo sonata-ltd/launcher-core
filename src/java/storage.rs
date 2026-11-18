@@ -10,6 +10,10 @@ use crate::data::db::Result;
 use crate::java::model::{JavaRuntime, JavaSource, NewJavaRuntime};
 use crate::java::version::parse_major;
 
+#[cfg(test)]
+mod path_tests;
+pub(crate) mod paths;
+
 #[async_trait]
 pub trait JavaStore: Send + Sync {
     async fn insert(&self, java: &NewJavaRuntime) -> Result<JavaRuntime>;
@@ -80,15 +84,72 @@ impl<'a> Insertable<'a> {
 
 pub struct DbJavaStore {
     db: Arc<Database>,
+    root: Option<PathBuf>,
 }
 
 impl DbJavaStore {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self { db, root: None }
     }
 
-    fn row_to_model(row: JavaRow) -> JavaRuntime {
-        JavaRuntime {
+    pub fn at(db: Arc<Database>, root: PathBuf) -> Self {
+        Self {
+            db,
+            root: Some(root),
+        }
+    }
+
+    fn insertable<'a>(&self, new: &'a NewJavaRuntime) -> Result<Insertable<'a>> {
+        let mut row = Insertable::from_new(new)?;
+        if new.source == JavaSource::Managed {
+            if let Some(root) = &self.root {
+                let (exec, home) = paths::pair(
+                    root,
+                    new.exec_path.as_ref().expect("validated exec"),
+                    new.home_path.as_ref().expect("validated home"),
+                )
+                .ok_or_else(|| {
+                    crate::data::db::DbError::InvalidInput(
+                        "managed Java paths are outside the admitted root".into(),
+                    )
+                })?;
+                row.exec_path = exec;
+                row.home_path = home;
+            } else if !std::path::Path::new(&row.exec_path).is_absolute()
+                || !std::path::Path::new(&row.home_path).is_absolute()
+            {
+                return Err(crate::data::db::DbError::InvalidInput(
+                    "relative managed Java requires a root-aware store".into(),
+                ));
+            }
+        }
+        Ok(row)
+    }
+
+    fn row_to_model(&self, mut row: JavaRow) -> Result<JavaRuntime> {
+        if row.source == "managed"
+            && (!std::path::Path::new(&row.exec_path).is_absolute()
+                || !std::path::Path::new(&row.home_path).is_absolute())
+        {
+            let root = self.root.as_ref().ok_or_else(|| {
+                crate::data::db::DbError::InvalidInput(
+                    "managed Java relative placement requires a root-aware reader".into(),
+                )
+            })?;
+            paths::pair(
+                root,
+                std::path::Path::new(&row.exec_path),
+                std::path::Path::new(&row.home_path),
+            )
+            .ok_or_else(|| {
+                crate::data::db::DbError::InvalidInput(
+                    "invalid managed Java SQL placement pair".into(),
+                )
+            })?;
+            row.exec_path = paths::resolve(root, std::path::Path::new(&row.exec_path))?;
+            row.home_path = paths::resolve(root, std::path::Path::new(&row.home_path))?;
+        }
+        Ok(JavaRuntime {
             id: row.id,
             version: row.version,
             major: u32::try_from(row.major).unwrap_or(0),
@@ -97,14 +158,23 @@ impl DbJavaStore {
             home_path: row.home_path,
             vendor: row.vendor,
             source: JavaSource::parse(&row.source),
-        }
+        })
     }
 }
 
 #[async_trait]
 impl JavaStore for DbJavaStore {
     async fn insert(&self, new: &NewJavaRuntime) -> Result<JavaRuntime> {
-        let row = Insertable::from_new(new)?;
+        let row = self.insertable(new)?;
+        if self.root.is_some()
+            && self
+                .exists_by_path(new.exec_path.as_ref().expect("validated exec"))
+                .await?
+        {
+            return Err(crate::data::db::DbError::InvalidInput(
+                "Java executable already registered".into(),
+            ));
+        }
 
         let rec = sqlx::query_as!(
             JavaRow,
@@ -132,7 +202,7 @@ impl JavaStore for DbJavaStore {
         .fetch_one(&self.db.pool)
         .await?;
 
-        Ok(Self::row_to_model(rec))
+        self.row_to_model(rec)
     }
 
     async fn insert_many(&self, javas: &[NewJavaRuntime]) -> Result<Vec<JavaRuntime>> {
@@ -140,13 +210,33 @@ impl JavaStore for DbJavaStore {
         let mut out = Vec::with_capacity(javas.len());
 
         for new in javas {
-            let row = match Insertable::from_new(new) {
+            let row = match self.insertable(new) {
                 Ok(row) => row,
-                Err(e) => {
+                Err(e @ InsufficientData(_)) => {
                     tracing::debug!(error = %e, "skipping incomplete java runtime");
                     continue;
                 }
+                Err(error) => return Err(error),
             };
+
+            if let Some(root) = &self.root {
+                let existing: Vec<String> =
+                    sqlx::query_scalar("SELECT exec_path FROM java_runtimes")
+                        .fetch_all(&mut *tx)
+                        .await?;
+                let wanted = paths::relative(root, std::path::Path::new(&row.exec_path));
+                let original = new.exec_path.as_ref().expect("validated exec");
+                if existing.iter().any(|exec| {
+                    exec == &row.exec_path
+                        || std::path::Path::new(exec) == original
+                        || wanted.as_ref().is_some_and(|wanted| {
+                            paths::relative(root, std::path::Path::new(exec)).as_ref()
+                                == Some(wanted)
+                        })
+                }) {
+                    continue;
+                }
+            }
 
             let rec = sqlx::query_as!(
                 JavaRow,
@@ -176,7 +266,7 @@ impl JavaStore for DbJavaStore {
             .await?;
 
             if let Some(rec) = rec {
-                out.push(Self::row_to_model(rec));
+                out.push(self.row_to_model(rec)?);
             }
         }
 
@@ -198,10 +288,24 @@ impl JavaStore for DbJavaStore {
         .fetch_optional(&self.db.pool)
         .await?;
 
-        Ok(rec.map(Self::row_to_model))
+        rec.map(|row| self.row_to_model(row)).transpose()
     }
 
     async fn exists_by_path(&self, path: &PathBuf) -> Result<bool> {
+        if let Some(root) = &self.root {
+            let relative = paths::relative(root, path);
+            let canonical = path.canonicalize().ok();
+            return Ok(self.list_all().await?.into_iter().any(|runtime| {
+                let stored = std::path::Path::new(&runtime.exec_path);
+                stored == path
+                    || relative.as_ref().is_some_and(|relative| {
+                        paths::relative(root, stored).as_ref() == Some(relative)
+                    })
+                    || canonical.as_ref().is_some_and(|canonical| {
+                        stored.canonicalize().ok().as_ref() == Some(canonical)
+                    })
+            }));
+        }
         let path = path.as_path().to_string_lossy();
 
         let exists: bool = sqlx::query_scalar!(
@@ -226,7 +330,7 @@ impl JavaStore for DbJavaStore {
         .fetch_all(&self.db.pool)
         .await?;
 
-        Ok(rows.into_iter().map(Self::row_to_model).collect())
+        rows.into_iter().map(|row| self.row_to_model(row)).collect()
     }
 
     async fn backfill_major(&self) -> Result<()> {

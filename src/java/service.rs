@@ -25,11 +25,13 @@ pub struct JavaService {
     /// Held for the whole search. Auto-selection waits on it too, so an
     /// instance installed during the first-run search sees its results.
     discovery: Mutex<()>,
+    paths_initialized: Mutex<bool>,
 }
 
 impl JavaService {
     pub fn new(db: Arc<Database>, bus: EventBus, own_runtimes: PathBuf) -> Self {
-        let store: Arc<dyn JavaStore> = Arc::new(DbJavaStore::new(Arc::clone(&db)));
+        let store: Arc<dyn JavaStore> =
+            Arc::new(DbJavaStore::at(Arc::clone(&db), own_runtimes.clone()));
 
         Self {
             db,
@@ -40,7 +42,25 @@ impl JavaService {
             )),
             own_runtimes,
             discovery: Mutex::new(()),
+            paths_initialized: Mutex::new(false),
         }
+    }
+
+    /// Upgrades only proven internal managed SQL paths; external Java stays
+    /// external. This migration does not collect bytes or assert catalogue roots.
+    pub async fn initialize(&self) -> JavaResult<()> {
+        let mut initialized = self.paths_initialized.lock().await;
+        if !*initialized {
+            let report =
+                super::storage::paths::migrate(self.db.clone(), self.own_runtimes.clone()).await?;
+            tracing::debug!(
+                converted = report.converted,
+                unresolved = report.unresolved,
+                "managed Java SQL path upgrade"
+            );
+            *initialized = true;
+        }
+        Ok(())
     }
 
     pub(crate) fn managed_bus(&self) -> EventBus {
@@ -74,6 +94,7 @@ impl JavaService {
     /// The first-run search: does nothing once it has completed on this
     /// install. Returns how many runtimes it registered.
     pub async fn ensure_discovered(&self) -> JavaResult<usize> {
+        self.initialize().await?;
         let _guard = self.discovery.lock().await;
 
         self.registry.backfill_major().await?;
@@ -90,6 +111,7 @@ impl JavaService {
 
     /// Searches again whatever the flag says: the user asked for it.
     pub async fn rediscover(&self) -> JavaResult<usize> {
+        self.initialize().await?;
         let _guard = self.discovery.lock().await;
         self.discover_locked(true).await
     }

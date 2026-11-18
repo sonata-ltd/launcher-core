@@ -124,6 +124,9 @@ impl GlobalState {
             paths.java_runtimes().clone(),
         ));
         let java_registry = java_service.get_registry();
+        if let Err(error) = java_service.initialize().await {
+            tracing::debug!(%error, "managed Java SQL path upgrade deferred");
+        }
 
         let settings = Arc::new(SettingsService::new(Arc::clone(&db)));
 
