@@ -225,7 +225,7 @@ impl GlobalState {
         let (tx, rx) = async_channel::bounded(1);
         task::spawn(async move {
             let java = core.java();
-            let result = java.managed.validate(id, &java).await;
+            let result = java.validate_managed(id).await;
             if result.is_ok() {
                 core.services.instances.assign_missing().await;
             }

@@ -85,8 +85,19 @@ impl JavaService {
         Ok(())
     }
 
-    pub(crate) fn managed_bus(&self) -> EventBus {
-        self.bus.clone()
+    pub async fn validate_managed(
+        &self,
+        id: uuid::Uuid,
+    ) -> super::managed::Result<Arc<JavaRuntime>> {
+        self.managed
+            .validate_with(
+                id,
+                Arc::new(ManagedRegistrar {
+                    registry: self.registry.clone(),
+                    bus: self.bus.clone(),
+                }),
+            )
+            .await
     }
 
     pub(crate) async fn retain_runtime(
@@ -215,5 +226,71 @@ impl JavaService {
             .publish(JavaEvent::DiscoveryFinished { added, requested });
 
         Ok(added)
+    }
+}
+
+struct ManagedRegistrar {
+    registry: Arc<JavaRegistry>,
+    bus: EventBus,
+}
+
+#[async_trait::async_trait]
+impl super::managed::registrar::RuntimeRegistrar for ManagedRegistrar {
+    async fn runtime(&self, id: i64) -> super::managed::Result<Option<Arc<JavaRuntime>>> {
+        // Preserve refreshed-query semantics rather than serving a stale cache.
+        Ok(self
+            .registry
+            .list_all()
+            .await
+            .map_err(|error| super::managed::ManagedJavaError::new("registration", error))?
+            .into_iter()
+            .find(|runtime| runtime.id == id))
+    }
+
+    async fn register_managed(
+        &self,
+        detected: super::utils::DetectedJavaRuntime,
+    ) -> super::managed::Result<Arc<JavaRuntime>> {
+        let exec = detected.exec_path.clone();
+        let existing = self
+            .registry
+            .list_all()
+            .await
+            .map_err(|error| super::managed::ManagedJavaError::new("registration", error))?
+            .into_iter()
+            .find(|runtime| std::path::Path::new(&runtime.exec_path) == exec);
+        if let Some(runtime) = existing {
+            return Ok(runtime);
+        }
+        let mut new = NewJavaRuntime::from(detected);
+        new.source = super::model::JavaSource::Managed;
+        self.registry
+            .register(new)
+            .await
+            .map_err(|error| super::managed::ManagedJavaError::new("registration", error))
+    }
+
+    fn validation_committed(&self, _runtime: &JavaRuntime) {
+        self.bus.publish(JavaEvent::ListChanged);
+    }
+}
+
+// Compatibility belongs to the owning service, not to the managed domain.
+// Keep the former public call shape until the P11 consumer migration is complete.
+impl super::managed::ManagedJavaService {
+    #[deprecated(note = "Use JavaService::validate_managed or validate_with a RuntimeRegistrar")]
+    pub async fn validate(
+        self: &Arc<Self>,
+        id: uuid::Uuid,
+        java: &JavaService,
+    ) -> super::managed::Result<Arc<JavaRuntime>> {
+        self.validate_with(
+            id,
+            Arc::new(ManagedRegistrar {
+                registry: java.registry.clone(),
+                bus: java.bus.clone(),
+            }),
+        )
+        .await
     }
 }

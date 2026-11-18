@@ -5,6 +5,7 @@ pub(crate) mod gc;
 pub mod model;
 mod ownership;
 pub(crate) mod process;
+pub mod registrar;
 pub(crate) mod retention;
 #[cfg(test)]
 mod tests;
@@ -20,11 +21,7 @@ use std::{
 pub use uuid::Uuid as ManagedJavaId;
 use uuid::Uuid;
 
-use crate::java::{
-    model::{JavaRuntime, JavaSource, NewJavaRuntime},
-    service::JavaService,
-    utils::detect_properties_retained,
-};
+use crate::java::{model::JavaRuntime, utils::detect_properties_retained};
 use crate::utils::cancellation::Cancellation;
 pub use model::*;
 
@@ -226,23 +223,20 @@ impl ManagedJavaService {
         Ok(disposition)
     }
 
-    pub async fn validate(
+    pub async fn validate_with(
         self: &Arc<Self>,
         id: Uuid,
-        java: &JavaService,
+        registrar: Arc<dyn registrar::RuntimeRegistrar>,
     ) -> Result<Arc<JavaRuntime>> {
         self.initialize().await?;
         let snapshot = self.installation(id).await?;
         if snapshot.stage == ManagedJavaStage::Ready {
-            return java
-                .list_all()
-                .await
-                .map_err(|e| ManagedJavaError::new("registration", e))?
-                .into_iter()
-                .find(|j| Some(j.id) == snapshot.runtime_id)
-                .ok_or_else(|| {
-                    ManagedJavaError::new("registration", "Registered Java is missing")
-                });
+            let id = snapshot.runtime_id.ok_or_else(|| {
+                ManagedJavaError::new("registration", "Ready record has no runtime identity")
+            })?;
+            return registrar.runtime(id).await?.ok_or_else(|| {
+                ManagedJavaError::new("registration", "Registered Java is missing")
+            });
         }
         let admission = ownership::access(&self.root).await?;
         let operation = ownership::operation(&self.root, id)?;
@@ -257,15 +251,12 @@ impl ManagedJavaService {
         }
         let current = self.installation(id).await?;
         if current.stage == ManagedJavaStage::Ready {
-            return java
-                .list_all()
-                .await
-                .map_err(|e| ManagedJavaError::new("registration", e))?
-                .into_iter()
-                .find(|j| Some(j.id) == current.runtime_id)
-                .ok_or_else(|| {
-                    ManagedJavaError::new("registration", "Registered Java is missing")
-                });
+            let id = current.runtime_id.ok_or_else(|| {
+                ManagedJavaError::new("registration", "Ready record has no runtime identity")
+            })?;
+            return registrar.runtime(id).await?.ok_or_else(|| {
+                ManagedJavaError::new("registration", "Registered Java is missing")
+            });
         }
         let home = {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
@@ -292,8 +283,6 @@ impl ManagedJavaService {
         };
         // Validation is owned by the core even if the caller's future is dropped.
         let service = Arc::clone(self);
-        let registry = java.get_registry();
-        let bus = java.managed_bus();
         let (tx, rx) = async_channel::bounded(1);
         task::spawn(async move {
             let _operation = operation;
@@ -324,24 +313,7 @@ impl ManagedJavaService {
                         )
                     })?;
                 validate_detected(&home, &snapshot.package, &detected)?;
-                let exec = detected.exec_path.clone();
-                let existing = registry
-                    .list_all()
-                    .await
-                    .map_err(|e| ManagedJavaError::new("registration", e))?
-                    .into_iter()
-                    .find(|j| Path::new(&j.exec_path) == exec);
-                let runtime = match existing {
-                    Some(runtime) => runtime,
-                    None => {
-                        let mut new = NewJavaRuntime::from(detected);
-                        new.source = JavaSource::Managed;
-                        registry
-                            .register(new)
-                            .await
-                            .map_err(|e| ManagedJavaError::new("registration", e))?
-                    }
-                };
+                let runtime = registrar.register_managed(detected).await?;
                 let mut ready_record = service
                     .entries
                     .lock()
@@ -363,7 +335,7 @@ impl ManagedJavaService {
                 })
                 .await?;
                 service.update(id, |record| *record = ready_record);
-                bus.publish(crate::java::model::JavaEvent::ListChanged);
+                registrar.validation_committed(&runtime);
                 Ok(runtime)
             }
             .await;

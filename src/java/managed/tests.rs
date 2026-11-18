@@ -1,4 +1,5 @@
 use super::*;
+use crate::java::{model::JavaSource, service::JavaService};
 use futures::io::Cursor;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -7,6 +8,9 @@ use std::io::Write;
 mod bytes_tests;
 #[path = "tests/ownership.rs"]
 mod ownership_tests;
+#[cfg(unix)]
+#[path = "tests/registrar.rs"]
+mod registrar_tests;
 pub(super) use ownership_tests::{
     async_checkpoint as ownership_async_checkpoint, checkpoint as ownership_checkpoint,
 };
@@ -534,7 +538,7 @@ async fn validation_registers_managed_java_once_and_retains_failed_process_outpu
     std::fs::write(&exec, "#!/bin/sh\necho 'broken runtime' >&2\nexit 7\n").unwrap();
     std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
     let id = insert(&java.managed, rec);
-    let error = java.managed.validate(id, &java).await.unwrap_err();
+    let error = java.validate_managed(id).await.unwrap_err();
     assert!(error.details.contains("broken runtime"));
     assert!(error.details.contains('7'));
     assert_eq!(error.stage, Some(ManagedJavaStage::Validating));
@@ -550,12 +554,9 @@ async fn validation_registers_managed_java_once_and_retains_failed_process_outpu
     assert!(java.list_all().await.unwrap().is_empty());
     let arch = crate::java::select::host_arch();
     std::fs::write(&exec, format!("#!/bin/sh\ncat >&2 <<'JAVA'\njava.home = {}\njava.runtime.version = {}\njava.specification.version = 21\nos.arch = {arch}\njava.vendor = Test\nJAVA\n", home.display(), package.version)).unwrap();
-    let runtime = java.managed.validate(id, &java).await.unwrap();
+    let runtime = java.validate_managed(id).await.unwrap();
     assert_eq!(runtime.source, JavaSource::Managed);
-    assert_eq!(
-        java.managed.validate(id, &java).await.unwrap().id,
-        runtime.id
-    );
+    assert_eq!(java.validate_managed(id).await.unwrap().id, runtime.id);
     assert_eq!(java.list_all().await.unwrap().len(), 1);
     assert_eq!(
         java.managed.installation(id).await.unwrap().stage,
@@ -762,7 +763,7 @@ async fn offline_installation_flow_keeps_validation_running_after_caller_cancell
     let worker_java = Arc::clone(&java);
     let (abort, registration) = futures::future::AbortHandle::new_pair();
     let caller = task::spawn(futures::future::Abortable::new(
-        async move { worker_java.managed.validate(id, &worker_java).await },
+        async move { worker_java.validate_managed(id).await },
         registration,
     ));
     async_std::future::timeout(std::time::Duration::from_secs(2), async {
@@ -854,7 +855,7 @@ async fn validation_registers_actual_jvm_version_when_catalog_version_is_abbrevi
     std::fs::write(&exec, script).unwrap();
     std::fs::set_permissions(&exec, std::fs::Permissions::from_mode(0o755)).unwrap();
     let id = insert(&java.managed, rec);
-    let runtime = java.managed.validate(id, &java).await.unwrap();
+    let runtime = java.validate_managed(id).await.unwrap();
     assert_eq!(runtime.version, "27.0.1.0.2+1");
     assert_eq!(runtime.major, 27);
     assert_eq!(runtime.source, JavaSource::Managed);

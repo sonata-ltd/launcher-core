@@ -266,10 +266,7 @@ async fn validation_rechecks_durable_active_record_instead_of_claiming_stale_awa
             .join(format!("{id}.json")),
     )
     .unwrap();
-    assert_eq!(
-        java.managed.validate(id, &java).await.unwrap_err().code,
-        "busy"
-    );
+    assert_eq!(java.validate_managed(id).await.unwrap_err().code, "busy");
     assert_eq!(java.managed.cancel(id).await.unwrap_err().code, "busy");
     assert_eq!(
         fs::read(
@@ -403,7 +400,7 @@ async fn dropped_validation_caller_keeps_broad_pin_after_child_exit_until_ready_
     insert(&java.managed, rec);
     java.managed.persist(id).await.unwrap();
     let (entered, resume) = blocking_hook(dir.path(), "validation-ready");
-    let mut caller = Box::pin(java.managed.validate(id, &java));
+    let mut caller = Box::pin(java.validate_managed(id));
     match futures::future::select(Box::pin(entered.recv()), caller.as_mut()).await {
         futures::future::Either::Left((result, _)) => result.unwrap(),
         futures::future::Either::Right((result, _)) => {
@@ -597,10 +594,7 @@ async fn validation_rejects_escaping_executable_before_spawning_it() {
     fs::set_permissions(&external, fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink(&external, extract::executable(&home)).unwrap();
     let id = insert(&java.managed, rec);
-    assert_eq!(
-        java.managed.validate(id, &java).await.unwrap_err().code,
-        "storage"
-    );
+    assert_eq!(java.validate_managed(id).await.unwrap_err().code, "storage");
     assert!(!ran.exists());
     assert!(java.list_all().await.unwrap().is_empty());
 }
