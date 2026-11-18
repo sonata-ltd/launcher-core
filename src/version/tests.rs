@@ -93,6 +93,61 @@ async fn fresh_disk_cache_survives_new_catalog() {
 }
 
 #[async_std::test]
+async fn force_invalidation_removes_disk_cache_even_for_a_reopened_catalog() {
+    let directory = tempfile::tempdir().unwrap();
+    let (catalog, replies, _, _) = harness(Some(directory.path().into()));
+    replies.send(Ok(index("old"))).await.unwrap();
+    catalog.refresh_from(PROVIDER).await.unwrap();
+    catalog.invalidate_all().await.unwrap();
+    assert!(catalog.cached_snapshot(PROVIDER).await.unwrap().is_none());
+    let (reopened, _, _, _) = harness(Some(directory.path().into()));
+    assert!(reopened.cached_snapshot(PROVIDER).await.unwrap().is_none());
+}
+
+#[async_std::test]
+async fn invalidated_flight_cannot_restore_disk_memory_or_remove_the_new_flight() {
+    let directory = tempfile::tempdir().unwrap();
+    let (catalog, replies, requests, calls) = harness(Some(directory.path().into()));
+    let old_catalog = catalog.clone();
+    let old = async_std::task::spawn(async move { old_catalog.refresh_from(PROVIDER).await });
+    requests.recv().await.unwrap();
+    catalog.invalidate_all().await.unwrap();
+    let new_catalog = catalog.clone();
+    let new = async_std::task::spawn(async move { new_catalog.refresh_from(PROVIDER).await });
+    requests.recv().await.unwrap();
+    replies.send(Ok(index("old"))).await.unwrap();
+    assert!(
+        matches!(old.await, Err(VersionError::Shared(error)) if matches!(*error, VersionError::Invalidated))
+    );
+    assert!(catalog.cached_snapshot(PROVIDER).await.unwrap().is_none());
+    assert!(!cache::file_path(directory.path(), PROVIDER).exists());
+    replies.send(Ok(index("new"))).await.unwrap();
+    assert_eq!(new.await.unwrap().versions[0].id, "new");
+    assert_eq!(
+        catalog
+            .cached_snapshot(PROVIDER)
+            .await
+            .unwrap()
+            .unwrap()
+            .versions[0]
+            .id,
+        "new"
+    );
+    let (reopened, _, _, _) = harness(Some(directory.path().into()));
+    assert_eq!(
+        reopened
+            .cached_snapshot(PROVIDER)
+            .await
+            .unwrap()
+            .unwrap()
+            .versions[0]
+            .id,
+        "new"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[async_std::test]
 async fn old_and_future_disk_dates_are_stale() {
     for date in [
         Utc::now() - chrono::Duration::hours(7),

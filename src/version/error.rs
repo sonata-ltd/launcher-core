@@ -6,6 +6,8 @@ pub type Result<T> = std::result::Result<T, VersionError>;
 
 #[derive(Debug, Error)]
 pub enum VersionError {
+    #[error("version catalog generation was invalidated")]
+    Invalidated,
     #[error("failed to download index: {0}")]
     IndexUnavailable(String),
 

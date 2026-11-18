@@ -47,6 +47,7 @@ struct Stored {
 }
 
 struct Inner {
+    epoch: async_std::sync::Mutex<u64>,
     default_provider: Mutex<MetaProvider>,
     cache: Mutex<HashMap<MetaProvider, Stored>>,
     flights: Mutex<HashMap<MetaProvider, Flight>>,
@@ -79,6 +80,7 @@ impl VersionCatalog {
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
+                epoch: async_std::sync::Mutex::new(0),
                 default_provider: Mutex::new(default_provider),
                 cache: Mutex::new(HashMap::new()),
                 flights: Mutex::new(HashMap::new()),
@@ -90,8 +92,12 @@ impl VersionCatalog {
 
     pub async fn cached_snapshot(&self, provider: MetaProvider) -> Result<Option<CatalogSnapshot>> {
         provider.source()?;
+        let epoch = self.inner.epoch.lock().await;
         if let Some(snapshot) = self.memory(provider) {
             return Ok(Some(snapshot));
+        }
+        if *epoch != 0 {
+            return Ok(None);
         }
         let Some(root) = self.inner.cache_root.clone() else {
             return Ok(None);
@@ -133,6 +139,8 @@ impl VersionCatalog {
     pub async fn refresh_from(&self, provider: MetaProvider) -> Result<CatalogSnapshot> {
         provider.source()?;
         let flight = {
+            let epoch = self.inner.epoch.lock().await;
+            let generation = *epoch;
             let mut flights = self.inner.flights.lock().unwrap();
             if let Some(flight) = flights.get(&provider) {
                 flight.clone()
@@ -151,7 +159,7 @@ impl VersionCatalog {
                 let inner = Arc::clone(&self.inner);
                 // Dropping the UI future drops only its receiver clone.
                 async_std::task::spawn(async move {
-                    let result = AssertUnwindSafe(Self::fetch(&inner, provider))
+                    let result = AssertUnwindSafe(Self::fetch(&inner, provider, generation))
                         .catch_unwind()
                         .await
                         .unwrap_or_else(|_| {
@@ -162,9 +170,17 @@ impl VersionCatalog {
                         .map_err(Arc::new);
                     // Hold the map lock through send/remove: a joining caller
                     // either shares this result or starts a genuinely new request.
+                    let epoch = inner.epoch.lock().await;
+                    let result = if *epoch != generation {
+                        Err(Arc::new(VersionError::Invalidated))
+                    } else {
+                        result
+                    };
                     let mut flights = inner.flights.lock().unwrap();
                     let _ = sender.send(result);
-                    flights.remove(&provider);
+                    if *epoch == generation {
+                        flights.remove(&provider);
+                    }
                 });
                 flight
             }
@@ -172,7 +188,11 @@ impl VersionCatalog {
         flight.await.map_err(VersionError::Shared)
     }
 
-    async fn fetch(inner: &Inner, provider: MetaProvider) -> Result<CatalogSnapshot> {
+    async fn fetch(
+        inner: &Inner,
+        provider: MetaProvider,
+        generation: u64,
+    ) -> Result<CatalogSnapshot> {
         let bytes = inner.loader.load(provider).await?;
         let versions = Arc::new(provider.source()?.parse_index(&bytes)?);
         let raw = String::from_utf8(bytes)
@@ -186,6 +206,10 @@ impl VersionCatalog {
             source: CatalogSource::Network,
             warning: None,
         };
+        let epoch = inner.epoch.lock().await;
+        if *epoch != generation {
+            return Err(VersionError::Invalidated);
+        }
         // Validation completed before any attempt to replace the disk cache.
         if let Some(root) = inner.cache_root.clone() {
             if let Err(error) =
@@ -254,8 +278,32 @@ impl VersionCatalog {
         *self.inner.default_provider.lock().unwrap() = provider;
     }
 
-    pub fn invalidate_all(&self) {
-        self.inner.cache.lock().unwrap().clear();
+    /// Force invalidation includes memory, disk and in-flight generations.
+    /// Existing callers receive Invalidated, never a pre-invalidation snapshot.
+    pub async fn invalidate_all(&self) -> Result<()> {
+        let inner = self.inner.clone();
+        async_std::task::spawn(async move {
+            let mut epoch = inner.epoch.lock().await;
+            *epoch = epoch.wrapping_add(1);
+            inner.cache.lock().unwrap().clear();
+            inner.flights.lock().unwrap().clear();
+            if let Some(root) = inner.cache_root.clone() {
+                async_std::task::spawn_blocking(move || -> Result<()> {
+                    for provider in [MetaProvider::Prism, MetaProvider::Mojang] {
+                        let path = cache::file_path(&root, provider);
+                        match std::fs::remove_file(path) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(VersionError::Cache(error.to_string())),
+                        }
+                    }
+                    Ok(())
+                })
+                .await?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     fn default_provider(&self) -> MetaProvider {
