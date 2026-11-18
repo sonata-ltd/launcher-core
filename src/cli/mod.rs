@@ -1,38 +1,27 @@
-use std::{path::PathBuf, process::exit};
+use std::path::PathBuf;
 
 use sonata_launcher_core::{
     data::GlobalState,
-    instance::{model::InstanceId, settings::SettingsPatch},
+    instance::settings::SettingsPatch,
     java::model::{JavaSource, NewJavaRuntime},
     Config,
 };
 
+mod parse;
 mod progress;
-
-const USAGE: &str = "\
-sonata-launcher-core cli usage:
-
-    java-add <version> <exec_path> <home_path> [vendor]
-    java-discover
-    java-list
-    create   <name> <version> <loader> <manifest_url> <provider>
-    create-modded <name> <mc> <loader> <loader-version> <manifest-url> <provider>
-    register-cleanroom <release-descriptor.json>
-    register-cleanroom-url <loader-version> <official-mmc-zip-url> <java-majors-comma-separated>
-    set-java <instance_id> <java_id>
-    recovery-list <instance_id>
-    recovery-retry <instance_id>
-    recovery-abandon <instance_id> <operation_id> --keep-files
-    install  <instance_id>
-    launch   <instance_id>
-    list
-";
+pub(crate) use parse::ParseError;
+use parse::{Command, USAGE};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    dotenvy::dotenv().ok();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = parse::parse(&argv)?;
+    if matches!(command, Command::Help) {
+        print!("{USAGE}");
+        return Ok(());
+    }
+
+    dotenvy::dotenv().ok();
 
     let config = Config {
         database_url: std::env::var("DATABASE_URL").ok(),
@@ -43,7 +32,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let state = GlobalState::new(config).await?;
 
     let reporter = progress::spawn_reporter(&state.bus);
-    let outcome = dispatch(&state, &argv).await;
+    let outcome = dispatch(&state, command).await;
 
     state.shutdown().await;
 
@@ -52,17 +41,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     outcome
 }
 
-async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-    match argv {
-        ["java-add", version, exec_path, home_path, rest @ ..] => {
+async fn dispatch(
+    state: &GlobalState,
+    command: Command<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Command::JavaAdd {
+            version,
+            exec,
+            home,
+            vendor,
+        } => {
             let java = state
                 .add_java(NewJavaRuntime {
-                    version: Some((*version).to_string()),
+                    version: Some(version.to_string()),
                     major: None,
                     arch: None,
-                    exec_path: Some(PathBuf::from(exec_path)),
-                    home_path: Some(PathBuf::from(home_path)),
-                    vendor: rest.first().map(|v| (*v).to_string()),
+                    exec_path: Some(PathBuf::from(exec)),
+                    home_path: Some(PathBuf::from(home)),
+                    vendor: vendor.map(str::to_owned),
                     source: JavaSource::Manual,
                 })
                 .await?;
@@ -70,12 +67,12 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             println!("java runtime registered: id={} {}", java.id, java.version);
         }
 
-        ["java-discover"] => {
+        Command::JavaDiscover => {
             let added = state.rediscover_java().await?;
             println!("java runtimes found: {added}");
         }
 
-        ["java-list"] => {
+        Command::JavaList => {
             for java in state.java().list_all().await? {
                 println!(
                     "{:>3}  java {:<3} {:<14} {:<8} {:<10} {}",
@@ -89,56 +86,42 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             }
         }
 
-        ["create", name, version, manifest_url, provider] => {
-            let rec = state
-                .instances()
-                .create(
-                    (*name).to_string(),
-                    (*version).to_string(),
-                    (*manifest_url).to_string(),
-                    (*provider).to_string(),
-                )
-                .await?;
-
-            println!("instance created: id={} dir={}", rec.id, rec.dir);
-        }
-
-        ["create-modded", name, mc, loader, version, url, provider] => {
-            use sonata_launcher_core::modloader::model::{LoaderKind, LoaderSpec};
-            let kind = LoaderKind::ALL
-                .into_iter()
-                .find(|kind| kind.as_str() == *loader)
-                .ok_or("unknown loader")?;
+        Command::Create {
+            name,
+            version,
+            loader,
+            url,
+            provider,
+        } => {
             let rec = state
                 .instances()
                 .create_with_loader(
-                    (*name).into(),
-                    (*mc).into(),
-                    LoaderSpec {
-                        kind,
-                        version: Some((*version).into()),
-                    },
-                    (*url).into(),
-                    (*provider).into(),
+                    name.into(),
+                    version.into(),
+                    loader,
+                    url.into(),
+                    provider.into(),
                 )
                 .await?;
+
             println!("instance created: id={} dir={}", rec.id, rec.dir);
         }
-        ["register-cleanroom-url", version, url, majors] => {
-            let majors = majors
-                .split(',')
-                .map(str::parse::<u32>)
-                .collect::<Result<Vec<_>, _>>()?;
+
+        Command::RegisterCleanroomUrl {
+            version,
+            url,
+            majors,
+        } => {
             sonata_launcher_core::modloader::cleanroom::import_archive(
                 &state.modloaders().repository,
-                (*version).into(),
-                (*url).into(),
+                version.into(),
+                url.into(),
                 majors,
             )
             .await?;
             println!("Cleanroom release registered from archive");
         }
-        ["register-cleanroom", descriptor] => {
+        Command::RegisterCleanroom(descriptor) => {
             let bytes = async_std::fs::read(descriptor).await?;
             let release = serde_json::from_slice(&bytes)?;
             sonata_launcher_core::modloader::cleanroom::register(
@@ -148,13 +131,13 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             .await?;
             println!("Cleanroom release registered");
         }
-        ["set-java", id, java_id] => {
+        Command::SetJava { instance, java } => {
             let view = state
                 .options()
                 .patch_settings(
-                    parse_id(id)?,
+                    instance,
                     SettingsPatch {
-                        java_runtime: Some(Some(java_id.parse()?)),
+                        java_runtime: Some(Some(java)),
                         ..Default::default()
                     },
                 )
@@ -163,37 +146,40 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             println!("effective settings: {:#?}", view.effective);
         }
 
-        ["recovery-list", id] => {
-            for operation in state.content().pending_recovery(parse_id(id)?).await? {
+        Command::RecoveryList(id) => {
+            for operation in state.content().pending_recovery(id).await? {
                 println!("{operation}");
             }
         }
 
-        ["recovery-retry", id] => {
-            state.content().retry_recovery(parse_id(id)?).await?;
+        Command::RecoveryRetry(id) => {
+            state.content().retry_recovery(id).await?;
         }
 
-        ["recovery-abandon", id, operation, "--keep-files"] => {
+        Command::RecoveryAbandon {
+            instance,
+            operation,
+        } => {
             state
                 .content()
-                .abandon_recovery(parse_id(id)?, operation)
+                .abandon_recovery(instance, &operation.to_string())
                 .await?;
             println!("Recovery abandoned. Existing files were kept.");
         }
 
-        ["install", id] => {
-            state.instances().install(parse_id(id)?).await?;
+        Command::Install(id) => {
+            state.instances().install(id).await?;
             println!("install finished");
         }
 
-        ["launch", id] => {
-            state.instances().launch(parse_id(id)?).await?;
+        Command::Launch(id) => {
+            state.instances().launch(id).await?;
         }
 
-        ["list"] => {
+        Command::List => {
             let instances = state.instances().list().await?;
 
-            if instances.len() <= 0 {
+            if instances.is_empty() {
                 println!("no installed instances");
             } else {
                 for instance in instances {
@@ -202,15 +188,8 @@ async fn dispatch(state: &GlobalState, argv: &[&str]) -> Result<(), Box<dyn std:
             }
         }
 
-        _ => {
-            eprint!("{USAGE}");
-            exit(2);
-        }
+        Command::Help => unreachable!("help is handled before bootstrap"),
     }
 
     Ok(())
-}
-
-fn parse_id(raw: &str) -> Result<InstanceId, std::num::ParseIntError> {
-    raw.parse::<i64>().map(InstanceId::from)
 }
