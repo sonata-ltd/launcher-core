@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use sqlx::{QueryBuilder, Sqlite};
@@ -12,10 +9,10 @@ use crate::{
         download::{libs::LibInfo, sync::SyncStore},
         model::InstanceId,
     },
-    utils::files,
+    utils::{download::Downloadable, files},
 };
 
-const INSERT_CHUNK: usize = 150;
+const INSERT_CHUNK: usize = 100;
 
 pub struct DbLibStore {
     db: Arc<Database>,
@@ -28,87 +25,37 @@ impl DbLibStore {
 
     pub async fn link_instance(&self, id: InstanceId, libs: &[&LibInfo]) -> Result<(), DbError> {
         let mut tx = self.db.pool.begin().await?;
-
-        sqlx::query!("DELETE FROM instances_libraries WHERE instance_id = ?", id)
+        sqlx::query("DELETE FROM instance_library_placements WHERE instance_id = ?")
+            .bind(id)
             .execute(&mut *tx)
             .await?;
-
-        let mut position: i64 = 0;
-
-        for chunk in libs.chunks(INSERT_CHUNK) {
-            let mut lookup: QueryBuilder<Sqlite> =
-                QueryBuilder::new("SELECT id, hash FROM libraries WHERE hash IN (");
-
-            let mut list = lookup.separated(", ");
-
-            for lib in chunk {
-                list.push_bind(lib.hash().clone());
-            }
-
-            lookup.push(")");
-
-            let found: Vec<(i64, String)> = lookup.build_query_as().fetch_all(&mut *tx).await?;
-            let ids: HashMap<String, i64> = found
-                .into_iter()
-                .map(|(lib_id, hash)| (hash, lib_id))
-                .collect();
-
-            let mut rows: Vec<(i64, i64)> = Vec::with_capacity(chunk.len());
-
-            for lib in chunk {
-                let Some(library_id) = ids.get(lib.hash()) else {
-                    continue;
-                };
-
-                rows.push((*library_id, position));
-                position += 1;
-            }
-
-            if rows.is_empty() {
-                continue;
-            }
-
+        for (chunk_index, chunk) in libs.chunks(INSERT_CHUNK).enumerate() {
             let mut insert: QueryBuilder<Sqlite> = QueryBuilder::new(
-                "INSERT INTO instances_libraries (instance_id, library_id, position) ",
+                "INSERT INTO instance_library_placements(instance_id,position,hash,name,path,native,url) ",
             );
-
-            insert.push_values(&rows, |mut row, (library_id, at)| {
-                row.push_bind(id).push_bind(*library_id).push_bind(*at);
+            insert.push_values(chunk.iter().enumerate(), |mut row, (index, lib)| {
+                row.push_bind(id)
+                    .push_bind((chunk_index * INSERT_CHUNK + index) as i64)
+                    .push_bind(lib.hash())
+                    .push_bind(lib.name())
+                    .push_bind(lib.path())
+                    .push_bind(lib.is_native())
+                    .push_bind(lib.url());
             });
-
-            insert.push(
-                " ON CONFLICT(instance_id, library_id) DO UPDATE SET position = excluded.position",
-            );
-
             insert.build().execute(&mut *tx).await?;
         }
-
         tx.commit().await?;
-
         Ok(())
     }
 
     pub async fn for_instance(&self, id: InstanceId) -> Result<Vec<LibInfo>, DbError> {
-        let libs = sqlx::query_as!(
-            LibInfo,
-            r#"
-                SELECT
-                    l.hash   AS "hash!: String",
-                    l.name   AS "name!: String",
-                    l.path   AS "path!: String",
-                    l.url    AS "url!: String",
-                    l.native AS "native!: bool"
-                FROM instances_libraries il
-                JOIN libraries l ON l.id = il.library_id
-                WHERE il.instance_id = ?
-                ORDER BY il.position
-            "#,
-            id
+        Ok(sqlx::query_as(
+            "SELECT hash,name,path,url,native FROM instance_library_placements
+             WHERE instance_id=? ORDER BY position",
         )
+        .bind(id)
         .fetch_all(&self.db.pool)
-        .await?;
-
-        Ok(libs)
+        .await?)
     }
 }
 
@@ -116,41 +63,23 @@ impl DbLibStore {
 impl SyncStore<LibInfo> for DbLibStore {
     async fn cached(&self, wanted: &[LibInfo]) -> Result<HashSet<String>, DbError> {
         let wanted = wanted.to_vec();
-
         async_std::task::spawn_blocking(move || {
             let mut found = HashSet::new();
-
             for lib in wanted {
                 if files::matches(std::path::Path::new(lib.path()), lib.hash())
                     .map_err(|e| DbError::InvalidInput(e.to_string()))?
                 {
-                    found.insert(lib.hash().clone());
+                    found.insert(lib.cache_key());
                 }
             }
-
             Ok(found)
         })
         .await
     }
 
-    async fn register(&self, items: &[LibInfo]) -> Result<(), DbError> {
-        for chunk in items.chunks(INSERT_CHUNK) {
-            let mut qb: QueryBuilder<Sqlite> =
-                QueryBuilder::new("INSERT INTO libraries (name, hash, path, native, url) ");
-
-            qb.push_values(chunk, |mut row, lib| {
-                row.push_bind(lib.name().clone())
-                    .push_bind(lib.hash().clone())
-                    .push_bind(lib.path().clone())
-                    .push_bind(lib.is_native())
-                    .push_bind(lib.url().clone());
-            });
-
-            qb.push(" ON CONFLICT(hash) DO UPDATE SET name=excluded.name, path=excluded.path, native=excluded.native, url=excluded.url");
-
-            qb.build().execute(&self.db.pool).await?;
-        }
-
+    // A verified byte sequence alone has no semantic placement to register.
+    // The ordered instance snapshot is committed by link_instance after sync.
+    async fn register(&self, _: &[LibInfo]) -> Result<(), DbError> {
         Ok(())
     }
 }

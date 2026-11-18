@@ -119,7 +119,7 @@ impl Syncer {
         F: Fn(&T) -> PathBuf,
     {
         cancel.check()?;
-        let wanted = dedup_by_hash(wanted);
+        let wanted = dedup_by_destination(wanted);
         let total = wanted.len();
 
         let known = store.cached(&wanted).await;
@@ -127,7 +127,7 @@ impl Syncer {
         let known = known?;
         let (cached, missing): (Vec<T>, Vec<T>) = wanted
             .into_iter()
-            .partition(|item| known.contains(item.get_hash()));
+            .partition(|item| known.contains(&item.cache_key()));
 
         let cached_count = cached.len();
 
@@ -244,11 +244,11 @@ impl Syncer {
 #[cfg(test)]
 mod tests;
 
-fn dedup_by_hash<T: Downloadable>(items: Vec<T>) -> Vec<T> {
+fn dedup_by_destination<T: Downloadable>(items: Vec<T>) -> Vec<T> {
     let mut seen: HashSet<String> = HashSet::new();
 
     items
         .into_iter()
-        .filter(|item| seen.insert(item.get_hash().clone()))
+        .filter(|item| seen.insert(item.cache_key()))
         .collect()
 }

@@ -1,6 +1,55 @@
 use super::*;
 
 #[async_std::test]
+async fn library_placement_upgrade_preserves_legacy_order_paths_and_roles() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 11)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider) VALUES(1,'old','old','1.21','vanilla','https://example.invalid','prism')")
+        .execute(&pool).await.unwrap();
+    for (id, native, position) in [(1, false, 1), (2, true, 0)] {
+        sqlx::query("INSERT INTO libraries(id,name,hash,path,native,url) VALUES(?,'library',?,?,?,'https://example.invalid')")
+            .bind(id).bind(format!("{id:040x}")).bind(format!("/legacy/{id}.jar")).bind(native).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO instances_libraries(instance_id,library_id,position) VALUES(1,?,?)",
+        )
+        .bind(id)
+        .bind(position)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0012_instance_library_placements.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let rows: Vec<(String, bool)> =
+        sqlx::query_as("SELECT path,native FROM instance_library_placements ORDER BY position")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("/legacy/2.jar".into(), true),
+            ("/legacy/1.jar".into(), false)
+        ]
+    );
+    // The old tables are retained solely as a migration snapshot.
+    let old: i64 = sqlx::query_scalar("SELECT count(*) FROM libraries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(old, 2);
+}
+
+#[async_std::test]
 async fn provider_ownership_upgrade_preserves_files_and_enforces_all_mutations() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     let migrations = sqlx::migrate!("./migrations");

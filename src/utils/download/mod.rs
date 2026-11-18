@@ -117,6 +117,11 @@ pub trait Downloadable {
     fn get_name(&self) -> &String;
     fn get_hash(&self) -> &String;
     fn get_url(&self) -> &String;
+
+    /// Identity of the download destination, not necessarily of its bytes.
+    fn cache_key(&self) -> String {
+        self.get_hash().clone()
+    }
 }
 
 impl<T: Downloadable + Send + Sync + 'static> Download<T> {

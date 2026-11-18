@@ -94,6 +94,11 @@ impl Downloadable for LibInfo {
     fn get_url(&self) -> &String {
         self.url()
     }
+
+    fn cache_key(&self) -> String {
+        // Length prefix makes paths containing arbitrary delimiters unambiguous.
+        format!("{}:{}:{}", self.hash.len(), self.hash, self.path)
+    }
 }
 
 impl LibInfo {
@@ -169,11 +174,11 @@ impl<'a, 'b> LibsData<'a, 'b> {
         let mut unique = HashMap::new();
 
         for lib in &wanted {
-            if let Some(previous) = unique.insert(lib.hash().clone(), lib) {
-                if previous.path() != lib.path() || previous.is_native() != lib.is_native() {
+            if let Some(previous) = unique.insert(lib.path().clone(), lib) {
+                if previous.hash() != lib.hash() {
                     return Err(LibsSyncError::ManifestMalformed(
-                           "legacy DB cannot represent one hash at different paths/roles; use InstalledProfile".into(),
-                       ));
+                        "different library bytes target the same path".into(),
+                    ));
                 }
             }
         }
@@ -197,7 +202,7 @@ impl<'a, 'b> LibsData<'a, 'b> {
 
         let ordered: Vec<&LibInfo> = wanted
             .iter()
-            .filter(|lib| seen.insert(lib.hash().clone()))
+            .filter(|lib| seen.insert((lib.cache_key(), lib.is_native())))
             .collect();
 
         let classpath = ordered
@@ -262,6 +267,93 @@ fn construct_os_name() -> Result<&'static str, LibsSyncError> {
 #[cfg(test)]
 mod prepared_tests {
     use super::*;
+
+    #[async_std::test]
+    async fn identical_bytes_keep_distinct_instance_paths_roles_and_positions() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        for id in [1, 2] {
+            sqlx::query("INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider) VALUES(?,?,?,'1.21','vanilla','https://example.invalid','prism')")
+                .bind(id).bind(id.to_string()).bind(id.to_string()).execute(&db.pool).await.unwrap();
+        }
+        let operations = crate::data::registry::operation::OperationRegistry::new(
+            crate::bus::EventBus::new(128),
+        );
+        let first = temp.path().join("first.jar");
+        let second = temp.path().join("second.jar");
+        for path in [&first, &second] {
+            std::fs::write(path, b"same bytes").unwrap();
+        }
+        let hash = files::sha1_file(&first).unwrap();
+        let library = |path: &Path, native| {
+            LibInfo::new(
+                "fixture".into(),
+                hash.clone(),
+                path.into(),
+                "not-a-network-url".into(),
+                native,
+            )
+            .unwrap()
+        };
+        let first_libs = vec![
+            library(&first, false),
+            library(&second, true),
+            library(&first, true),
+        ];
+        let op = operations.begin("test".into(), vec![STAGE_TYPE]);
+        LibsData::sync_prepared(1.into(), first_libs.clone(), db.clone(), &op)
+            .await
+            .unwrap();
+        op.finish(Outcome::Completed);
+        let op = operations.begin("test".into(), vec![STAGE_TYPE]);
+        LibsData::sync_prepared(2.into(), vec![library(&second, false)], db.clone(), &op)
+            .await
+            .unwrap();
+        op.finish(Outcome::Completed);
+        assert_eq!(linked_libs(1.into(), db.clone()).await.unwrap(), first_libs);
+        assert_eq!(
+            linked_libs(2.into(), db.clone()).await.unwrap(),
+            vec![library(&second, false)]
+        );
+        // Removing B's snapshot must not delete A's roles or placements.
+        sqlx::query("DELETE FROM instances WHERE id=2")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(linked_libs(1.into(), db).await.unwrap(), first_libs);
+    }
+
+    #[async_std::test]
+    async fn missing_destination_is_not_a_cache_hit_for_identical_bytes_elsewhere() {
+        use crate::instance::download::sync::SyncStore;
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("existing.jar");
+        std::fs::write(&existing, b"bytes").unwrap();
+        let hash = files::sha1_file(&existing).unwrap();
+        let present = LibInfo::new(
+            "present".into(),
+            hash.clone(),
+            existing,
+            "unused".into(),
+            false,
+        )
+        .unwrap();
+        let missing = LibInfo::new(
+            "missing".into(),
+            hash,
+            temp.path().join("missing.jar"),
+            "unused".into(),
+            false,
+        )
+        .unwrap();
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        let found = DbLibStore::new(db)
+            .cached(&[present.clone(), missing.clone()])
+            .await
+            .unwrap();
+        assert!(found.contains(&present.cache_key()));
+        assert!(!found.contains(&missing.cache_key()));
+    }
 
     #[test]
     fn legacy_descriptor_paths_are_checked_without_reinterpreting_coordinates() {
