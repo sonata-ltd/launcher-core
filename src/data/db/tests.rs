@@ -1,6 +1,62 @@
 use super::*;
 
 #[async_std::test]
+async fn preparation_upgrade_preserves_pending_journals_and_restricts_new_states() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 13)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider) VALUES(1,'old','old','1.21','vanilla','https://example.invalid','prism')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO content_objects(id,sha256,size_bytes) VALUES(1,?,3)")
+        .bind(format!("{:064x}", 1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES('pending',1,'publishing','[]')").execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO content_object_leases(operation_id,object_id) VALUES('pending',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0014_content_preparation_leases.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let row: (String, Option<Vec<u8>>, i64) = sqlx::query_as("SELECT o.recovery_json,o.store_root,l.object_id FROM content_operations o JOIN content_object_leases l ON l.operation_id=o.id").fetch_one(&pool).await.unwrap();
+    assert_eq!(row, ("[]".into(), None, 1));
+    for statement in [
+        "INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES('bad',1,'preparing','[]')",
+        "INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES('bad',1,'completed','[]')",
+        "UPDATE content_operations SET state='preparing' WHERE id='pending'",
+    ] {
+        assert!(sqlx::query(statement).execute(&pool).await.is_err(), "{statement}");
+    }
+    sqlx::query("INSERT INTO content_operations(id,instance_id,state,recovery_json,store_root) VALUES('new',1,'preparing','[]',X'01')").execute(&pool).await.unwrap();
+    assert!(
+        sqlx::query("UPDATE content_operations SET state='completed' WHERE id='new'")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE content_operations SET state='publishing' WHERE id='new'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE content_operations SET state='completed' WHERE id IN ('new','pending')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(sqlx::query("DELETE FROM content_objects WHERE id=1")
+        .execute(&pool)
+        .await
+        .is_err());
+}
+
+#[async_std::test]
 async fn object_path_upgrade_keeps_identity_links_and_journal_leases() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     for migration in sqlx::migrate!("./migrations")

@@ -101,6 +101,382 @@ async fn prepared(fixture: &Fixture) -> (uuid::Uuid, Vec<PublishedFile>) {
     (id, files)
 }
 
+async fn cached_release(
+    fixture: &Fixture,
+) -> (
+    Arc<ObjectStore>,
+    super::store::StoredObject,
+    super::install::PlannedRelease,
+) {
+    use super::{
+        catalog::types::{CatalogRelease, DownloadFile},
+        install::PlannedRelease,
+        model::{ProjectKey, Provider, ReleaseKey},
+    };
+    let source = fixture.root.join("source.jar");
+    std::fs::write(&source, b"cached mod").unwrap();
+    let store = Arc::new(ObjectStore::new(fixture.paths.root().join("content-store")));
+    let object = store
+        .import_file(&source, None, &Cancellation::default())
+        .unwrap();
+    objects::register(&fixture.db, &object).await.unwrap();
+    let release = PlannedRelease {
+        adopt_existing: false,
+        release: CatalogRelease {
+            key: ReleaseKey {
+                project: ProjectKey {
+                    provider: Provider::Modrinth,
+                    project_id: "cached-project".into(),
+                },
+                release_id: "cached-release".into(),
+            },
+            title: "Cached mod".into(),
+            file: DownloadFile {
+                file_name: "cached.jar".into(),
+                url: "https://example.invalid/must-not-download.jar".into(),
+                size_bytes: object.digests.size_bytes,
+                sha1: Some(object.digests.sha1.clone()),
+                sha512: Some(object.digests.sha512.clone()),
+            },
+            dependencies: vec![],
+        },
+    };
+    (store, object, release)
+}
+
+#[async_std::test]
+async fn cache_selection_leases_bytes_before_verification_and_blocks_admission() {
+    let fixture = fixture().await;
+    let (store, object, _) = cached_release(&fixture).await;
+    let operation = uuid::Uuid::new_v4();
+    storage::begin_preparation(
+        &fixture.db,
+        operation,
+        fixture.id,
+        &store.root_key().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    assert!(fixture.instances.unregister(fixture.id).await.is_err());
+    assert!(storage::pending(&fixture.db, None)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let found = objects::cached_hash(
+        &fixture.db,
+        Some(&object.digests.sha1),
+        Some(&object.digests.sha512),
+        object.digests.size_bytes,
+        operation,
+    )
+    .await
+    .unwrap();
+    assert_eq!(found.as_deref(), Some(object.digests.sha256.as_str()));
+    let leased = storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap();
+    assert_eq!(leased.len(), 1);
+    let object_id = *leased.keys().next().unwrap();
+    assert!(sqlx::query("DELETE FROM content_objects WHERE id=?")
+        .bind(object_id)
+        .execute(&fixture.db.pool)
+        .await
+        .is_err());
+
+    storage::discard_preparation(&fixture.db, operation)
+        .await
+        .unwrap();
+    assert!(storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    assert_eq!(std::fs::read(object.path).unwrap(), b"cached mod");
+}
+
+#[async_std::test]
+async fn leased_registration_rolls_back_without_a_preparing_owner() {
+    let fixture = fixture().await;
+    let (store, object, _) = cached_release(&fixture).await;
+    let operation = uuid::Uuid::new_v4();
+    sqlx::query("DELETE FROM content_objects")
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert!(
+        objects::register_leased(&fixture.db, &object.digests, true, operation)
+            .await
+            .is_err()
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM content_objects")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+
+    storage::begin_preparation(
+        &fixture.db,
+        operation,
+        fixture.id,
+        &store.root_key().unwrap(),
+    )
+    .await
+    .unwrap();
+    let id = objects::register_leased(&fixture.db, &object.digests, false, operation)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage::leased_objects(&fixture.db, operation)
+            .await
+            .unwrap()
+            .get(&id),
+        Some(&object.digests.sha256)
+    );
+    storage::prepare(&fixture.db, operation, fixture.id, &[])
+        .await
+        .unwrap();
+    assert!(
+        objects::register_leased(&fixture.db, &object.digests, true, operation)
+            .await
+            .is_err()
+    );
+    let state: String = sqlx::query_scalar("SELECT store_state FROM content_objects WHERE id=?")
+        .bind(id)
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "external");
+}
+
+#[async_std::test]
+async fn cancellation_after_staging_releases_preparation_without_publishing() {
+    let fixture = fixture().await;
+    let (store, object, release) = cached_release(&fixture).await;
+    let signature = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let cancel = Cancellation::default();
+    let result = super::install::execute(
+        fixture.db.clone(),
+        store,
+        fixture.id,
+        &fixture.root,
+        operation,
+        &[release],
+        &signature,
+        &cancel,
+        |_, publishing| {
+            assert!(!publishing);
+            cancel.cancel();
+        },
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(!fixture.root.join("mods/cached.jar").exists());
+    assert_eq!(std::fs::read(object.path).unwrap(), b"cached mod");
+    assert!(storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+}
+
+#[async_std::test]
+async fn failed_cache_verification_discards_only_preparation() {
+    let fixture = fixture().await;
+    let (store, object, release) = cached_release(&fixture).await;
+    std::fs::write(object.path, b"corrupt").unwrap();
+    let signature = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    assert!(super::install::execute(
+        fixture.db.clone(),
+        store,
+        fixture.id,
+        &fixture.root,
+        operation,
+        &[release],
+        &signature,
+        &Default::default(),
+        |_, _| {}
+    )
+    .await
+    .is_err());
+    assert!(!fixture.root.join("mods/cached.jar").exists());
+    assert!(storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+}
+
+#[async_std::test]
+async fn failed_publication_preserves_journal_and_leases_for_recovery() {
+    let fixture = fixture().await;
+    let (store, _, release) = cached_release(&fixture).await;
+    let signature = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let target = fixture.root.join("mods/cached.jar");
+    assert!(super::install::execute(
+        fixture.db.clone(),
+        store,
+        fixture.id,
+        &fixture.root,
+        operation,
+        &[release],
+        &signature,
+        &Default::default(),
+        |_, publishing| {
+            if publishing {
+                std::fs::write(&target, b"user file").unwrap();
+            }
+        }
+    )
+    .await
+    .is_err());
+    assert_eq!(std::fs::read(&target).unwrap(), b"user file");
+    assert_eq!(
+        storage::leased_objects(&fixture.db, operation)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(storage::pending(&fixture.db, None).await.unwrap().len(), 1);
+    storage::discard_preparation(&fixture.db, operation)
+        .await
+        .unwrap();
+    assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+
+    std::fs::rename(&target, fixture.root.join("preserved.jar")).unwrap();
+    assert!(recovery::recover(
+        &fixture.db,
+        &fixture.paths,
+        &fixture.instances.get_registry(),
+        None
+    )
+    .await
+    .unwrap()
+    .is_empty());
+    assert_eq!(std::fs::read(target).unwrap(), b"cached mod");
+    assert!(storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[async_std::test]
+async fn cancellation_after_publication_intent_does_not_interrupt_commit() {
+    let fixture = fixture().await;
+    let (store, _, release) = cached_release(&fixture).await;
+    let signature = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let cancel = Cancellation::default();
+    super::install::execute(
+        fixture.db.clone(),
+        store,
+        fixture.id,
+        &fixture.root,
+        operation,
+        &[release],
+        &signature,
+        &cancel,
+        |_, publishing| {
+            if publishing {
+                cancel.cancel();
+            }
+        },
+    )
+    .await
+    .unwrap();
+    assert!(storage::operation_completed(&fixture.db, operation)
+        .await
+        .unwrap());
+    assert_eq!(
+        std::fs::read(fixture.root.join("mods/cached.jar")).unwrap(),
+        b"cached mod"
+    );
+    assert!(storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[async_std::test]
+async fn panic_leaves_preparation_leased_until_startup_with_the_matching_root_lock() {
+    use futures::FutureExt;
+    let fixture = fixture().await;
+    let (store, _, release) = cached_release(&fixture).await;
+    let signature = super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let releases = [release];
+    let cancel = Cancellation::default();
+    let future = super::install::execute(
+        fixture.db.clone(),
+        store,
+        fixture.id,
+        &fixture.root,
+        operation,
+        &releases,
+        &signature,
+        &cancel,
+        |_, _| panic!("simulated worker crash"),
+    );
+    assert!(std::panic::AssertUnwindSafe(future)
+        .catch_unwind()
+        .await
+        .is_err());
+    assert_eq!(
+        storage::leased_objects(&fixture.db, operation)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!fixture.root.join("mods/cached.jar").exists());
+
+    let other_store = ObjectStore::new(fixture.root.join("other-store"));
+    let other_operation = uuid::Uuid::new_v4();
+    storage::begin_preparation(
+        &fixture.db,
+        other_operation,
+        fixture.id,
+        &other_store.root_key().unwrap(),
+    )
+    .await
+    .unwrap();
+    let _service = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(storage::leased_objects(&fixture.db, operation)
+        .await
+        .unwrap()
+        .is_empty());
+    // A different store could still have a live worker; its preparation remains.
+    let operations: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM content_operations WHERE state='preparing'")
+            .fetch_all(&fixture.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(operations, [other_operation.to_string()]);
+}
+
 #[async_std::test]
 async fn mutation_lease_prevents_launch_and_loader_install() {
     let fixture = fixture().await;
@@ -523,6 +899,49 @@ async fn database_enforces_publication_journal_state_transitions() {
         .await
         .is_err());
     assert!(storage::operation_completed(&fixture.db, id).await.unwrap());
+}
+
+#[async_std::test]
+async fn preparation_can_only_publish_once_for_the_original_instance() {
+    let fixture = fixture().await;
+    let other = fixture
+        .instances
+        .create(
+            "Other".into(),
+            "1.21.1".into(),
+            "https://example.invalid/unused".into(),
+            "prism".into(),
+        )
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let store = ObjectStore::new(fixture.paths.root().join("content-store"));
+    storage::begin_preparation(
+        &fixture.db,
+        operation,
+        fixture.id,
+        &store.root_key().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(storage::prepare(&fixture.db, operation, other.id, &[])
+        .await
+        .is_err());
+    assert!(storage::complete(&fixture.db, operation, fixture.id, &[])
+        .await
+        .is_err());
+    storage::prepare(&fixture.db, operation, fixture.id, &[])
+        .await
+        .unwrap();
+    assert!(storage::prepare(&fixture.db, operation, fixture.id, &[])
+        .await
+        .is_err());
+    storage::complete(&fixture.db, operation, fixture.id, &[])
+        .await
+        .unwrap();
+    assert!(storage::prepare(&fixture.db, operation, fixture.id, &[])
+        .await
+        .is_err());
 }
 
 #[async_std::test]

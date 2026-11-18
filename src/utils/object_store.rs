@@ -18,6 +18,22 @@ pub struct ObjectStore {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn store_lock_and_preparation_key_follow_the_actual_root_through_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let actual = temp.path().join("actual");
+        let first = ObjectStore::new(actual.clone());
+        let lock = first.lock_exclusive().unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let second = ObjectStore::new(alias);
+        assert_eq!(first.root_key().unwrap(), second.root_key().unwrap());
+        assert!(second.lock_exclusive().is_err());
+        drop(lock);
+        assert!(second.lock_exclusive().is_ok());
+    }
+
     #[test]
     fn aliases_survive_root_relocation_and_never_substitute_unverified_bytes() {
         let temp = tempfile::tempdir().unwrap();
@@ -63,6 +79,28 @@ pub struct StoredObject {
 impl ObjectStore {
     pub fn new(root: PathBuf) -> Self {
         Self { root }
+    }
+
+    pub(crate) fn root_key(&self) -> io::Result<Vec<u8>> {
+        fs::create_dir_all(&self.root)?;
+        Ok(crate::utils::files::path_key(&fs::canonicalize(
+            &self.root,
+        )?))
+    }
+
+    /// Content ownership/cleanup locks the actual store, even if two launcher
+    /// roots reach it through different aliases. Runtime blob retention does
+    /// not yet use this lock and must not run concurrent collection.
+    pub(crate) fn lock_exclusive(&self) -> io::Result<fs::File> {
+        fs::create_dir_all(&self.root)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(self.root.join(".sonata-store.lock"))?;
+        lock.try_lock().map_err(io::Error::other)?;
+        Ok(lock)
     }
 
     pub fn path_for(&self, sha256: &str) -> io::Result<PathBuf> {

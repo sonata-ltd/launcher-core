@@ -53,6 +53,7 @@ pub struct InstanceContentService {
     // OS-lock защищает от второго обновлённого процесса с тем же корнем.
     // In-memory барьер InstanceService защищает launch и install внутри процесса.
     _root_lock: File,
+    _store_lock: File,
 }
 
 impl InstanceContentService {
@@ -74,6 +75,9 @@ impl InstanceContentService {
         })?;
         let registry = instances.get_registry();
         let activity = instances.activity();
+        let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
+        let store_lock = store.lock_exclusive()?;
+        storage::clear_abandoned_preparations(&db, &store.root_key()?).await?;
         match recovery::recover(&db, &paths, &registry, None).await {
             Ok(failures) => {
                 for failure in failures {
@@ -101,10 +105,11 @@ impl InstanceContentService {
             activity,
             paths: paths.clone(),
             db,
-            store: Arc::new(ObjectStore::new(paths.root().join("content-store"))),
+            store,
             plans: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             _root_lock: root_lock,
+            _store_lock: store_lock,
         })
     }
 

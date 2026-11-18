@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(rename_all = "snake_case")]
 enum OperationState {
+    Preparing,
     Publishing,
     Completed,
 }
@@ -36,12 +37,43 @@ pub(crate) async fn has_pending(
     instance: InstanceId,
 ) -> std::result::Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM content_operations WHERE instance_id=? AND state=?)",
+        "SELECT EXISTS(SELECT 1 FROM content_operations WHERE instance_id=? AND state IN (?,?))",
     )
     .bind(instance.get())
     .bind(OperationState::Publishing)
+    .bind(OperationState::Preparing)
     .fetch_one(&db.pool)
     .await
+}
+
+pub(super) async fn begin_preparation(
+    db: &Database,
+    id: Uuid,
+    instance: InstanceId,
+    store_root: &[u8],
+) -> Result<()> {
+    sqlx::query("INSERT INTO content_operations(id,instance_id,state,recovery_json,store_root) VALUES(?,?,'preparing',?,?)")
+        .bind(id.to_string()).bind(instance.get()).bind(journal::encode(&[])?).bind(store_root)
+        .execute(&db.pool).await?;
+    Ok(())
+}
+
+/// Only callable during startup while the corresponding store's root lock is held.
+/// Preparing never changes mods; publishing journals must not be discarded.
+pub(super) async fn clear_abandoned_preparations(db: &Database, store_root: &[u8]) -> Result<()> {
+    sqlx::query("DELETE FROM content_operations WHERE state='preparing' AND store_root=?")
+        .bind(store_root)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn discard_preparation(db: &Database, id: Uuid) -> Result<()> {
+    sqlx::query("DELETE FROM content_operations WHERE id=? AND state='preparing'")
+        .bind(id.to_string())
+        .execute(&db.pool)
+        .await?;
+    Ok(())
 }
 
 pub(super) async fn prepare(
@@ -51,8 +83,10 @@ pub(super) async fn prepare(
     files: &[PublishedFile],
 ) -> Result<()> {
     let mut transaction = db.pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES(?,?,?,?)",
+    let transition = sqlx::query(
+        "INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES(?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET state=excluded.state,recovery_json=excluded.recovery_json
+         WHERE content_operations.instance_id=excluded.instance_id AND content_operations.state='preparing'",
     )
     .bind(id.to_string())
     .bind(instance.get())
@@ -60,6 +94,9 @@ pub(super) async fn prepare(
     .bind(journal::encode(files)?)
     .execute(&mut *transaction)
     .await?;
+    if transition.rows_affected() != 1 {
+        return Err(ContentError::InvalidJournalId(id.to_string()));
+    }
     for file in files {
         sqlx::query(
             "INSERT OR IGNORE INTO content_object_leases(operation_id,object_id) VALUES(?,?)",

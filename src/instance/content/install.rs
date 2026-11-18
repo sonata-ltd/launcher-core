@@ -35,6 +35,40 @@ pub(super) async fn execute(
     cancel: &Cancel,
     progress: impl Fn(usize, bool),
 ) -> Result<()> {
+    cancel.check()?;
+    let identity = store.root_key()?;
+    storage::begin_preparation(&db, id, instance, &identity).await?;
+    let result = execute_preparing(
+        db.clone(),
+        store,
+        instance,
+        root,
+        id,
+        releases,
+        expected_signature,
+        cancel,
+        progress,
+    )
+    .await;
+    // On error/cancellation only preparing may be discarded. Once publishing,
+    // the durable journal and leases belong to recovery, not the worker future.
+    if let Err(error) = storage::discard_preparation(&db, id).await {
+        tracing::warn!(%id, %error, "could not release preparation leases");
+    }
+    result
+}
+
+async fn execute_preparing(
+    db: Arc<Database>,
+    store: Arc<ObjectStore>,
+    instance: InstanceId,
+    root: &Path,
+    id: Uuid,
+    releases: &[PlannedRelease],
+    expected_signature: &str,
+    cancel: &Cancel,
+    progress: impl Fn(usize, bool),
+) -> Result<()> {
     let mods = files::child(root, Path::new("mods"))?;
     fs::create_dir_all(&mods)?;
     // Временные записи лежат вне mods и на том же томе, что назначения.
@@ -62,7 +96,7 @@ pub(super) async fn execute(
                 Ok(hashes)
             })
             .await?;
-            let object_id = super::store::storage::register_external(&db, &hashes).await?;
+            let object_id = super::store::storage::register_leased(&db, &hashes, false, id).await?;
             (object_id, hashes.sha256, Placement::External)
         } else {
             let cached_hash = crate::instance::content::store::storage::cached_hash(
@@ -70,6 +104,7 @@ pub(super) async fn execute(
                 file.sha1.as_deref(),
                 file.sha512.as_deref(),
                 file.size_bytes,
+                id,
             )
             .await?;
             let cached_object = if let Some(hash) = cached_hash {
@@ -121,7 +156,7 @@ pub(super) async fn execute(
                 object
             };
             let object_id =
-                crate::instance::content::store::storage::register(&db, &object).await?;
+                super::store::storage::register_leased(&db, &object.digests, true, id).await?;
             let target = stage.path().join(&file.file_name);
             let source = object.path.clone();
             let token = cancel.clone();
