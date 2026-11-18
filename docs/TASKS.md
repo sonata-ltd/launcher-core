@@ -248,3 +248,23 @@ shadowing test helper, затем fixture identity deletion упёрся в immu
 fault injection теперь явно снимает trigger; expanded и final full прошли.
 Managed validation/game/installer process pins и replayable published GC — дальше;
 complete GC eligibility, real JVM/platform/GUI/power-loss ещё не PASS.
+
+`c9b8402` добавляет managed Java broad durable retention до production runtime
+selection/launch/install/discovery reads и independent pin каждого game/probe/Forge
+child. JavaUse держит shared `.managed` admission; discovery blocking scan получает
+clone capability. Validation owned worker сохраняет broad pin через probe, release
+reads, registration и Ready/failure record commit. Child completion не завершает
+broad pin, а broad completion не подтверждает unknown spawn/exit отдельного child.
+Game handoff/finish поддерживает несколько resource pins (libraries и Java), Forge
+сохраняет прежний generation pin и добавляет Java child pin. Install retention
+живёт через cleanup и последующий auto-selection; прежние публичные unscoped
+probe/finalize wrappers остаются для externally retained Java, не дают managed pin
+из raw path. Drop/kill-on-drop не пишут exited; nonzero exit и timeout освобождают
+child только после status/kill-wait confirmation. Ошибка spawn оставляет intent.
+13 новых regressions: broad/drop/cancel/owned-reader clone, independent unknown
+child, retained release fallback, probe success/failure/timeout/spawn/drop, multi-pin
+game handoff/failed spawn, Forge repeated children/cancel/drop и dropped validation
+после child exit до Ready commit. Полный Linux fmt/check/test/build:
+**510 passed, 0 failed, 1 ignored**, прежние warnings/ignore; логи
+core-java-pins-verified-{check,test,build}. Published Java GC остаётся выключенным;
+real JVM/descendants, external unscoped consumers/platform/manual/power-loss не PASS.

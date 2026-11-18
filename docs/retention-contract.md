@@ -528,6 +528,34 @@ barriers и реальный SQL write-lock probe. Existing process-exit fixture
 `/tmp/opencode/core-managed-roots-verified-{check,test,build}.log`.
 Это не real JVM/descendants, platform/GUI/manual или power-loss verification.
 
+### Managed Java process retention
+
+`c9b8402`: JavaRetention attach-ит DB owner и получает shared `.managed` admission
+перед broad ProcessPin. Production install/auto-selection/launch/discovery runtime
+reads начинаются после этого pin. JavaUse clone в blocking discovery scan сохраняет
+admission после drop caller. Managed validation имеет owned JavaUse до home reads;
+удержание живёт через probe, release fallback, SQL registration и Ready/failure
+record commit. Install завершает broad retention после cleanup/auto-selection.
+
+Каждый probe/game/Forge child получает отдельный ProcessPin: durable spawn intent
+до spawn, PID после spawn, exited только после подтверждённого status/kill-wait.
+Broad completion не завершает child pin; child exit не завершает broad reads.
+Game NativeDirectory передаёт/завершает все pins, не заменяет library pin Java pin.
+Forge generation pin сохранён. Drop future/kill-on-drop, unknown PID и spawn failure
+не подтверждают exit; live child после launcher exit защищён durable metadata.
+Public unscoped probe/finalize wrappers сохраняют совместимость для externally
+retained Java, но raw path не является managed retention capability. Более широкий
+consumer/API audit остаётся P11; JVM descendants и внешнее выполнение не проверены.
+
+13 новых regressions и прежние process-exit tests прошли: broad/drop/cancel/clone,
+unknown child после outer completion, retained release read, probe success/nonzero/
+timeout/failed spawn/drop, multi-pin game handoff/failed spawn, Forge multiple child/
+cancel/drop и validation caller drop между child exit и durable Ready commit.
+Полный Linux fmt/check/test/build: **510 passed, 0 failed, 1 ignored**;
+`/tmp/opencode/core-java-pins-verified-{check,test,build}.log`, прежние warnings.
+Published home/archive GC пока выключен; real JVM/descendants, Windows/macOS,
+GUI/manual, external unscoped callers и power-loss не объявлены PASS.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots

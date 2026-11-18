@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **497 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **510 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -186,6 +186,11 @@ Historical/ephemeral/unbound coverage не объявляется complete; unkn
 records/layouts, pending scratch и missing/replaced owners откладывают всю область.
 12 новых regressions, caller-drop SQL probe и sixth process-exit boundary прошли.
 Startup inspect не удаляет bytes/homes; process pins и GC остаются следующими.
+`c9b8402` реализует production managed Java pins для selection/launch/install,
+discovery и validation/Forge children. Broad operation и direct child имеют
+независимые durable records: confirmed child exit не отпускает outer reads/commit,
+outer completion не подтверждает unknown child. Game удерживает Java и libraries.
+13 новых regressions и полный Linux прогон прошли; published Java GC ещё выключен.
 Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.
