@@ -3,6 +3,12 @@ use futures::io::Cursor;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
+#[path = "tests/ownership.rs"]
+mod ownership_tests;
+pub(super) use ownership_tests::{
+    async_checkpoint as ownership_async_checkpoint, checkpoint as ownership_checkpoint,
+};
+
 fn package() -> ManagedJavaPackage {
     ManagedJavaPackage {
         id: "temurin-test".into(),
@@ -18,9 +24,10 @@ fn package() -> ManagedJavaPackage {
 }
 
 fn record(package: ManagedJavaPackage, stage: ManagedJavaStage) -> Record {
+    let id = Uuid::new_v4();
     Record {
         snapshot: ManagedJavaSnapshot {
-            id: Uuid::new_v4(),
+            id,
             created_at: chrono::Utc::now(),
             package,
             stage,
@@ -30,6 +37,7 @@ fn record(package: ManagedJavaPackage, stage: ManagedJavaStage) -> Record {
             error: None,
         },
         home: None,
+        owner: Some(ownership::Owner::new(id)),
     }
 }
 
@@ -40,9 +48,44 @@ fn insert(service: &ManagedJavaService, record: Record) -> Uuid {
         Entry {
             record,
             cancel: Cancellation::new(),
+            owned: true,
         },
     );
     id
+}
+
+fn dead_owner(id: Uuid) -> ownership::Owner {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "managed_owner_empty_process_fixture"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    child.wait().unwrap();
+    assert!(!crate::utils::process::may_be_alive(pid));
+    let mut value = serde_json::to_value(ownership::Owner::new(id)).unwrap();
+    value["pid"] = pid.into();
+    serde_json::from_value(value).unwrap()
+}
+
+fn create_staging(service: &ManagedJavaService, id: Uuid) {
+    let path = ownership::create_staging(&service.root, id, &ownership::Owner::new(id)).unwrap();
+    let owner = service
+        .entries
+        .lock()
+        .unwrap()
+        .get(&id)
+        .unwrap()
+        .record
+        .owner
+        .clone()
+        .unwrap();
+    std::fs::write(
+        path.join(".sonata-owner.json"),
+        serde_json::to_vec(&owner).unwrap(),
+    )
+    .unwrap();
 }
 
 fn assets() -> serde_json::Value {
@@ -325,7 +368,7 @@ async fn checksum_failure_is_persisted_and_partial_files_are_removed() {
         &service,
         record(package.clone(), ManagedJavaStage::Downloading),
     );
-    std::fs::create_dir_all(service.staging(id)).unwrap();
+    create_staging(&service, id);
     let error = service
         .install_archive(
             id,
@@ -365,7 +408,7 @@ async fn installation_waits_for_explicit_validation_and_survives_restart() {
         &service,
         record(package.clone(), ManagedJavaStage::Downloading),
     );
-    std::fs::create_dir_all(service.staging(id)).unwrap();
+    create_staging(&service, id);
     let archive = service.staging(id).join("archive.part");
     tar_fixture(&archive);
     service
@@ -398,8 +441,10 @@ async fn installation_waits_for_explicit_validation_and_survives_restart() {
 async fn interrupted_download_is_recovered_as_failure_and_cleaned() {
     let dir = tempfile::tempdir().unwrap();
     let service = ManagedJavaService::new(dir.path().into());
-    let id = insert(&service, record(package(), ManagedJavaStage::Downloading));
-    std::fs::create_dir_all(service.staging(id)).unwrap();
+    let mut rec = record(package(), ManagedJavaStage::Downloading);
+    rec.owner = Some(dead_owner(rec.snapshot.id));
+    let id = insert(&service, rec);
+    create_staging(&service, id);
     std::fs::write(service.staging(id).join("archive.part"), b"partial").unwrap();
     service.persist(id).await.unwrap();
     let recovered = ManagedJavaService::new(dir.path().into())
@@ -563,6 +608,7 @@ async fn interrupted_commit_recovers_installed_files_for_validation() {
     let dir = tempfile::tempdir().unwrap();
     let service = ManagedJavaService::new(dir.path().into());
     let mut rec = record(package(), ManagedJavaStage::Extracting);
+    rec.owner = Some(dead_owner(rec.snapshot.id));
     rec.home = Some(PathBuf::from("managed/committed/jre"));
     let home = dir.path().join(rec.home.as_ref().unwrap());
     std::fs::create_dir_all(home.join("bin")).unwrap();
@@ -667,10 +713,11 @@ async fn offline_installation_flow_keeps_validation_running_after_caller_cancell
     package.sha256 = format!("{:x}", Sha256::digest(&bytes));
     let mut rec = record(package.clone(), ManagedJavaStage::Downloading);
     rec.snapshot.id = id;
+    rec.owner = Some(ownership::Owner::new(id));
     rec.snapshot.total_bytes = Some(package.size);
     insert(&java.managed, rec);
     let staging = java.managed.staging(id);
-    fs::create_dir_all(&staging).await.unwrap();
+    create_staging(&java.managed, id);
     let archive = staging.join("archive.part");
     let mut output = fs::File::create(&archive).await.unwrap();
     let cancel = Cancellation::new();
@@ -711,6 +758,14 @@ async fn offline_installation_flow_keeps_validation_running_after_caller_cancell
     .unwrap();
     abort.abort();
     assert!(caller.await.is_err());
+    assert_eq!(
+        ownership::maintenance(dir.path()).err().unwrap().code,
+        "busy"
+    );
+    assert_eq!(
+        ownership::operation(dir.path(), id).err().unwrap().code,
+        "busy"
+    );
     fs::write(release, b"continue").await.unwrap();
     async_std::future::timeout(std::time::Duration::from_secs(2), async {
         while java.managed.installation(id).await.unwrap().stage == ManagedJavaStage::Validating {
@@ -724,6 +779,11 @@ async fn offline_installation_flow_keeps_validation_running_after_caller_cancell
     let registered = java.list_all().await.unwrap();
     assert_eq!(registered.len(), 1);
     assert_eq!(registered[0].source, JavaSource::Managed);
+    let finished = crate::utils::object_store::ObjectStore::new(dir.path().join(".managed"))
+        .maintenance(&Cancellation::new())
+        .await
+        .unwrap();
+    drop(finished);
     let recovered = ManagedJavaService::new(dir.path().into())
         .installation(id)
         .await

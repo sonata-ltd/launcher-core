@@ -1,6 +1,7 @@
 mod catalog;
 mod extract;
 pub mod model;
+mod ownership;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -27,11 +28,14 @@ pub use model::*;
 struct Record {
     snapshot: ManagedJavaSnapshot,
     home: Option<PathBuf>,
+    #[serde(default)]
+    owner: Option<ownership::Owner>,
 }
 
 struct Entry {
     record: Record,
     cancel: Cancellation,
+    owned: bool,
 }
 
 pub struct ManagedJavaService {
@@ -114,7 +118,15 @@ impl ManagedJavaService {
     }
 
     async fn start_package(self: &Arc<Self>, package: ManagedJavaPackage) -> Result<Uuid> {
+        let service = Arc::clone(self);
+        task::spawn(async move { service.start_package_owned(package).await }).await
+    }
+
+    async fn start_package_owned(self: &Arc<Self>, package: ManagedJavaPackage) -> Result<Uuid> {
+        self.initialize().await?;
+        let admission = ownership::access(&self.root).await?;
         let id = Uuid::new_v4();
+        let operation = ownership::operation(&self.root, id)?;
         let cancel = Cancellation::new();
         {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
@@ -143,8 +155,10 @@ impl ManagedJavaService {
                             error: None,
                         },
                         home: None,
+                        owner: Some(ownership::Owner::new(id)),
                     },
                     cancel: cancel.clone(),
+                    owned: true,
                 },
             );
         }
@@ -155,8 +169,12 @@ impl ManagedJavaService {
                 .remove(&id);
             return Err(error);
         }
+        #[cfg(test)]
+        tests::ownership_async_checkpoint(&self.root, "started").await;
         let service = Arc::clone(self);
         task::spawn(async move {
+            let _admission = admission;
+            let _operation = operation;
             let result = service.install(id, &package, &cancel).await;
             if let Err(error) = result {
                 service.fail(id, error).await;
@@ -181,6 +199,12 @@ impl ManagedJavaService {
                     | ManagedJavaStage::Cancelling
             ) {
                 return Ok(CancelDisposition::AlreadyFinished);
+            }
+            if !entry.owned {
+                return Err(ManagedJavaError::new(
+                    "busy",
+                    "Installation belongs to another or unknown owner",
+                ));
             }
             entry.cancel.cancel();
             entry.record.snapshot.stage = ManagedJavaStage::Cancelling;
@@ -207,6 +231,29 @@ impl ManagedJavaService {
                     ManagedJavaError::new("registration", "Registered Java is missing")
                 });
         }
+        let admission = ownership::access(&self.root).await?;
+        let operation = ownership::operation(&self.root, id)?;
+        // Another initialized service may have completed/started this operation
+        // since our snapshot. Never claim a stale Failed/AwaitingValidation entry.
+        if let Some(current) = read_record(&self.root, id)? {
+            let mut entries = self.entries.lock().expect("managed entries poisoned");
+            if let Some(entry) = entries.get_mut(&id) {
+                entry.record = current;
+                entry.owned = false;
+            }
+        }
+        let current = self.installation(id).await?;
+        if current.stage == ManagedJavaStage::Ready {
+            return java
+                .list_all()
+                .await
+                .map_err(|e| ManagedJavaError::new("registration", e))?
+                .into_iter()
+                .find(|j| Some(j.id) == current.runtime_id)
+                .ok_or_else(|| {
+                    ManagedJavaError::new("registration", "Registered Java is missing")
+                });
+        }
         let home = {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
             let entry = entries
@@ -226,6 +273,8 @@ impl ManagedJavaService {
             })?;
             entry.record.snapshot.stage = ManagedJavaStage::Validating;
             entry.record.snapshot.error = None;
+            entry.record.owner = Some(ownership::Owner::new(id));
+            entry.owned = true;
             home
         };
         // Validation is owned by the core even if the caller's future is dropped.
@@ -234,39 +283,69 @@ impl ManagedJavaService {
         let bus = java.managed_bus();
         let (tx, rx) = async_channel::bounded(1);
         task::spawn(async move {
+            let _admission = admission;
+            let _operation = operation;
             let result: Result<Arc<JavaRuntime>> = async {
                 service.persist(id).await?;
                 let snapshot = service.installation(id).await?;
-                let home = service.root.join(&home);
-                let detected = detect_properties(extract::executable(&home)).await
-                    .map_err(|e| ManagedJavaError::new("validation", format!("Executable: {}\nArguments: -XshowSettings:properties -version\n{e}", extract::executable(&home).display())))?;
+                let home = crate::utils::files::child(&service.root, &home).map_err(storage)?;
+                let executable = crate::utils::files::child(
+                    &home,
+                    Path::new(if cfg!(windows) {
+                        "bin/java.exe"
+                    } else {
+                        "bin/java"
+                    }),
+                )
+                .map_err(storage)?;
+                let detected = detect_properties(executable).await.map_err(|e| {
+                    ManagedJavaError::new(
+                        "validation",
+                        format!(
+                            "Executable: {}\nArguments: -XshowSettings:properties -version\n{e}",
+                            extract::executable(&home).display()
+                        ),
+                    )
+                })?;
                 validate_detected(&home, &snapshot.package, &detected)?;
                 let exec = detected.exec_path.clone();
-                let existing = registry.list_all().await.map_err(|e| ManagedJavaError::new("registration", e))?
-                    .into_iter().find(|j| Path::new(&j.exec_path) == exec);
+                let existing = registry
+                    .list_all()
+                    .await
+                    .map_err(|e| ManagedJavaError::new("registration", e))?
+                    .into_iter()
+                    .find(|j| Path::new(&j.exec_path) == exec);
                 let runtime = match existing {
                     Some(runtime) => runtime,
                     None => {
                         let mut new = NewJavaRuntime::from(detected);
                         new.source = JavaSource::Managed;
-                        registry.register(new).await.map_err(|e| ManagedJavaError::new("registration", e))?
+                        registry
+                            .register(new)
+                            .await
+                            .map_err(|e| ManagedJavaError::new("registration", e))?
                     }
                 };
-                let mut ready_record = service.entries.lock().expect("managed entries poisoned")
-                    .get(&id).map(|entry| entry.record.clone())
+                let mut ready_record = service
+                    .entries
+                    .lock()
+                    .expect("managed entries poisoned")
+                    .get(&id)
+                    .map(|entry| entry.record.clone())
                     .ok_or_else(|| ManagedJavaError::new("not_found", id))?;
                 ready_record.snapshot.stage = ManagedJavaStage::Ready;
                 ready_record.snapshot.runtime_id = Some(runtime.id);
                 ready_record.snapshot.error = None;
                 // Ready must also be recoverable from disk when polling callers
                 // observe it, including after the validation caller is dropped.
-                let directory = service.root.join(".managed/operations");
+                let root = service.root.clone();
                 let persisted_record = ready_record.clone();
-                task::spawn_blocking(move || write_record(&directory, &persisted_record)).await?;
+                task::spawn_blocking(move || write_record(&root, &persisted_record)).await?;
                 service.update(id, |record| *record = ready_record);
                 bus.publish(crate::java::model::JavaEvent::ListChanged);
                 Ok(runtime)
-            }.await;
+            }
+            .await;
             let result = match result {
                 Ok(runtime) => Ok(runtime),
                 Err(error) => Err(service.fail(id, error).await),
@@ -284,8 +363,10 @@ impl ManagedJavaService {
         package: &ManagedJavaPackage,
         cancel: &Cancellation,
     ) -> Result<()> {
-        let staging = self.staging(id);
-        fs::create_dir_all(&staging).await.map_err(storage)?;
+        let root = self.root.clone();
+        let owner = self.owner(id)?;
+        let staging =
+            task::spawn_blocking(move || ownership::create_staging(&root, id, &owner)).await?;
         let archive = staging.join("archive.part");
         let digest = transfer::download(package, &archive, cancel, |bytes| {
             self.update(id, |record| record.snapshot.downloaded_bytes = bytes);
@@ -328,7 +409,8 @@ impl ManagedJavaService {
         let final_relative = PathBuf::from("managed")
             .join(&package.id)
             .join(id.to_string());
-        let final_path = self.root.join(&final_relative);
+        let final_path =
+            crate::utils::files::child(&self.root, &final_relative).map_err(storage)?;
         let relative_home = home
             .strip_prefix(&destination)
             .map_err(|e| ManagedJavaError::new("extract", e))?;
@@ -340,9 +422,14 @@ impl ManagedJavaService {
             .await
             .map_err(storage)?;
         cancel.check()?;
+        if fs::symlink_metadata(&final_path).await.is_ok() {
+            return Err(storage("managed destination already exists"));
+        }
         fs::rename(&destination, &final_path)
             .await
             .map_err(storage)?;
+        #[cfg(test)]
+        tests::ownership_checkpoint(&self.root, "published");
         // The commit and cancellation request share the lock: exactly one wins.
         let cancelled = {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
@@ -359,8 +446,8 @@ impl ManagedJavaService {
             return cancel.check().map_err(Into::into);
         }
         self.persist(id).await?;
-        if let Err(error) = fs::remove_dir_all(&staging).await {
-            tracing::warn!(%id, %error, "failed to clean Java staging directory");
+        if let Err(error) = self.cleanup_staging(id).await {
+            tracing::warn!(%id, error = %error.diagnostic(), "failed to clean Java staging directory");
         }
         Ok(())
     }
@@ -391,12 +478,10 @@ impl ManagedJavaService {
     }
 
     async fn fail(&self, id: Uuid, mut error: ManagedJavaError) -> ManagedJavaError {
-        if let Err(cleanup) = fs::remove_dir_all(self.staging(id)).await {
-            if cleanup.kind() != std::io::ErrorKind::NotFound {
-                error
-                    .details
-                    .push_str(&format!("\nStaging cleanup failed: {cleanup}"));
-            }
+        if let Err(cleanup) = self.cleanup_staging(id).await {
+            error
+                .details
+                .push_str(&format!("\nStaging cleanup deferred: {}", cleanup.details));
         }
         self.update(id, |record| {
             error.stage = Some(record.snapshot.stage);
@@ -421,6 +506,23 @@ impl ManagedJavaService {
         self.root.join(".managed/staging").join(id.to_string())
     }
 
+    fn owner(&self, id: Uuid) -> Result<ownership::Owner> {
+        self.entries
+            .lock()
+            .expect("managed entries poisoned")
+            .get(&id)
+            .filter(|entry| entry.owned)
+            .and_then(|entry| entry.record.owner.clone())
+            .filter(|owner| owner.local(id))
+            .ok_or_else(|| storage("managed operation has no local owner"))
+    }
+
+    async fn cleanup_staging(&self, id: Uuid) -> Result<()> {
+        let owner = self.owner(id)?;
+        let root = self.root.clone();
+        task::spawn_blocking(move || ownership::cleanup_staging(&root, id, &owner, false)).await
+    }
+
     async fn persist(&self, id: Uuid) -> Result<()> {
         let record = self
             .entries
@@ -429,8 +531,8 @@ impl ManagedJavaService {
             .get(&id)
             .map(|e| e.record.clone())
             .ok_or_else(|| ManagedJavaError::new("not_found", id))?;
-        let directory = self.root.join(".managed/operations");
-        task::spawn_blocking(move || write_record(&directory, &record)).await
+        let root = self.root.clone();
+        task::spawn_blocking(move || write_record(&root, &record)).await
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -440,7 +542,11 @@ impl ManagedJavaService {
         }
         let root = self.root.clone();
         let records = task::spawn_blocking(move || -> Result<Vec<Record>> {
-            let directory = root.join(".managed/operations");
+            let _maintenance = ownership::maintenance(&root)?;
+            #[cfg(test)]
+            tests::ownership_checkpoint(&root, "recovery");
+            let directory = crate::utils::files::child(&root, Path::new(".managed/operations"))
+                .map_err(storage)?;
             std::fs::create_dir_all(&directory).map_err(storage)?;
             let mut records = Vec::new();
             for entry in std::fs::read_dir(&directory).map_err(storage)? {
@@ -448,24 +554,44 @@ impl ManagedJavaService {
                 if path.extension().and_then(|s| s.to_str()) != Some("json") {
                     continue;
                 }
-                let mut record: Record =
-                    serde_json::from_slice(&std::fs::read(&path).map_err(storage)?)
-                        .map_err(storage)?;
-                if record.home.as_ref().is_some_and(|p| {
-                    p.is_absolute()
-                        || p.components()
-                            .any(|c| matches!(c, std::path::Component::ParentDir))
-                }) {
+                let mut record: Record = serde_json::from_slice(
+                    &crate::utils::object_store::catalog::read_regular(&path, 1024 * 1024)
+                        .map_err(storage)?,
+                )
+                .map_err(storage)?;
+                if path.file_name().and_then(|name| name.to_str())
+                    != Some(&format!("{}.json", record.snapshot.id))
+                    || record.home.as_ref().is_some_and(|home| {
+                        home.to_string_lossy().contains('\\')
+                            || crate::utils::files::child(&root, home).is_err()
+                    })
+                {
                     return Err(ManagedJavaError::new(
                         "storage",
                         format!("Invalid Java home in {}", path.display()),
                     ));
                 }
+                // A terminal record can leave crash scratch, but never grants
+                // permission to delete its published home.
+                if let Some(owner) = record.owner.as_ref().filter(|owner| owner.dead(record.snapshot.id)) {
+                    if let Err(error) = ownership::cleanup_staging(&root, record.snapshot.id, owner, true) {
+                        tracing::warn!(id = %record.snapshot.id, error = %error.diagnostic(), "managed recovery deferred for unknown staging ownership");
+                        records.push(record);
+                        continue;
+                    }
+                }
                 if record.snapshot.stage.is_active() {
+                    if !record.owner.as_ref().is_some_and(|owner| owner.dead(record.snapshot.id)) {
+                        // Old writers did not publish operation ownership. Do not
+                        // overwrite their active record or touch private bytes.
+                        records.push(record);
+                        continue;
+                    }
                     let installed = record
                         .home
                         .as_ref()
-                        .is_some_and(|h| extract::executable(&root.join(h)).is_file());
+                        .and_then(|h| crate::utils::files::child(&root, &h.join(if cfg!(windows) { "bin/java.exe" } else { "bin/java" })).ok())
+                        .is_some_and(|exec| exec.is_file());
                     record.snapshot.stage = if installed {
                         ManagedJavaStage::AwaitingValidation
                     } else {
@@ -479,15 +605,7 @@ impl ManagedJavaService {
                             "The launcher stopped before installation completed",
                         ))
                     };
-                    let staging = root
-                        .join(".managed/staging")
-                        .join(record.snapshot.id.to_string());
-                    match std::fs::remove_dir_all(&staging) {
-                        Ok(()) => (),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                        Err(error) => return Err(storage(error)),
-                    }
-                    write_record(&directory, &record)?;
+                    write_record(&root, &record)?;
                 }
                 records.push(record);
             }
@@ -501,6 +619,7 @@ impl ManagedJavaService {
                 Entry {
                     record,
                     cancel: Cancellation::new(),
+                    owned: false,
                 },
             );
         }
@@ -513,9 +632,33 @@ fn storage(error: impl std::fmt::Display) -> ManagedJavaError {
     ManagedJavaError::new("storage", error)
 }
 
-fn write_record(directory: &Path, record: &Record) -> Result<()> {
-    std::fs::create_dir_all(directory).map_err(storage)?;
-    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(storage)?;
+fn read_record(root: &Path, id: Uuid) -> Result<Option<Record>> {
+    let path = crate::utils::files::child(
+        root,
+        &PathBuf::from(".managed/operations").join(format!("{id}.json")),
+    )
+    .map_err(storage)?;
+    let bytes = match crate::utils::object_store::catalog::read_regular(&path, 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(storage(error)),
+    };
+    let record: Record = serde_json::from_slice(&bytes).map_err(storage)?;
+    if record.snapshot.id != id
+        || record.home.as_ref().is_some_and(|home| {
+            home.to_string_lossy().contains('\\') || crate::utils::files::child(root, home).is_err()
+        })
+    {
+        return Err(storage("invalid managed operation identity or home"));
+    }
+    Ok(Some(record))
+}
+
+fn write_record(root: &Path, record: &Record) -> Result<()> {
+    let directory =
+        crate::utils::files::child(root, Path::new(".managed/operations")).map_err(storage)?;
+    std::fs::create_dir_all(&directory).map_err(storage)?;
+    let mut file = tempfile::NamedTempFile::new_in(&directory).map_err(storage)?;
     serde_json::to_writer_pretty(&mut file, record).map_err(storage)?;
     file.as_file().sync_all().map_err(storage)?;
     file.persist(directory.join(format!("{}.json", record.snapshot.id)))
