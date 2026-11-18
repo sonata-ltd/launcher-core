@@ -7,7 +7,16 @@ use crate::utils::cancellation::Cancellation;
 
 const LOCK: &str = ".sonata-access.lock";
 
-struct StoreLock(fs::File);
+pub(crate) struct StoreLock(fs::File);
+
+impl StoreLock {
+    /// Lifetime ownership needs the same explicit release as admission: a
+    /// fork/duplicated descriptor is not a new logical lock owner.
+    pub(crate) fn exclusive(file: fs::File) -> io::Result<Self> {
+        file.try_lock().map_err(lock_error)?;
+        Ok(Self(file))
+    }
+}
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
@@ -175,6 +184,22 @@ mod tests {
         assert!(store.try_access().is_ok());
         drop(inherited);
         drop(inherited_maintenance);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lifetime_owner_unlocks_even_while_a_duplicated_descriptor_remains_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ObjectStore::new(temp.path().join("store"));
+        let lock = store.lock_exclusive().unwrap();
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(store.lock_exclusive().is_err());
+        drop(lock);
+        let successor = store.lock_exclusive().unwrap();
+        drop(inherited);
+        assert!(store.lock_exclusive().is_err());
+        drop(successor);
+        assert!(store.lock_exclusive().is_ok());
     }
 
     #[cfg(unix)]

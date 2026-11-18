@@ -2,7 +2,7 @@
 //! HTTP и нормализация находятся в crate::instance::content::catalog, SQL — в storage.
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -58,8 +58,8 @@ pub struct InstanceContentService {
     jobs: Mutex<HashMap<Uuid, Job>>,
     // OS-lock защищает от второго обновлённого процесса с тем же корнем.
     // In-memory барьер InstanceService защищает launch и install внутри процесса.
-    _root_lock: File,
-    _store_lock: File,
+    _root_lock: crate::utils::object_store::StoreLock,
+    _store_lock: crate::utils::object_store::StoreLock,
 }
 
 impl InstanceContentService {
@@ -76,9 +76,10 @@ impl InstanceContentService {
             .create(true)
             .truncate(false)
             .open(paths.root().join(".launcher-content.lock"))?;
-        root_lock.try_lock().map_err(|_| {
-            ContentError::Invalid("Другой процесс лаунчера уже использует этот корень".into())
-        })?;
+        let root_lock =
+            crate::utils::object_store::StoreLock::exclusive(root_lock).map_err(|_| {
+                ContentError::Invalid("Другой процесс лаунчера уже использует этот корень".into())
+            })?;
         let registry = instances.get_registry();
         let activity = instances.activity();
         let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));

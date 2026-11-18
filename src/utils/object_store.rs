@@ -18,7 +18,7 @@ const IMPORT_PREFIX: &str = "import-";
 mod access;
 pub(crate) mod catalog;
 pub(crate) mod collection;
-pub(crate) use access::{StoreAccess, StoreMaintenance};
+pub(crate) use access::{StoreAccess, StoreLock, StoreMaintenance};
 
 pub(crate) struct ObjectStore {
     root: PathBuf,
@@ -188,7 +188,7 @@ impl ObjectStore {
 
     /// Content service ownership, distinct from the shared admission/exclusive
     /// maintenance barrier. Both follow the actual store through aliases.
-    pub(crate) fn lock_exclusive(&self) -> io::Result<fs::File> {
+    pub(crate) fn lock_exclusive(&self) -> io::Result<StoreLock> {
         fs::create_dir_all(&self.root)?;
         let lock = fs::OpenOptions::new()
             .read(true)
@@ -196,8 +196,7 @@ impl ObjectStore {
             .create(true)
             .truncate(false)
             .open(self.root.join(".sonata-store.lock"))?;
-        lock.try_lock().map_err(io::Error::other)?;
-        Ok(lock)
+        StoreLock::exclusive(lock)
     }
 
     /// Pure layout resolution: the returned path neither verifies nor pins bytes.
