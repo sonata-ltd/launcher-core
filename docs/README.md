@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **474 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **485 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -174,7 +174,12 @@ published homes пока не собираются. `2c38a4b` добавляет
 root-aware writers/readers и owned upgrade без смены IDs/FK/bytes/DB identity.
 External/unknown/old-root/conflicting pairs не присваиваются. 13 новых tests прошли,
 включая relocation, SQL process-exit boundaries и drop caller/SQL probe. Дальше —
-archive identity и published-home roots/pins; Q04/Q05 остаются P09.
+published-home roots/pins; Q04/Q05 остаются P09. `b63e623` подключает managed
+archives к общему immutable ObjectStore: actual SHA-256/exact size, cache install
+без transport, независимые homes и admission в blocking importer/extractor.
+10 новых tests и пятая ownership process-exit граница прошли. `c35d25e` исправляет
+выявленную full run гонку raw lifetime locks с inherited descriptor; deterministic
+regression и повторный full run прошли. Published Java archives/homes пока не GC.
 Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.

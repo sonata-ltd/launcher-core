@@ -40,7 +40,7 @@
 | D04 | P1/P2 — Два launch pipeline и три rule evaluator | P07 | Исправлено | Обе схемы установок используют один pipeline запуска, общий evaluator правил и одинаковую обработку аргументов и cwd. После проверки импортов ядра и GUI дублирующий launch builder удалён. Сравнительный тест старой и новой установки прошёл. Коммиты `03ed44b` и `3ea6a67`. |
 | D05 | P2 — Hash loops повторяются, контент читается многократно | P06 | Исправлено | Общий проход читает файл частями с отменой. CAS проверяет три хеша при копировании и валидирует staging перед публикацией без повторного чтения файла. Forge по-прежнему считает только SHA-1. Тест проверки staged-байтов и отсутствия публикации при отказе прошёл. Коммит `001025f`. |
 | D06 | P2 — Copy Maven tree почти одинаков в Forge/Cleanroom | P06 | Исправлено | Forge и Cleanroom вызывают один перенос дерева Maven с отменой и атомарной заменой файлов. Символические ссылки и специальные файлы отклоняются. Тесты замены, отмены и ссылок прошли. Коммит `4d037f1`. |
-| D07 | P2 — Несколько stores без единого контракта идентичности | P08 | Частично | `c20d4a9`: контент/runtime используют utils::object_store, SHA-256 bytes identity, verified SHA-1 hints и copy placements; `8a38e9d`/`9659851`: общий Collection и runtime blob GC. `081230b`: assets используют тот же immutable store, Mojang SHA-1 layout — изолированные placements; `534b79d`: отдельный asset CAS collector с complete owners/SQL/index/placement roots. SQL identity сохраняется, corrupt CAS не перезаписывается. Полный Linux fmt/check/test/build: 445 passed, 0 failed, 1 ignored. Managed Java ещё открыт; asset SHA-1/virtual projections не удаляются и требуют отдельной ownership migration для более агрессивного GC. |
+| D07 | P2 — Несколько stores без единого контракта идентичности | P08 | Частично | `c20d4a9`: content/runtime SHA-256 bytes identity и copy placements; `081230b`/`534b79d`: asset CAS и conservative collector; `b63e623`: managed Java archive CAS в `.managed/bytes`, fresh actual SHA-256/exact size verification, cache install без transport и независимые extracted homes. Все используют utils::object_store, aliases/URL/package metadata — hints/provenance, не proof bytes. Corrupt CAS не перезаписывается. Полный Linux fmt/check/test/build: 485 passed, 0 failed, 1 ignored; 10 новых archive tests. Published Java homes/archives roots/pins/GC ещё открыты; более агрессивный asset placement GC требует отдельной ownership migration. |
 | D08 | P2 — Нет GC поколений/CAS, sweeper не понимает новые partials | P08 | Частично | Scratch: `31d9d2f`/`7859409`/`9be8fe8`/`0493299`; admission: `2d37a3d`; content CAS GC: `aef7a11`; runtime pins/catalogue/generation replay: `dd96cdd`/`47dbe51`/`150e1f2`; общий Collection/blob GC: `8a38e9d`/`9659851`; asset CAS GC: `534b79d`; managed Java owned staging/recovery: `b5bc1e7`. Managed recovery требует dead versioned operation owner и совпадающий bounded regular marker; shared writers/exclusive recovery плюс per-operation lock. Drop caller сохраняет guard start/install/validation/recovery workers. Полный Linux fmt/check/test/build: 461 passed, 0 failed, 1 ignored; 16 новых managed tests, four process-exit boundaries и отдельный live writer process. Managed Java published homes/CAS ещё не собираются; SHA-1 asset placements не собираются. Реальные JVM/descendants, power-cut и Windows/macOS не проверены. Подробности — retention-contract.md. |
 | D09 | P2 — Одинаковые settings/rename меняют разные события | P05 | Исправлено | Оба сервисных пути публикуют одинаковые доменные события. Старые уведомления Scan и Option оставлены для совместимости. Тест событий патча прошёл. Коммит `7e0e7d1`. |
 | D10 | P2 — Platform normalization дублируется и расходится | P06 | Исправлено | Единый HostPlatform задаёт архитектуру и версию ОС. Установка и запуск получают один RuleContext. Названия Prism и Java остаются в своих адаптерах. Тест общего контекста и алиасов i386/i586 прошёл на Linux. Коммит `f938656`. |
@@ -206,3 +206,24 @@ retry, production service и actual process exit до/после SQL commit.
 Java: 83 passed, 1 ignored. Логи core-managed-paths-verified-{check,test,build}.
 Managed archive identity и published-home roots/pins/GC остаются следующим P08;
 catalogued DB paths не переносятся, реальные JVM/platform/manual ещё не проверены.
+
+`b63e623` продолжает D07: managed Java immutable archive bytes в `.managed/bytes`
+через общий ObjectStore. Cache lookup независимо перечитывает actual SHA-256/size,
+import проверяет bytes, даже если transport сообщил ожидаемый digest. URL/package
+role не меняют identity. Extracted homes — независимые placements, не hardlinks.
+Archive capability целиком передаётся blocking extractor; importer/extractor
+держат admission после drop caller. Startup sweep только dead-owned import scratch,
+published archives/homes не удаляются. Corrupt canonical bytes сохраняются и не
+выдаются за hit; escaping root/shard/staging/alias ancestors отвергаются до publish.
+10 новых tests: reuse/relocation, independent homes, production cache install без
+transport, actual digest/size, corrupt preservation/cancel, caller drop import и
+extract, dead/live/unknown scratch, escaping layouts и fresh direct lookup/admission.
+Ownership process-exit fixture расширен пятой границей archive-imported.
+Focused: **51 managed tests**. Первый full run: 483 passed, 1 failed, 1 ignored —
+прежний raw lifetime File lock пережил drop из-за descriptor, унаследованного
+параллельным fork. `c35d25e` применяет explicit-unlock StoreLock и к content lifetime
+root/store locks, добавляет deterministic duplicated-descriptor regression.
+Повторный полный Linux fmt/check/test/build: **485 passed, 0 failed, 1 ignored**;
+логи core-managed-bytes-verified-{check,test,build}, прежние warnings/ignore.
+Managed published-home ownership/catalogue/roots/process pins/GC — следующая работа;
+P08 остаётся частичным, P09–P11 не закрыты.

@@ -458,6 +458,38 @@ Archive identity, published-home ownership/retention/process pins/GC ещё от
 Historical catalogue DB paths не переносятся автоматически; platform/real JVM/
 GUI/manual/power-loss не объявлены проверенными.
 
+### Managed Java immutable archive bytes
+
+`b63e623`: общий ObjectStore обслуживает `.managed/bytes`; authoritative identity
+— actual SHA-256, exact byte count проверяется независимо от transport digest.
+Cache-hit требует fresh byte digest/size, не package/URL/alias metadata. Cache
+install без сети использует тот же extractor/publication flow. Package provenance
+не сливает разные homes: extracted placements независимы от CAS и друг от друга.
+Corrupt canonical object даёт miss и не перезаписывается даже valid reimport.
+Escaping root/object/shard/staging/alias ancestors отвергаются до publication;
+внешняя concurrent FS подмена не поддерживается.
+
+Archive владеет CAS StoreAccess, capability целиком переносится в blocking closure,
+а не только path (Rust precise capture). Caller drop importer/extractor не
+освобождает worker admission. Production owned job также удерживает `.managed`
+admission через stages/publication/cleanup. Direct ObjectStore lookup возвращает
+verified snapshot, не pin: после возврата caller обязан удерживать отдельный access.
+Startup под `.managed` maintenance sweep-ит только dead-owned archive import scratch;
+live/unknown scratch и все published archives/homes сохраняются. Это не complete
+Java roots gate; published archive/home GC здесь намеренно не включён.
+
+10 новых archive tests плюс прежние managed regressions; focused **51 passed**.
+Actual bytes/size, relocation/reuse, isolated homes, production no-transport cache,
+corrupt/cancel, admission caller drop import/extract, scratch и escaping layouts
+проверены. Existing process-exit fixture имеет пять границ, включая archive-imported.
+Первый full run выявил raw lifetime lock race при concurrent fork. `c35d25e`
+применяет explicit-unlock guard к content root/store lifetime locks, как прежде к
+admission; duplicated descriptor не является новым logical owner. Deterministic
+regression проверяет release и исключение второго владельца после смены owner.
+Повторный Linux fmt/check/test/build: **485 passed, 0 failed, 1 ignored**; логи
+`/tmp/opencode/core-managed-bytes-verified-{check,test,build}.log`.
+Process-crash/synthetic evidence, не real JVM/platform/GUI/power-loss PASS.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
