@@ -115,7 +115,7 @@ pub struct ManagedRecoveryDiagnostic {
     pub error: ManagedJavaError,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManagedInstallationsReport {
     pub installations: Vec<ManagedJavaSnapshot>,
     pub diagnostics: Vec<ManagedRecoveryDiagnostic>,
@@ -328,6 +328,22 @@ pub enum CancelDisposition {
 mod error_tests {
     use super::*;
     use std::error::Error;
+
+    #[test]
+    fn report_equality_observes_diagnostic_only_changes() {
+        let mut report = ManagedInstallationsReport {
+            installations: vec![],
+            diagnostics: vec![],
+        };
+        let unchanged = report.clone();
+        report.diagnostics.push(ManagedRecoveryDiagnostic {
+            path: "bad.json".into(),
+            operation: None,
+            error: ManagedJavaError::new(ManagedJavaErrorKind::RecoveryRecord, "corrupt"),
+        });
+        assert_ne!(report, unchanged);
+        assert_eq!(report, report.clone());
+    }
 
     #[test]
     fn retryability_uses_status_and_io_cause_not_domain_code_or_message() {

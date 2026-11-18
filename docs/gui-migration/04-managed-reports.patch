@@ -1,0 +1,759 @@
+diff --git a/src/bridge/errors.rs b/src/bridge/errors.rs
+new file mode 100644
+index 0000000..6ca4194
+--- /dev/null
++++ b/src/bridge/errors.rs
+@@ -0,0 +1,112 @@
++//! Presentation is a projection of typed causes, never a parser of error text.
++use sonata_launcher_core::{instance::error::InstanceError, java::error::JavaError};
++use std::{error::Error, fmt, sync::Arc};
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum UiErrorKind {
++    Busy,
++    RecoveryRequired,
++    Shutdown,
++    InvalidSettings,
++    Java,
++    Other,
++}
++
++#[derive(Debug, Clone)]
++pub struct UiError {
++    pub kind: UiErrorKind,
++    pub summary: String,
++    pub details: String,
++    pub source: Option<Arc<dyn Error + Send + Sync>>,
++}
++
++impl UiError {
++    fn caused_by<E: Error + Send + Sync + 'static>(
++        kind: UiErrorKind,
++        summary: String,
++        error: E,
++    ) -> Self {
++        let mut details = error.to_string();
++        let mut cause = error.source();
++        for _ in 0..32 {
++            let Some(error) = cause else { break };
++            details.push_str(&format!("\nCaused by: {error}"));
++            cause = error.source();
++        }
++        Self {
++            kind,
++            summary,
++            details,
++            source: Some(Arc::new(error)),
++        }
++    }
++}
++impl From<InstanceError> for UiError {
++    fn from(error: InstanceError) -> Self {
++        let (kind, summary) = match &error {
++            InstanceError::Busy(_) => (
++                UiErrorKind::Busy,
++                "Instance is busy; wait for the current operation".into(),
++            ),
++            InstanceError::ContentRecoveryPending(_) => (
++                UiErrorKind::RecoveryRequired,
++                "Content recovery is required before continuing".into(),
++            ),
++            InstanceError::Task(sonata_launcher_core::operations::TaskError::ShuttingDown) => (
++                UiErrorKind::Shutdown,
++                "Launcher is closing; new work is disabled".into(),
++            ),
++            InstanceError::InvalidMemoryRange { .. } | InstanceError::InvalidJvmArguments => {
++                (UiErrorKind::InvalidSettings, error.to_string())
++            }
++            _ => (UiErrorKind::Other, error.to_string()),
++        };
++        Self::caused_by(kind, summary, error)
++    }
++}
++impl From<JavaError> for UiError {
++    fn from(error: JavaError) -> Self {
++        Self::caused_by(UiErrorKind::Java, error.to_string(), error)
++    }
++}
++impl From<String> for UiError {
++    fn from(message: String) -> Self {
++        Self {
++            kind: UiErrorKind::Other,
++            summary: message.clone(),
++            details: message,
++            source: None,
++        }
++    }
++}
++impl From<&str> for UiError {
++    fn from(message: &str) -> Self {
++        message.to_owned().into()
++    }
++}
++impl fmt::Display for UiError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str(&self.summary)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn misleading_text_is_not_policy_and_typed_cause_survives_clone() {
++        let text: UiError = "launcher is shutting down; content recovery pending".into();
++        assert_eq!(text.kind, UiErrorKind::Other);
++        assert!(text.source.is_none());
++        let typed: UiError = InstanceError::ContentRecoveryPending(7.into()).into();
++        let copy = typed.clone();
++        assert_eq!(copy.kind, UiErrorKind::RecoveryRequired);
++        assert!(matches!(
++            copy.source.unwrap().downcast_ref::<InstanceError>(),
++            Some(InstanceError::ContentRecoveryPending(_))
++        ));
++        let shutdown: UiError =
++            InstanceError::Task(sonata_launcher_core::operations::TaskError::ShuttingDown).into();
++        assert_eq!(shutdown.kind, UiErrorKind::Shutdown);
++    }
++}
+diff --git a/src/bridge/mod.rs b/src/bridge/mod.rs
+index c69fb60..cc8da43 100644
+--- a/src/bridge/mod.rs
++++ b/src/bridge/mod.rs
+@@ -68,6 +68,7 @@ pub mod run;
+ pub use run::{launch, runs};
+ 
+ pub mod content;
++pub mod errors;
+ pub mod lifecycle;
+ 
+ /// Registry key. `Registry` indexes by `TypeId`, so a bare `Arc<GlobalState>`
+diff --git a/src/windows/java_runtime_selection/installed.rs b/src/windows/java_runtime_selection/installed.rs
+index ea6b9e2..40d791e 100644
+--- a/src/windows/java_runtime_selection/installed.rs
++++ b/src/windows/java_runtime_selection/installed.rs
+@@ -181,7 +181,7 @@ mod tests {
+             "applied selection"
+         );
+         let _ = selection.begin_save(1);
+-        selection.finish_save(1, Err("very long failure message ".repeat(20)));
++        selection.finish_save(1, Err("very long failure message ".repeat(20).into()));
+         assert_eq!(
+             geometry(&runtimes, &selection, &mut tree),
+             baseline,
+diff --git a/src/windows/java_runtime_selection/managed.rs b/src/windows/java_runtime_selection/managed.rs
+index 45aa832..0a46f2e 100644
+--- a/src/windows/java_runtime_selection/managed.rs
++++ b/src/windows/java_runtime_selection/managed.rs
+@@ -22,8 +22,9 @@ use sonata_launcher_core::{
+     instance::model::InstanceId,
+     java::{
+         managed::{
+-            ManagedJavaError, ManagedJavaId, ManagedJavaPackage, ManagedJavaSnapshot,
+-            ManagedJavaStage,
++            ManagedInstallationsReport, ManagedJavaCatalog, ManagedJavaCatalogWarning,
++            ManagedJavaError, ManagedJavaErrorKind, ManagedJavaId, ManagedJavaPackage,
++            ManagedJavaSnapshot, ManagedJavaStage, ManagedRecoveryDiagnostic,
+         },
+         model::JavaRuntime,
+     },
+@@ -39,11 +40,11 @@ use super::selection::RuntimeSelection;
+ 
+ #[derive(Debug, Clone)]
+ pub enum Message {
+-    CatalogLoaded(Result<Vec<ManagedJavaPackage>, ManagedJavaError>),
++    CatalogLoaded(Result<ManagedJavaCatalog, ManagedJavaError>),
+     Refresh,
+     Install(String),
+     Started(String, Result<ManagedJavaId, ManagedJavaError>),
+-    Snapshots(Result<Vec<ManagedJavaSnapshot>, ManagedJavaError>),
++    Snapshots(Result<ManagedInstallationsReport, ManagedJavaError>),
+     Cancel(ManagedJavaId),
+     Cancelled(ManagedJavaId, Result<(), ManagedJavaError>),
+     Validate(ManagedJavaId),
+@@ -61,6 +62,8 @@ pub struct Managed {
+     catalog_loaded: bool,
+     packages: Vec<ManagedJavaPackage>,
+     installations: Vec<ManagedJavaSnapshot>,
++    catalog_warnings: Vec<ManagedJavaCatalogWarning>,
++    recovery_diagnostics: Vec<ManagedRecoveryDiagnostic>,
+     // A request stays pending until polling observes the installation returned by core.
+     starting_packages: HashSet<String>,
+     started_installations: HashMap<String, ManagedJavaId>,
+@@ -77,7 +80,7 @@ impl Managed {
+         self.loading = true;
+ 
+         Task::perform(
+-            async move { core.java().managed.catalog(refresh).await },
++            async move { core.java().managed.catalog_report(refresh).await },
+             Message::CatalogLoaded,
+         )
+     }
+@@ -88,9 +91,10 @@ impl Managed {
+             Message::CatalogLoaded(result) => {
+                 self.loading = false;
+                 match result {
+-                    Ok(packages) => {
++                    Ok(report) => {
+                         self.catalog_loaded = true;
+-                        self.packages = packages;
++                        self.packages = report.packages;
++                        self.catalog_warnings = report.warnings;
+                         self.error = None;
+                     }
+                     Err(error) => self.error = Some(error),
+@@ -125,7 +129,9 @@ impl Managed {
+                 }
+             },
+             Message::Snapshots(result) => match result {
+-                Ok(snapshots) => {
++                Ok(report) => {
++                    let snapshots = report.installations;
++                    self.recovery_diagnostics = report.diagnostics;
+                     self.started_installations.retain(|package, id| {
+                         let observed = snapshots.iter().any(|snapshot| snapshot.id == *id);
+                         if observed {
+@@ -222,7 +228,11 @@ impl Managed {
+     }
+ 
+     pub(super) fn is_initial_catalog_load(&self) -> bool {
+-        self.loading && !self.catalog_loaded && self.packages.is_empty()
++        self.loading
++            && !self.catalog_loaded
++            && self.packages.is_empty()
++            && self.installations.is_empty()
++            && self.recovery_diagnostics.is_empty()
+     }
+ 
+     pub fn view<'a>(
+@@ -247,10 +257,35 @@ impl Managed {
+             content = content.push(self.view_package(kit, package, selection));
+         }
+ 
++        for warning in &self.catalog_warnings {
++            content = content.push(
++                column![
++                    text(format!(
++                        "Java {} catalog is unavailable; other releases remain usable",
++                        warning.major
++                    )),
++                    kit.button(
++                        Button::new("Catalog details")
++                            .hierarchy(ButtonHierarchy::Tertiary)
++                            .on_press(Message::Details(warning.error.diagnostic()))
++                    ),
++                ]
++                .spacing(8),
++            );
++        }
++        for diagnostic in &self.recovery_diagnostics {
++            content = content.push(column![
++                text("A managed Java recovery record could not be read. Files are preserved; collection is blocked."),
++                kit.button(Button::new("Recovery details").hierarchy(ButtonHierarchy::Secondary).on_press(Message::Details(format!("Record: {}\nInstallation: {:?}\n\n{}", diagnostic.path.display(), diagnostic.operation, diagnostic.error.diagnostic())))),
++            ].spacing(8));
++        }
++
+         if self.packages.is_empty()
+             && self.installations.is_empty()
+             && !self.loading
+             && self.error.is_none()
++            && self.catalog_warnings.is_empty()
++            && self.recovery_diagnostics.is_empty()
+         {
+             content = content.push(text(
+                 "No managed Java runtimes are available for this platform.",
+@@ -459,17 +494,13 @@ impl Managed {
+                     .map(Message::Select);
+                 (label, action)
+             }
+-            ManagedJavaStage::Failed => {
+-                let can_validate = installation.error.as_ref().is_some_and(|error| {
+-                    matches!(error.code.as_str(), "validation" | "registration")
+-                });
+-                let retry_action = if can_validate {
+-                    Some(Message::Validate(installation.id))
+-                } else {
+-                    install_action()
+-                };
+-                ("Retry", retry_action)
+-            }
++            ManagedJavaStage::Failed => match installation.error.as_ref().map(recovery_action) {
++                Some(RecoveryAction::Validate) => {
++                    ("Retry", Some(Message::Validate(installation.id)))
++                }
++                Some(RecoveryAction::Reinstall) => ("Retry", install_action()),
++                _ => ("Details", installation_error_details(installation)),
++            },
+             ManagedJavaStage::Cancelled => ("Install", install_action()),
+         }
+     }
+@@ -511,7 +542,7 @@ fn poll(handle: &Poll) -> BoxStream<'static, Message> {
+     stream::unfold((core, None), |(core, mut previous)| async move {
+         loop {
+             async_std::task::sleep(Duration::from_millis(100)).await;
+-            let result = core.java().managed.installations().await;
++            let result = core.java().managed.installations_report().await;
+             if previous.as_ref() != Some(&result) {
+                 previous = Some(result.clone());
+                 return Some((Message::Snapshots(result), (core, previous)));
+@@ -523,3 +554,46 @@ fn poll(handle: &Poll) -> BoxStream<'static, Message> {
+ 
+ #[cfg(test)]
+ mod tests;
++
++#[derive(Debug, PartialEq, Eq)]
++enum RecoveryAction {
++    Validate,
++    Reinstall,
++    Inspect,
++}
++fn recovery_action(error: &ManagedJavaError) -> RecoveryAction {
++    match error.code {
++        ManagedJavaErrorKind::Validation | ManagedJavaErrorKind::Registration => {
++            RecoveryAction::Validate
++        }
++        ManagedJavaErrorKind::Download
++        | ManagedJavaErrorKind::Checksum
++        | ManagedJavaErrorKind::Extract
++        | ManagedJavaErrorKind::Storage
++        | ManagedJavaErrorKind::Catalog
++            if error.retryable =>
++        {
++            RecoveryAction::Reinstall
++        }
++        _ => RecoveryAction::Inspect,
++    }
++}
++
++#[cfg(test)]
++pub(super) fn catalog_fixture(
++    packages: Vec<ManagedJavaPackage>,
++) -> Result<ManagedJavaCatalog, ManagedJavaError> {
++    Ok(ManagedJavaCatalog {
++        packages,
++        warnings: vec![],
++    })
++}
++#[cfg(test)]
++pub(super) fn installations_fixture(
++    installations: Vec<ManagedJavaSnapshot>,
++) -> Result<ManagedInstallationsReport, ManagedJavaError> {
++    Ok(ManagedInstallationsReport {
++        installations,
++        diagnostics: vec![],
++    })
++}
+diff --git a/src/windows/java_runtime_selection/managed/tests.rs b/src/windows/java_runtime_selection/managed/tests.rs
+index 0093993..e7d7b1d 100644
+--- a/src/windows/java_runtime_selection/managed/tests.rs
++++ b/src/windows/java_runtime_selection/managed/tests.rs
+@@ -1,6 +1,106 @@
+ use super::*;
+ use sonata_launcher_core::java::managed::{ArchiveFormat, JavaTarget};
+ 
++#[async_std::test]
++async fn partial_catalog_and_recovery_only_reports_remain_visible_after_request_failure() {
++    let (_dir, core) = core().await;
++    let mut managed = Managed::default();
++    let _ = managed.update(
++        Message::CatalogLoaded(Ok(ManagedJavaCatalog {
++            packages: vec![snapshot(ManagedJavaStage::Ready).package],
++            warnings: vec![ManagedJavaCatalogWarning {
++                major: 25,
++                error: ManagedJavaError::new(ManagedJavaErrorKind::Catalog, "partial offline"),
++            }],
++        })),
++        core.clone(),
++    );
++    let diagnostic = ManagedRecoveryDiagnostic {
++        path: "/fixture/corrupt.json".into(),
++        operation: None,
++        error: ManagedJavaError::new(
++            ManagedJavaErrorKind::Unknown("future_record_v9".into()),
++            "preserve bytes",
++        ),
++    };
++    let report = ManagedInstallationsReport {
++        installations: vec![],
++        diagnostics: vec![diagnostic.clone()],
++    };
++    assert_ne!(
++        report,
++        ManagedInstallationsReport {
++            installations: vec![],
++            diagnostics: vec![]
++        },
++        "poll equality includes diagnostic-only changes"
++    );
++    let _ = managed.update(Message::Snapshots(Ok(report)), core.clone());
++    let _ = managed.update(
++        Message::CatalogLoaded(Err(ManagedJavaError::new("catalog", "request failed"))),
++        core.clone(),
++    );
++    let _ = managed.update(
++        Message::Snapshots(Err(ManagedJavaError::new("storage", "request failed"))),
++        core,
++    );
++    assert_eq!(managed.catalog_warnings.len(), 1);
++    assert_eq!(managed.recovery_diagnostics, [diagnostic]);
++    assert_eq!(managed.visible_packages().len(), 1);
++    let kit = Luminate::with_theme(iced_luminate::Theme::LIGHT);
++    let selection = RuntimeSelection::default();
++    let mut view = managed.view(&kit, &selection);
++    let mut tree = iced::advanced::widget::Tree::new(&view);
++    let renderer = iced_texture_cache::testing::headless_tiny_skia();
++    let node = view.as_widget_mut().layout(
++        &mut tree,
++        &renderer,
++        &iced::advanced::layout::Limits::new(iced::Size::ZERO, iced::Size::new(622.0, 900.0)),
++    );
++    assert!(node.size().height > 100.0);
++}
++
++#[test]
++fn recovery_actions_use_enum_and_unknown_code_has_inspect_only_details() {
++    let mut unknown = ManagedJavaError::new(
++        ManagedJavaErrorKind::Unknown("next_validation".into()),
++        "validation registration download",
++    );
++    unknown.stage = Some(ManagedJavaStage::Failed);
++    unknown.retryable = true;
++    assert_eq!(recovery_action(&unknown), RecoveryAction::Inspect);
++    let mut installation = snapshot(ManagedJavaStage::Failed);
++    installation.error = Some(unknown);
++    let managed = Managed {
++        packages: vec![installation.package.clone()],
++        ..Default::default()
++    };
++    let (label, action) = managed.package_action(
++        &installation.package,
++        Some(&installation),
++        &RuntimeSelection::default(),
++    );
++    assert_eq!(label, "Details");
++    let Some(Message::Details(details)) = action else {
++        panic!("unknown code must be inspectable")
++    };
++    assert!(details.contains("next_validation"));
++    assert!(details.contains("validation registration download"));
++    for kind in [
++        ManagedJavaErrorKind::Validation,
++        ManagedJavaErrorKind::Registration,
++    ] {
++        assert_eq!(
++            recovery_action(&ManagedJavaError::new(kind, "not parsed")),
++            RecoveryAction::Validate
++        );
++    }
++    let mut retryable = ManagedJavaError::new(ManagedJavaErrorKind::Download, "not parsed");
++    assert_eq!(recovery_action(&retryable), RecoveryAction::Inspect);
++    retryable.retryable = true;
++    assert_eq!(recovery_action(&retryable), RecoveryAction::Reinstall);
++}
++
+ fn snapshot(stage: ManagedJavaStage) -> ManagedJavaSnapshot {
+     ManagedJavaSnapshot {
+         id: ManagedJavaId::new_v4(),
+@@ -50,7 +150,7 @@ async fn awaiting_validation_is_requested_once_even_if_stale_snapshots_arrive()
+     let snapshot = snapshot(ManagedJavaStage::AwaitingValidation);
+     let id = snapshot.id;
+     let _ = managed.update(
+-        Message::Snapshots(Ok(vec![snapshot.clone()])),
++        Message::Snapshots(installations_fixture(vec![snapshot.clone()])),
+         Arc::clone(&core),
+     );
+     assert!(managed.validating_installations.contains(&id));
+@@ -59,7 +159,10 @@ async fn awaiting_validation_is_requested_once_even_if_stale_snapshots_arrive()
+         Arc::clone(&core),
+     );
+     assert!(!managed.validating_installations.contains(&id));
+-    let _ = managed.update(Message::Snapshots(Ok(vec![snapshot])), core);
++    let _ = managed.update(
++        Message::Snapshots(installations_fixture(vec![snapshot])),
++        core,
++    );
+     assert!(!managed.validating_installations.contains(&id));
+ }
+ 
+@@ -304,7 +407,7 @@ fn every_installation_transition_preserves_row_and_action_geometry() {
+             baseline,
+             "saving selection"
+         );
+-        selection.finish_save(7, Err("disk error".repeat(20)));
++        selection.finish_save(7, Err("disk error".repeat(20).into()));
+         assert_eq!(
+             geometry(&managed, &kit, &selection, &mut tree),
+             baseline,
+@@ -332,12 +435,18 @@ async fn started_installation_remains_busy_until_its_snapshot_arrives() {
+         Arc::clone(&core),
+     );
+     assert!(managed.starting_packages.contains(&package));
+-    let _ = managed.update(Message::Snapshots(Ok(vec![])), Arc::clone(&core));
++    let _ = managed.update(
++        Message::Snapshots(installations_fixture(vec![])),
++        Arc::clone(&core),
++    );
+     assert!(
+         managed.starting_packages.contains(&package),
+         "stale poll must not restore Install"
+     );
+-    let _ = managed.update(Message::Snapshots(Ok(vec![current])), core);
++    let _ = managed.update(
++        Message::Snapshots(installations_fixture(vec![current])),
++        core,
++    );
+     assert!(!managed.starting_packages.contains(&package));
+     assert!(managed.started_installations.is_empty());
+ }
+@@ -350,7 +459,7 @@ async fn snapshot_arriving_before_started_response_does_not_leave_installation_b
+     let package = current.package.id.clone();
+     managed.starting_packages.insert(package.clone());
+     let _ = managed.update(
+-        Message::Snapshots(Ok(vec![current.clone()])),
++        Message::Snapshots(installations_fixture(vec![current.clone()])),
+         Arc::clone(&core),
+     );
+     let _ = managed.update(Message::Started(package.clone(), Ok(current.id)), core);
+diff --git a/src/windows/java_runtime_selection/mod.rs b/src/windows/java_runtime_selection/mod.rs
+index 0abd0d7..b982565 100644
+--- a/src/windows/java_runtime_selection/mod.rs
++++ b/src/windows/java_runtime_selection/mod.rs
+@@ -29,6 +29,7 @@ mod installed;
+ mod managed;
+ mod selection;
+ 
++use crate::bridge::errors::UiError;
+ use selection::{RuntimeSelection, SAVE_FEEDBACK_DELAY};
+ 
+ const WINDOW_WIDTH: f32 = 662.0;
+@@ -52,7 +53,7 @@ pub struct JavaRuntimeSelection {
+ 
+ enum RuntimeData {
+     Loading,
+-    Failed(String),
++    Failed(UiError),
+     Ready(Vec<Arc<JavaRuntime>>),
+ }
+ 
+@@ -65,19 +66,20 @@ pub struct Snapshot {
+ 
+ #[derive(Debug, Clone)]
+ pub enum Message {
+-    RuntimeDataLoaded(Result<Snapshot, String>),
++    RuntimeDataLoaded(Result<Snapshot, UiError>),
+     Managed(managed::Message),
+     RetryRuntimeData,
+     SelectRuntime(i64),
+-    SelectionSaved(i64, Result<(), String>),
++    SelectionSaved(i64, Result<(), UiError>),
+     ShowSelectionFeedback(u64),
+     SelectTab(usize),
+     AddRuntime,
+     RuntimesUpdated,
+-    RefreshRuntimes(Result<Snapshot, String>),
++    RefreshRuntimes(Result<Snapshot, UiError>),
+     SettingsChanged,
+     CloseWindow,
+     Window(Effect),
++    CopyErrorDetails(String),
+ }
+ 
+ impl JavaRuntimeSelection {
+@@ -146,7 +148,7 @@ impl JavaRuntimeSelection {
+     fn finish_runtime_selection(
+         &mut self,
+         runtime_id: i64,
+-        result: Result<(), String>,
++        result: Result<(), UiError>,
+     ) -> (Task<Message>, Effect) {
+         if !self.selection.is_saving_runtime(runtime_id) {
+             return (Task::none(), Effect::None);
+@@ -186,6 +188,11 @@ impl JavaRuntimeSelection {
+             RuntimeData::Loading => text("Loading Java runtimes…").into(),
+             RuntimeData::Failed(error) => column![
+                 text(format!("Failed to load Java runtimes: {error}")),
++                kit.button(
++                    Button::new("Copy error details")
++                        .hierarchy(ButtonHierarchy::Tertiary)
++                        .on_press(Message::CopyErrorDetails(error.details.clone()))
++                ),
+                 kit.button(Button::new("Retry").on_press(Message::RetryRuntimeData)),
+             ]
+             .spacing(kit.theme().spacing.md)
+@@ -210,7 +217,7 @@ impl Hash for RuntimeLoad {
+     }
+ }
+ 
+-fn load_runtime_data(handle: &RuntimeLoad) -> BoxStream<'static, Result<Snapshot, String>> {
++fn load_runtime_data(handle: &RuntimeLoad) -> BoxStream<'static, Result<Snapshot, UiError>> {
+     let core = Arc::clone(&handle.0);
+     let instance_id = handle.1;
+     stream::once(async move { fetch_snapshot(core, instance_id).await }).boxed()
+@@ -235,22 +242,18 @@ fn selection_feedback_timer(handle: &SelectionFeedbackTimer) -> BoxStream<'stati
+ async fn fetch_snapshot(
+     core: Arc<GlobalState>,
+     instance_id: InstanceId,
+-) -> Result<Snapshot, String> {
+-    let runtimes = core
+-        .java()
+-        .list_all()
+-        .await
+-        .map_err(|error| error.to_string())?;
++) -> Result<Snapshot, UiError> {
++    let runtimes = core.java().list_all().await.map_err(UiError::from)?;
+     let instance_service = core.instances();
+     let global_settings = instance_service
+         .global_settings()
+         .await
+-        .map_err(|error| error.to_string())?;
++        .map_err(UiError::from)?;
+ 
+     let instance_settings = instance_service
+         .settings(instance_id)
+         .await
+-        .map_err(|error| error.to_string())?;
++        .map_err(UiError::from)?;
+ 
+     Ok(Snapshot {
+         runtimes,
+@@ -383,6 +386,9 @@ impl Window for JavaRuntimeSelection {
+                 }
+             }
+             Message::Window(effect) => return (Task::none(), effect),
++            Message::CopyErrorDetails(details) => {
++                return (iced::clipboard::write(details), Effect::None);
++            }
+         }
+ 
+         (Task::none(), Effect::None)
+@@ -465,7 +471,7 @@ async fn save_runtime_selection(
+     core: Arc<GlobalState>,
+     instance_id: InstanceId,
+     runtime_id: i64,
+-) -> Result<(), String> {
++) -> Result<(), UiError> {
+     let patch = sonata_launcher_core::instance::settings::SettingsPatch {
+         java_runtime: Some(Some(runtime_id)),
+         ..Default::default()
+@@ -474,7 +480,7 @@ async fn save_runtime_selection(
+     core.instances()
+         .update_settings(instance_id, &patch)
+         .await
+-        .map_err(|error| error.to_string())
++        .map_err(UiError::from)
+ }
+ 
+ // Loaded tabs retain their scrollable trees; only the active page is shown.
+diff --git a/src/windows/java_runtime_selection/selection.rs b/src/windows/java_runtime_selection/selection.rs
+index 136aed8..331117b 100644
+--- a/src/windows/java_runtime_selection/selection.rs
++++ b/src/windows/java_runtime_selection/selection.rs
+@@ -1,5 +1,6 @@
+ //! Shared persistence state for selection in Installed and Catalog.
+ 
++use crate::bridge::errors::UiError;
+ use std::time::{Duration, Instant};
+ 
+ pub(super) const SAVE_FEEDBACK_DELAY: Duration = Duration::from_millis(300);
+@@ -17,7 +18,7 @@ pub(super) struct RuntimeSelection {
+ 
+ struct SelectionFailure {
+     runtime_id: i64,
+-    message: String,
++    message: UiError,
+ }
+ 
+ impl RuntimeSelection {
+@@ -70,7 +71,7 @@ impl RuntimeSelection {
+         self.failure
+             .as_ref()
+             .filter(|failure| failure.runtime_id == runtime_id)
+-            .map(|failure| failure.message.as_str())
++            .map(|failure| failure.message.summary.as_str())
+     }
+ 
+     /// Keep the applied runtime selected until its replacement is saved.
+@@ -85,7 +86,7 @@ impl RuntimeSelection {
+         true
+     }
+ 
+-    pub fn finish_save(&mut self, runtime_id: i64, result: Result<(), String>) {
++    pub fn finish_save(&mut self, runtime_id: i64, result: Result<(), UiError>) {
+         if self.saving_runtime != Some(runtime_id) {
+             return;
+         }
+diff --git a/src/windows/java_runtime_selection/tests.rs b/src/windows/java_runtime_selection/tests.rs
+index 316490f..3af621c 100644
+--- a/src/windows/java_runtime_selection/tests.rs
++++ b/src/windows/java_runtime_selection/tests.rs
+@@ -137,13 +137,13 @@ fn runtime_window_size_stays_fixed_during_loading_catalog_progress_and_details()
+             }
+             match stage {
+                 3 => {
+-                    let _ = window.update(Message::Managed(managed::Message::CatalogLoaded(Ok(
+-                        packages.clone(),
+-                    ))));
++                    let _ = window.update(Message::Managed(managed::Message::CatalogLoaded(
++                        managed::catalog_fixture(packages.clone()),
++                    )));
+                 }
+                 4 => {
+-                    let _ = window.update(Message::Managed(managed::Message::Snapshots(Ok(vec![
+-                        ManagedJavaSnapshot {
++                    let _ = window.update(Message::Managed(managed::Message::Snapshots(
++                        managed::installations_fixture(vec![ManagedJavaSnapshot {
+                             id: ManagedJavaId::new_v4(),
+                             created_at: Default::default(),
+                             package: packages[0].clone(),
+@@ -152,8 +152,8 @@ fn runtime_window_size_stays_fixed_during_loading_catalog_progress_and_details()
+                             total_bytes: Some(68_300_000),
+                             runtime_id: None,
+                             error: None,
+-                        },
+-                    ]))));
++                        }]),
++                    )));
+                 }
+                 5 => {
+                     let _ = window.update(Message::Managed(managed::Message::Details(
+@@ -393,11 +393,11 @@ async fn fast_save_does_not_change_card_or_done_pixels_in_either_tab() {
+             sha256: "ab".repeat(32),
+             format: ArchiveFormat::TarGz,
+         };
+-        let _ = window.update(Message::Managed(managed::Message::CatalogLoaded(Ok(vec![
+-            package.clone(),
+-        ]))));
+-        let _ = window.update(Message::Managed(managed::Message::Snapshots(Ok(vec![
+-            ManagedJavaSnapshot {
++        let _ = window.update(Message::Managed(managed::Message::CatalogLoaded(
++            managed::catalog_fixture(vec![package.clone()]),
++        )));
++        let _ = window.update(Message::Managed(managed::Message::Snapshots(
++            managed::installations_fixture(vec![ManagedJavaSnapshot {
+                 id: ManagedJavaId::new_v4(),
+                 created_at: Default::default(),
+                 package,
+@@ -406,8 +406,8 @@ async fn fast_save_does_not_change_card_or_done_pixels_in_either_tab() {
+                 total_bytes: Some(68_300_000),
+                 runtime_id: Some(2),
+                 error: None,
+-            },
+-        ]))));
++            }]),
++        )));
+ 
+         let mut renderer = headless_tiny_skia();
+         let mut cache = Cache::default();
+@@ -648,9 +648,9 @@ async fn first_catalog_load_centers_text_in_the_runtime_area() {
+     assert!((bounds.center_y() - size.height / 2.0).abs() < 1.0);
+     drop(ui);
+ 
+-    let _ = window.update(Message::Managed(managed::Message::CatalogLoaded(Ok(
+-        vec![],
+-    ))));
++    let _ = window.update(Message::Managed(managed::Message::CatalogLoaded(
++        managed::catalog_fixture(vec![]),
++    )));
+     assert!(!window.managed.is_initial_catalog_load());
+ 
+     let _ = window.update(Message::Managed(managed::Message::Refresh));

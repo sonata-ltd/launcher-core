@@ -82,5 +82,27 @@ doctests passed**, 1 ignored. GUI: **229 passed**, 7 ignored. Логи:
 `/tmp/opencode/core-p11-operations-gui-{check,test,build}.log`.
 Fresh replay fmt/check проверен; native/manual/platform evidence отсутствует.
 
-Diagnostic/recovery flows — следующие patches.
+## 04 — Managed reports и typed runtime errors
+
+`04-managed-reports.patch` читает полные catalog/installations reports. Partial
+catalog warnings и recovery diagnostics не исчезают из-за пустого списка healthy
+installations или ошибки следующего refresh. UI показывает notice и Details с
+path/installation/code/stage; Copy details сохраняет неизвестный code. Polling
+сравнивает весь report, включая diagnostic-only изменения.
+
+RecoveryAction использует enum: Validation/Registration → Validate; известная
+retryable download/storage failure → новый install, если package доступен;
+unknown code → Inspect, без догадок из text. Recovery records не удаляются из UI.
+Runtime selection/settings messages удерживают shared UiError projection с enum
+kind, diagnostic chain и Arc typed source. Строковые локальные ошибки не получают
+сфабрикованный source. Остальные исторические GUI string adapters не объявлены
+типизированными этой задачей; content flow мигрируется в следующем patch.
+
+Linux core fmt/check/test/build: **570 library + 2 CLI + 2 integration + 18
+doctests passed**, 1 ignored. GUI: **232 passed**, 7 ignored. Логи:
+`/tmp/opencode/core-p11-reports-{check,test,build}.log` и
+`/tmp/opencode/core-p11-reports-gui-{check,test,build}.log`.
+Fresh replay fmt/check проверен; live API/manual/platform не проверены.
+
+Content recovery — следующий patch.
 Это compile/test evidence, не ручной launch/install и не Windows/macOS PASS.
