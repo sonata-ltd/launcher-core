@@ -31,10 +31,21 @@ pub enum LauncherPathsError {
 
 impl LauncherPaths {
     pub async fn resolve(config: &Config) -> Result<Self, LauncherPathsError> {
-        let root = config
-            .root_override
-            .clone()
-            .unwrap_or(Self::construct_default_root().await?);
+        Self::resolve_with_default(config, Self::construct_default_root).await
+    }
+
+    async fn resolve_with_default<F, Fut>(
+        config: &Config,
+        default: F,
+    ) -> Result<Self, LauncherPathsError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<PathBuf, LauncherPathsError>>,
+    {
+        let root = match &config.root_override {
+            Some(root) => root.clone(),
+            None => default().await?,
+        };
 
         if let Err(e) = create_dir_all(&root).await {
             return Err(LauncherPathsError::IO(e));
@@ -95,5 +106,32 @@ impl LauncherPaths {
             Some(path) => Ok(path.join(format!(".{}", LAUNCHER_PREFIX))),
             None => Err(LauncherPathsError::HomeNotAvailable),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[async_std::test]
+    async fn explicit_root_never_evaluates_unavailable_default_home() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = Config {
+            root_override: Some(directory.path().into()),
+            ..Config::init()
+        };
+        let paths = LauncherPaths::resolve_with_default(&config, || async {
+            panic!("default home must be lazy")
+        })
+        .await
+        .unwrap();
+        assert_eq!(paths.root(), directory.path());
+        assert!(matches!(
+            LauncherPaths::resolve_with_default(&Config::init(), || async {
+                Err(LauncherPathsError::HomeNotAvailable)
+            })
+            .await,
+            Err(LauncherPathsError::HomeNotAvailable)
+        ));
     }
 }
