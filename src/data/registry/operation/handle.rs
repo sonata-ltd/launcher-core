@@ -1,27 +1,21 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use crate::{
     bus::EventBus,
-    data::registry::operation::{
-        message::{
-            event::{OperationEvent, OperationFinish, OperationStart, OperationUpdate},
-            output::ProcessorOutput,
-            stage::{OperationStage, StageResult},
-            status::{Outcome, Progress},
-            target::ProcessTarget,
-            OperationId, OperationMessage,
-        },
-        snapshot::OperationSnapshot,
+    data::registry::operation::message::{
+        event::{OperationEvent, OperationFinish, OperationStart, OperationUpdate},
+        output::ProcessorOutput,
+        stage::{OperationStage, StageResult},
+        status::{Outcome, Progress},
+        target::ProcessTarget,
+        OperationId, OperationMessage,
     },
 };
 
 pub struct OperationHandle {
     id: OperationId,
     bus: EventBus,
-    snapshots: Arc<Mutex<HashMap<OperationId, OperationSnapshot>>>,
+    records: Arc<Mutex<super::Records>>,
     finished: bool,
 }
 
@@ -30,15 +24,11 @@ impl OperationHandle {
         self.id
     }
 
-    pub fn new(
-        id: OperationId,
-        bus: EventBus,
-        snapshots: Arc<Mutex<HashMap<OperationId, OperationSnapshot>>>,
-    ) -> Self {
+    pub(super) fn new(id: OperationId, bus: EventBus, records: Arc<Mutex<super::Records>>) -> Self {
         Self {
             id,
             bus,
-            snapshots,
+            records,
             finished: false,
         }
     }
@@ -53,10 +43,14 @@ impl OperationHandle {
     fn emit(&self, data: impl Into<OperationEvent>) {
         let event = data.into();
 
-        if let Ok(mut active) = self.snapshots.lock() {
-            if let Some(snapshot) = active.get_mut(&self.id) {
-                snapshot.apply(&event);
-            }
+        if let Some(snapshot) = self
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active
+            .get_mut(&self.id)
+        {
+            snapshot.apply(&event);
         }
 
         self.bus.publish(OperationMessage {
@@ -126,16 +120,28 @@ impl OperationHandle {
             return;
         }
 
-        self.publish(OperationFinish { outcome });
-
-        if let Ok(mut active) = self.snapshots.lock() {
-            active.remove(&self.id);
+        {
+            let mut records = self
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(mut snapshot) = records.active.remove(&self.id) {
+                snapshot.apply(&OperationEvent::Finish(OperationFinish {
+                    outcome: outcome.clone(),
+                }));
+                records.history.push(self.id, (snapshot, outcome.clone()));
+            }
         }
+        self.publish(OperationFinish { outcome });
     }
 }
 
 impl Drop for OperationHandle {
     fn drop(&mut self) {
-        self.close(Outcome::Cancelled);
+        self.close(if std::thread::panicking() {
+            Outcome::Failed
+        } else {
+            Outcome::Cancelled
+        });
     }
 }

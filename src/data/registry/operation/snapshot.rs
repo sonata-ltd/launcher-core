@@ -81,7 +81,15 @@ impl OperationSnapshot {
                 }
             }
             OperationEvent::Update(OperationUpdate::Output(_)) => {}
-            OperationEvent::Finish(_) => {}
+            OperationEvent::Finish(finish) => {
+                self.status = match finish.outcome {
+                    Outcome::Completed => LifeCycle::Completed,
+                    Outcome::Failed => LifeCycle::Failed,
+                    // Preserve the public lifecycle enum; exact cancellation is
+                    // available in the terminal outcome, not confused with success.
+                    Outcome::Cancelled => LifeCycle::Failed,
+                };
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ use home::home_dir;
 pub mod cancellation;
 pub mod download;
 pub mod files;
+pub(crate) mod jobs;
 pub mod maven;
 pub(crate) mod object_store;
 pub(crate) mod platform;
