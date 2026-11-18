@@ -7,8 +7,13 @@ use std::{
 
 use crate::utils::{
     cancellation::Cancellation,
-    files::digest::{copy_and_digest, digest_file, FileDigests},
+    files::{
+        digest::{copy_and_digest, digest_file, FileDigests},
+        owned_directory::{self, OwnedDirectory},
+    },
 };
+
+const IMPORT_PREFIX: &str = "import-";
 
 pub struct ObjectStore {
     root: PathBuf,
@@ -17,6 +22,78 @@ pub struct ObjectStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_and_cancelled_imports_remove_their_owned_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"bytes").unwrap();
+        let store = ObjectStore::new(temp.path().join("store"));
+        assert!(store
+            .import_file(&source, Some(&"0".repeat(64)), &Cancellation::new())
+            .is_err());
+        let cancel = Cancellation::new();
+        cancel.cancel();
+        assert!(store.import_file(&source, None, &cancel).is_err());
+        assert_eq!(fs::read_dir(store.root.join("staging")).unwrap().count(), 0);
+        assert!(!store.root.join("objects").exists());
+    }
+
+    const CRASH_ROOT: &str = "SONATA_TEST_IMPORT_CRASH_ROOT";
+
+    #[test]
+    fn import_crash_writer() {
+        let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) else {
+            return;
+        };
+        let store = ObjectStore::new(root.join("store"));
+        let _: io::Result<StoredObject> =
+            store.import_checked(&root.join("source"), &Cancellation::new(), |_| {
+                std::process::exit(73)
+            });
+        panic!("missed import crash checkpoint");
+    }
+
+    #[test]
+    fn process_exit_allows_import_staging_cleanup_without_collecting_bytes_or_live_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"published bytes").unwrap();
+        let store = ObjectStore::new(temp.path().join("store"));
+        let object = store
+            .import_file(&source, None, &Cancellation::new())
+            .unwrap();
+        let staging = store.root.join("staging");
+        let live = OwnedDirectory::create(&staging, IMPORT_PREFIX).unwrap();
+        fs::write(live.path().join("data"), b"active import").unwrap();
+        let legacy = staging.join("legacy-unmarked-file");
+        fs::write(&legacy, b"unknown ownership").unwrap();
+        fs::write(&source, b"incomplete import").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "utils::object_store::tests::import_crash_writer",
+                "--nocapture",
+            ])
+            .env(CRASH_ROOT, temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(73), "{output:?}");
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 3);
+        assert_eq!(store.sweep_staging().unwrap(), 1);
+        assert_eq!(store.sweep_staging().unwrap(), 0);
+        assert_eq!(fs::read_dir(&staging).unwrap().count(), 2);
+        assert_eq!(
+            fs::read(live.path().join("data")).unwrap(),
+            b"active import"
+        );
+        assert_eq!(fs::read(legacy).unwrap(), b"unknown ownership");
+        assert_eq!(fs::read(&object.path).unwrap(), b"published bytes");
+        assert!(store
+            .find_sha1(&object.digests.sha1, &Cancellation::new())
+            .unwrap()
+            .is_some());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -81,6 +158,13 @@ impl ObjectStore {
         Self { root }
     }
 
+    /// Scratch-only retention, safe during other live imports. This never
+    /// collects published objects, aliases or legacy files and requires no SQL
+    /// roots. Imports from an exited process cannot register or publish later.
+    pub(crate) fn sweep_staging(&self) -> io::Result<usize> {
+        owned_directory::sweep(&self.root.join("staging"), IMPORT_PREFIX)
+    }
+
     pub(crate) fn root_key(&self) -> io::Result<Vec<u8>> {
         fs::create_dir_all(&self.root)?;
         Ok(crate::utils::files::path_key(&fs::canonicalize(
@@ -137,9 +221,8 @@ impl ObjectStore {
         cancellation: &Cancellation,
         validate: impl FnOnce(&FileDigests) -> Result<(), E>,
     ) -> Result<StoredObject, E> {
-        let staging = self.root.join("staging");
-        fs::create_dir_all(&staging)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(&staging)?;
+        let staging = OwnedDirectory::create(&self.root.join("staging"), IMPORT_PREFIX)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(staging.path())?;
         let digests = copy_and_digest(source, &mut temporary, cancellation)?;
         validate(&digests)?;
         temporary.as_file().sync_all()?;

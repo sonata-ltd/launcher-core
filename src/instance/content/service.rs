@@ -84,6 +84,15 @@ impl InstanceContentService {
         let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
         let store_lock = store.lock_exclusive()?;
         storage::clear_abandoned_preparations(&db, &store.root_key()?).await?;
+        let scratch_store = store.clone();
+        async_std::task::spawn_blocking(move || match scratch_store.sweep_staging() {
+            Ok(removed) if removed > 0 => {
+                tracing::info!(removed, "cleaned up abandoned content imports")
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "could not sweep content import staging"),
+        })
+        .await;
         match recovery::recover(&db, &paths, &registry, None).await {
             Ok(failures) => {
                 for failure in failures {

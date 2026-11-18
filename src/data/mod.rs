@@ -84,6 +84,20 @@ impl GlobalState {
                     tracing::info!(removed, "cleaned up partial downloads");
                 }
                 crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
+                let blobs = paths.libraries().join("blobs");
+                task::spawn_blocking(move || {
+                    let store = crate::utils::object_store::ObjectStore::new(blobs);
+                    match store.sweep_staging() {
+                        Ok(removed) if removed > 0 => {
+                            tracing::info!(removed, "cleaned up abandoned runtime imports")
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "could not sweep runtime import staging")
+                        }
+                    }
+                })
+                .await;
             });
         }
 
