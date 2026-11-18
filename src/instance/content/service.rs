@@ -151,9 +151,9 @@ pub struct InstanceContentService {
     tasks: crate::utils::jobs::supervisor::Tasks,
     // OS-lock защищает от второго обновлённого процесса с тем же корнем.
     // In-memory барьер InstanceService защищает launch и install внутри процесса.
-    _root_lock: crate::utils::object_store::StoreLock,
-    _instances_lock: crate::utils::object_store::StoreLock,
-    _store_lock: crate::utils::object_store::StoreLock,
+    _root_lock: Arc<crate::utils::object_store::StoreLock>,
+    _instances_lock: Arc<crate::utils::object_store::StoreLock>,
+    _store_lock: Arc<crate::utils::object_store::StoreLock>,
 }
 
 impl InstanceContentService {
@@ -177,6 +177,7 @@ impl InstanceContentService {
                     source,
                 }
             })?;
+        let root_lock = Arc::new(root_lock);
         // The configured launcher root is not the instances resource identity:
         // different roots may override instances to the same directory/alias.
         std::fs::create_dir_all(paths.instances())?;
@@ -196,10 +197,12 @@ impl InstanceContentService {
             path: paths.instances().clone(),
             source,
         })?;
+        let instances_lock = Arc::new(instances_lock);
         let registry = instances.get_registry();
         let activity = instances.activity();
+        let tasks = instances.tasks();
         let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
-        let store_lock = store.lock_exclusive()?;
+        let store_lock = Arc::new(store.lock_exclusive()?);
         let maintenance = store.try_maintenance()?;
         let cleanup_db = db.clone();
         async_std::task::spawn(async move {
@@ -237,8 +240,19 @@ impl InstanceContentService {
             Err(error) => tracing::error!(%error, "could not load pending content publications"),
         }
         storage::clear_completed(&db, None).await?;
-        if let Err(error) =
-            super::store::legacy::detach_registered_links(&db, &paths, &activity).await
+        if let Err(error) = super::store::legacy::detach_registered_links(
+            db.clone(),
+            paths.clone(),
+            activity.clone(),
+            store.clone(),
+            [
+                root_lock.clone(),
+                instances_lock.clone(),
+                store_lock.clone(),
+            ],
+            &tasks,
+        )
+        .await
         {
             tracing::warn!(%error, "could not migrate registered hardlinks");
         }
@@ -260,7 +274,6 @@ impl InstanceContentService {
         .await;
         let plans = Arc::new(Mutex::new(HashMap::<Uuid, StoredPlan>::new()));
         let jobs = Arc::new(Mutex::new(Jobs::new()));
-        let tasks = instances.tasks();
         let weak_plans = Arc::downgrade(&plans);
         let weak_jobs = Arc::downgrade(&jobs);
         let stop = Cancel::default();

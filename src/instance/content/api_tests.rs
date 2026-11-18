@@ -20,6 +20,9 @@ mod crash_tests;
 #[path = "admission_tests.rs"]
 mod admission_tests;
 
+#[path = "legacy_tests.rs"]
+mod legacy_tests;
+
 #[async_std::test]
 async fn different_launcher_roots_cannot_share_the_same_instances_resource() {
     let fixture = fixture().await;

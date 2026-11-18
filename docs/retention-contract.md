@@ -32,6 +32,16 @@ power-loss не обещается. [Итоговые Linux evidence](gui-migrat
 571 library tests и все CLI/integration/doctests; GUI full replay 238 tests.
 Ниже сохранена история staged implementation с evidence соответствующих commits.
 
+[B02 follow-up](legacy-hardlink-migration.md) изолирует только доказанные historical
+hardlinks: записанный regular path либо unique Unix physical CAS alias в известном
+inventory. Migration удерживает activity/CAS admission/три lifetime locks в owned
+Tasks worker через copy и SQL completion после bootstrap drop. Equal bytes и
+ambiguous/unknown aliases не получают ownership; corrupt CAS не ремонтируется.
+Этот шаг **не расширяет GC permission**, не закрывает historical ownership и не
+переписывает приведённые выше V01 totals. Latest B02 core pipeline: 590 library
++ 2 CLI + 2 integration + 18 doctests PASS на Linux, Windows GNU compile/link only;
+GUI/native Windows/macOS execution не выполнялись.
+
 ## Реализованная область очистки
 
 Очистка scratch не является GC опубликованных объектов. Scratch cleanup удаляет
@@ -81,6 +91,9 @@ lock ContentService (`.sonata-store.lock`) и не глобальная блок
   guard; проверка cache, placement и файловая публикация передают клоны workers.
 - Recovery получает admission до чтения журнала и удерживает его до SQL completion;
   copy/verify/publish worker владеет отдельным клоном.
+- Legacy hardlink migration получает shared admission до lookup/чтения CAS и
+  удерживает его вместе с lifetime ownership/activity guards до SQL completion;
+  исчезновение bootstrap caller не завершает owned Tasks worker.
 - Runtime `transfer::place` удерживает admission при чтении CAS/legacy blob и URL
   index, импорте, копировании и публикации нового index. Content и runtime stores
   используют один механизм, но остаются разными физическими ресурсами.

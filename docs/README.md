@@ -16,6 +16,7 @@
 - [gui-migration/README.md](gui-migration/README.md): source-only GUI patches 01–05 и изолированный runner.
 - [gui-migration/linux-verification.md](gui-migration/linux-verification.md): итоговые Linux evidence и непроверенные критерии.
 - [platform-verification.md](platform-verification.md): P11-V02 core native/cross runner, CI matrix и непроверенные Windows/macOS/GUI критерии.
+- [legacy-hardlink-migration.md](legacy-hardlink-migration.md): B02 physical-identity rename proof, owned migration/SQL lifetime и fail-closed ограничения.
 - [check.sh](check.sh): воспроизводимый запуск проверок без GUI Cargo patches.
 - `verify-baseline.py`: историческая проверка снимка; в этой рабочей копии отсутствует.
 
@@ -120,6 +121,15 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 Зависимости: P00 → P01/P02; P02 → P03 → P04; P05 и P06 можно выполнять после P01 отдельными последовательными пакетами; P06/P05 → P07; P02/P03/P06/P07 → P08; P02/P06 → P09; P09/P07 → P10; все пакеты → P11. Это зависимости изменений, не распоряжение запускать параллельных агентов.
 
 ## Текущее состояние
+
+**B02 follow-up:** startup migration изолирует однозначно переименованные/disabled
+CAS hardlinks по Unix device/inode, не по equal bytes; competing bindings/aliases
+и unknown ownership остаются отложенными. Owned Tasks worker удерживает activity,
+CAS admission и lifetime locks после bootstrap drop до SQL completion/shutdown.
+18 новых Linux regressions PASS; полный core fmt/check --all-targets/test/build:
+**590 library + 2 CLI + 2 integration + 18 doctests**, 0 failed, 1 ignored. Windows
+GNU check/test --no-run/build — compile/link PASS без execution. GUI не запускался
+и не проверялся. [Evidence и оставшиеся partial cases](legacy-hardlink-migration.md).
 
 **P11-V02 (core часть):** native CI matrix Linux/Windows/macOS настроен, но hosted
 jobs ещё не запускались. Linux core fmt/all-target check/test/build: **572 library

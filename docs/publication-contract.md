@@ -52,6 +52,26 @@ Recovery держит shared admission от чтения журнала до SQL
 другого root: такая запись остаётся консервативным блокером. Ключ — идентичность
 ресурса блокировки, не путь к байтам и не семантическая идентичность объекта.
 
+## Исторические hardlinks (B02, частично)
+
+Startup migration копирует текущие bytes записанного regular path; для missing
+path только уникальный Unix device/inode alias текущего CAS в известном inventory
+того же ContentKind позволяет rename. Equal digest/size/mtime не доказывают
+ownership. Ambiguous aliases/claims, occupied key, missing/replaced CAS, unsafe/
+unknown/out-of-scope paths и unsupported physical identity откладывают relocation.
+Modified bytes сохраняются, stale object/provider очищаются, corrupt CAS не
+перезаписывается. Migration принадлежит Tasks worker с тремя lifetime locks,
+shared CAS admission и activity guard до SQL completion после drop bootstrap;
+shutdown её ждёт. Planned stamp и conditional SQL UPDATE обнаруживают tested
+replacement/collision boundaries, но не превращают FS + SQL в одну транзакцию.
+
+SQL failure/collision после isolation оставляет независимые bytes и исходную
+привязку, не меняет чужие bindings/CAS; durable migration journal не добавлен.
+Повторный startup не обязан восстановить renamed copy в этом окне по guessed
+ownership. Нет новой power-loss/process-exit гарантии для migration; arbitrary
+external concurrent writers/ancestor replacements остаются вне контракта.
+[18 Linux regressions, Windows compile-only evidence и ограничения](legacy-hardlink-migration.md).
+
 ## Прикладное разрешение конфликта и shutdown
 
 - `core.content().pending_recovery(instance)` показывает IDs pending operations,
