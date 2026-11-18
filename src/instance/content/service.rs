@@ -368,7 +368,7 @@ impl InstanceContentService {
         let (root, compatibility) = self.context(instance).await?;
         let snapshot = super::inventory::snapshot(root.clone()).await?;
         let registered = storage::registered_mods(&self.db, instance).await?;
-        let mut installed = HashMap::new();
+        let mut installed: HashMap<ProjectKey, super::model::Candidate> = HashMap::new();
         let mut already_present = Vec::new();
         for entry in &registered {
             let Some(path) = entry.verified_path(&snapshot) else {
@@ -388,14 +388,18 @@ impl InstanceContentService {
                 },
                 dependencies: entry.dependencies()?,
             };
-            if let Some(previous) = installed.insert(project.clone(), candidate) {
-                if previous.key.release_id != entry.release_id {
+            if let Some(previous) = installed.get(&project) {
+                if previous.key.release_id != entry.release_id
+                    || previous.dependencies != candidate.dependencies
+                {
                     return Err(ContentError::Invalid(
-                        "multiple active releases of the same project".into(),
+                        "multiple active releases or conflicting metadata of the same project"
+                            .into(),
                     ));
                 }
                 continue;
             }
+            installed.insert(project.clone(), candidate);
             if roots.contains(&project) {
                 already_present.push(PreviewItem {
                     title: project.project_id.clone(),

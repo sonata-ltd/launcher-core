@@ -699,3 +699,158 @@ fn installed_projects_satisfy_requirements_and_prevent_incompatible_candidates()
     assert_eq!(selected[&project("root")].key.release_id, "good");
     assert_eq!(selected[&project("existing")].key.release_id, "1");
 }
+
+#[test]
+fn installed_required_edges_are_resolved_even_when_the_seed_is_not_a_root() {
+    let installed = HashMap::from([(
+        project("existing"),
+        candidate("existing", "fixed", vec![required("dependency", Some("1"))]),
+    )]);
+    let catalog = HashMap::from([
+        (project("root"), vec![candidate("root", "1", vec![])]),
+        (
+            project("dependency"),
+            vec![
+                candidate("dependency", "2", vec![]),
+                candidate("dependency", "1", vec![required("transitive", None)]),
+            ],
+        ),
+        (
+            project("transitive"),
+            vec![candidate(
+                "transitive",
+                "1",
+                vec![required("existing", Some("fixed"))],
+            )],
+        ),
+    ]);
+    let selected =
+        solve_with_installed(&[requirement("root", None)], &catalog, installed, 3).unwrap();
+    assert_eq!(selected.len(), 4);
+    assert_eq!(selected[&project("dependency")].key.release_id, "1");
+    assert_eq!(selected[&project("existing")].key.release_id, "fixed");
+}
+
+#[test]
+fn installed_unknown_relation_is_not_bypassed_by_preselection() {
+    let installed = HashMap::from([(
+        project("existing"),
+        candidate(
+            "existing",
+            "1",
+            vec![Dependency {
+                project: project("unknown"),
+                exact_release: None,
+                kind: DependencyKind::Unknown("future-relation".into()),
+            }],
+        ),
+    )]);
+    assert_eq!(
+        solve_with_installed(
+            &[requirement("existing", None)],
+            &HashMap::new(),
+            installed,
+            0
+        )
+        .unwrap_err(),
+        ResolveError::UnsupportedRelation,
+    );
+}
+
+#[test]
+fn installed_exact_edges_cannot_replace_another_fixed_release() {
+    let installed = HashMap::from([
+        (
+            project("a"),
+            candidate("a", "1", vec![required("b", Some("1"))]),
+        ),
+        (project("b"), candidate("b", "2", vec![])),
+    ]);
+    let catalog = HashMap::from([(project("b"), vec![candidate("b", "1", vec![])])]);
+    assert_eq!(
+        solve_with_installed(&[requirement("a", None)], &catalog, installed, 0).unwrap_err(),
+        ResolveError::Conflict
+    );
+}
+
+#[test]
+fn installed_required_edges_keep_dedup_cycles_and_the_decision_budget() {
+    let installed = HashMap::from([(
+        project("a"),
+        candidate("a", "1", vec![required("b", None), required("b", None)]),
+    )]);
+    let catalog = HashMap::from([(
+        project("b"),
+        vec![candidate("b", "1", vec![required("a", Some("1"))])],
+    )]);
+    assert_eq!(
+        solve_with_installed(&[requirement("a", None)], &catalog, installed.clone(), 0)
+            .unwrap_err(),
+        ResolveError::SearchLimit
+    );
+    assert_eq!(
+        solve_with_installed(&[requirement("a", None)], &catalog, installed, 1)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn installed_non_required_relations_do_not_force_downloads() {
+    let dependencies = [
+        DependencyKind::Optional,
+        DependencyKind::Embedded,
+        DependencyKind::Tool,
+        DependencyKind::Include,
+    ]
+    .into_iter()
+    .map(|kind| Dependency {
+        project: project("absent"),
+        exact_release: None,
+        kind,
+    })
+    .collect();
+    let installed = HashMap::from([(project("a"), candidate("a", "1", dependencies))]);
+    assert_eq!(
+        solve_with_installed(&[requirement("a", None)], &HashMap::new(), installed, 0)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn installed_seed_map_identity_must_match_the_fixed_candidate() {
+    let installed = HashMap::from([(project("wrong"), candidate("a", "1", vec![]))]);
+    assert_eq!(
+        solve_with_installed(&[], &HashMap::new(), installed, 0).unwrap_err(),
+        ResolveError::Conflict
+    );
+}
+
+#[test]
+fn installed_required_edges_preserve_provider_namespaces() {
+    let mut cf_dependency = required("same-id", Some("cf-release"));
+    cf_dependency.project.provider = Provider::CurseForge;
+    let mut cf_candidate = candidate("same-id", "cf-release", vec![]);
+    cf_candidate.key.project.provider = Provider::CurseForge;
+    let installed = HashMap::from([
+        (
+            project("seed"),
+            candidate("seed", "1", vec![cf_dependency.clone()]),
+        ),
+        (
+            project("same-id"),
+            candidate("same-id", "modrinth-release", vec![]),
+        ),
+    ]);
+    let catalog = HashMap::from([(cf_dependency.project.clone(), vec![cf_candidate])]);
+    let selected =
+        solve_with_installed(&[requirement("seed", None)], &catalog, installed, 1).unwrap();
+    assert_eq!(selected.len(), 3);
+    assert_eq!(
+        selected[&cf_dependency.project].key.release_id,
+        "cf-release"
+    );
+}

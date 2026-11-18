@@ -179,6 +179,15 @@ termination не превращается в cooperative close. Историче
 проверено сохранение 173 исходных GUI файлов и его Git status. Локальный core
 `Cargo.lock` сохранён вне коммитов; автоматического переключения launcher и push нет.
 
+[B06 follow-up](installed-resolver-contract.md) проверяет Required/Unknown связи
+всех fixed installed seeds в solver и catalog traversal. `NULL` dependencies
+блокируют план typed error, `[]` остаётся известным пустым списком, corrupt JSON
+отвергается. Modified/disabled/missing/ambiguous файлы не переносят metadata.
+25 новых graph/catalog/SQLite-files regressions; Linux core fmt/check/test/build:
+615 library + 2 CLI + 2 integration + 18 doctests PASS, 0 failed, 1 ignored.
+Historical metadata/unknown identity и manual/native P11 по-прежнему partial;
+это не разрешение более агрессивного GC и не гарантия live mod compatibility.
+
 ## История реализации P08/P09
 
 Ниже сохранены evidence отдельных commits. Числа tests и фразы «следующая работа»

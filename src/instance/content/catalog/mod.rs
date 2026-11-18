@@ -58,11 +58,16 @@ impl RequestBudget {
         &mut self,
         request: surf::RequestBuilder,
     ) -> Result<T> {
+        self.charge_request()?;
+        Ok(crate::utils::download::json::get(request).await?)
+    }
+
+    pub(in crate::instance::content) fn charge_request(&mut self) -> Result<()> {
         self.remaining = self
             .remaining
             .checked_sub(1)
             .ok_or(ContentError::CatalogRequestLimit(MAX_PLAN_REQUESTS))?;
-        Ok(crate::utils::download::json::get(request).await?)
+        Ok(())
     }
 }
 

@@ -7,6 +7,41 @@ use crate::instance::content::{
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 
+// A private seam for deterministic traversal tests; production still uses the bounded adapters.
+trait ReleaseCatalog {
+    async fn choices(
+        &self,
+        project: &ProjectKey,
+        exact: Option<&str>,
+        compatibility: &Compatibility,
+        budget: &mut RequestBudget,
+    ) -> Result<Vec<CatalogRelease>>;
+}
+
+impl ReleaseCatalog for ContentCatalog {
+    async fn choices(
+        &self,
+        project: &ProjectKey,
+        exact: Option<&str>,
+        compatibility: &Compatibility,
+        budget: &mut RequestBudget,
+    ) -> Result<Vec<CatalogRelease>> {
+        if let Some(exact) = exact {
+            self.exact_release_bounded(
+                project.provider,
+                &project.project_id,
+                exact,
+                compatibility,
+                budget,
+            )
+            .await
+            .map(|release| vec![release])
+        } else {
+            self.releases_bounded(project, compatibility, budget).await
+        }
+    }
+}
+
 pub async fn resolve(
     catalog: &ContentCatalog,
     roots: &[ProjectKey],
@@ -17,6 +52,15 @@ pub async fn resolve(
 
 pub(in crate::instance::content) async fn resolve_with_installed(
     catalog: &ContentCatalog,
+    roots: &[ProjectKey],
+    compatibility: &Compatibility,
+    installed: HashMap<ProjectKey, Candidate>,
+) -> Result<Vec<CatalogRelease>> {
+    resolve_catalog(catalog, roots, compatibility, installed).await
+}
+
+async fn resolve_catalog(
+    catalog: &impl ReleaseCatalog,
     roots: &[ProjectKey],
     compatibility: &Compatibility,
     installed: HashMap<ProjectKey, Candidate>,
@@ -36,6 +80,9 @@ pub(in crate::instance::content) async fn resolve_with_installed(
         .cloned()
         .map(|project| (project, None::<String>))
         .collect();
+    for requirement in graph::installed_requirements(&installed)? {
+        queue.push_back((requirement.project, requirement.exact_release));
+    }
     let mut visited = HashSet::new();
     let mut releases: HashMap<ProjectKey, Vec<CatalogRelease>> = HashMap::new();
     let mut budget = RequestBudget::default();
@@ -55,41 +102,29 @@ pub(in crate::instance::content) async fn resolve_with_installed(
         }) {
             continue;
         }
-        let choices = if let Some(exact) = exact {
-            match catalog
-                .exact_release_bounded(
-                    project.provider,
-                    &project.project_id,
-                    &exact,
-                    compatibility,
-                    &mut budget,
-                )
-                .await
-            {
-                Ok(release) if release.key.release_id == exact => vec![release],
-                Ok(_) => {
-                    return Err(ContentError::Invalid(
-                        "provider returned a different exact release".into(),
-                    ))
-                }
-                Err(ContentError::CandidateUnavailable(reason)) => {
-                    tracing::debug!(%reason, "skipping unavailable exact release");
-                    continue;
-                }
-                Err(ContentError::Http(404)) => continue,
-                Err(error) => return Err(error),
+        let choices = match catalog
+            .choices(&project, exact.as_deref(), compatibility, &mut budget)
+            .await
+        {
+            Ok(releases) => releases,
+            Err(ContentError::CandidateUnavailable(reason)) if exact.is_some() => {
+                tracing::debug!(%reason, "skipping unavailable exact release");
+                continue;
             }
-        } else {
-            match catalog
-                .releases_bounded(&project, compatibility, &mut budget)
-                .await
-            {
-                Ok(releases) => releases,
-                Err(ContentError::Http(404)) if !roots.contains(&project) => continue,
-                Err(error) => return Err(error),
+            Err(ContentError::Http(404)) if exact.is_some() || !roots.contains(&project) => {
+                continue
             }
+            Err(error) => return Err(error),
         };
         for release in choices {
+            if exact
+                .as_ref()
+                .is_some_and(|id| release.key.release_id != *id)
+            {
+                return Err(ContentError::Invalid(
+                    "provider returned a different exact release".into(),
+                ));
+            }
             if release.key.project != project {
                 return Err(ContentError::Invalid(
                     "provider returned a release of another project".into(),
@@ -140,3 +175,7 @@ pub(in crate::instance::content) async fn resolve_with_installed(
     result.sort_by(|left, right| left.file.file_name.cmp(&right.file.file_name));
     Ok(result)
 }
+
+#[cfg(test)]
+#[path = "catalog_plan_tests.rs"]
+mod tests;

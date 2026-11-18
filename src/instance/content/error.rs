@@ -8,6 +8,8 @@ pub enum ContentError {
     StalePlan(StalePlanReason),
     #[error(transparent)]
     Incompatible(#[from] super::resolve::graph::ResolveError),
+    #[error("installed release {0:?} has no dependency metadata")]
+    MissingDependencyMetadata(super::model::ReleaseKey),
     #[error(transparent)]
     Cancelled(#[from] crate::utils::cancellation::Cancelled),
     #[error("instance {0} requires content recovery")]

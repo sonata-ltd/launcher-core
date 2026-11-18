@@ -34,9 +34,22 @@ pub(in crate::instance::content) fn solve_with_installed(
 ) -> Result<HashMap<ProjectKey, Candidate>, ResolveError> {
     let mut decisions_left = max_decisions;
     let mut unsupported_seen = false;
+    let mut requirements = roots.to_vec();
+    let mut seen: HashSet<_> = requirements
+        .iter()
+        .map(|req| (req.project.clone(), req.exact_release.clone()))
+        .collect();
+    for requirement in installed_requirements(&installed)? {
+        if seen.insert((
+            requirement.project.clone(),
+            requirement.exact_release.clone(),
+        )) {
+            requirements.push(requirement);
+        }
+    }
 
     let result = search(
-        roots.to_vec(),
+        requirements,
         installed,
         candidates,
         &mut decisions_left,
@@ -48,6 +61,52 @@ pub(in crate::instance::content) fn solve_with_installed(
     } else {
         ResolveError::Conflict
     })
+}
+
+/// Fixed seeds must obey the same relation policy as newly selected candidates.
+/// Stable order keeps bounded search and catalog traversal independent of HashMap order.
+pub(super) fn installed_requirements(
+    installed: &HashMap<ProjectKey, Candidate>,
+) -> Result<Vec<Requirement>, ResolveError> {
+    if installed
+        .iter()
+        .any(|(project, candidate)| *project != candidate.key.project)
+    {
+        return Err(ResolveError::Conflict);
+    }
+    let mut seeds: Vec<_> = installed.values().collect();
+    seeds.sort_by(|left, right| {
+        (
+            left.key.project.provider.slug(),
+            &left.key.project.project_id,
+        )
+            .cmp(&(
+                right.key.project.provider.slug(),
+                &right.key.project.project_id,
+            ))
+    });
+    let mut requirements = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in seeds {
+        if candidate
+            .dependencies
+            .iter()
+            .any(|dependency| matches!(dependency.kind, DependencyKind::Unknown(_)))
+        {
+            return Err(ResolveError::UnsupportedRelation);
+        }
+        for dependency in &candidate.dependencies {
+            if dependency.kind == DependencyKind::Required
+                && seen.insert((dependency.project.clone(), dependency.exact_release.clone()))
+            {
+                requirements.push(Requirement {
+                    project: dependency.project.clone(),
+                    exact_release: dependency.exact_release.clone(),
+                });
+            }
+        }
+    }
+    Ok(requirements)
 }
 
 fn search(

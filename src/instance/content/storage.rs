@@ -292,12 +292,13 @@ impl RegisteredMod {
     }
 
     pub(super) fn dependencies(&self) -> Result<Vec<super::model::Dependency>> {
-        self.dependencies_json
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map(|deps| deps.unwrap_or_default())
-            .map_err(Into::into)
+        let json = self.dependencies_json.as_deref().ok_or_else(|| {
+            ContentError::MissingDependencyMetadata(super::model::ReleaseKey {
+                project: self.project(),
+                release_id: self.release_id.clone(),
+            })
+        })?;
+        Ok(serde_json::from_str(json)?)
     }
 
     pub(super) fn verified_path<'a>(

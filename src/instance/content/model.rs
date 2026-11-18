@@ -41,7 +41,7 @@ pub enum DependencyKind {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Dependency {
     pub project: ProjectKey,
     pub exact_release: Option<String>,
