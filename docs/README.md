@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **424 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **433 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -156,7 +156,11 @@ generations — roots; live/unknown/future preparations и pending/unknown quara
 во время blocking intent. `a69c75a` добавляет root-aware portability legacy library
 snapshots и writers, production legacy launch разрешает relative paths через
 linked_libs_at. Семь новых regressions прошли; external/unknown/unsafe paths не
-угадываются и не переписываются. Следующая работа: контракты assets/managed Java.
+угадываются и не переписываются. `081230b` подключает assets к общему ObjectStore:
+Mojang SHA-1 layout остаётся изолированными placements; legacy import и verified
+CAS repair не требуют сети. Девять новых tests прошли, включая drop worker caller,
+process-exit import→SQL и production sync. Startup asset maintenance пока scratch-only,
+без published GC. Следующая работа: asset roots/GC и managed Java.
 Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.

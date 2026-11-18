@@ -327,6 +327,30 @@ workspace portability test также прошёл. Логи:
 Managed Java SQL paths ещё не мигрированы. Historical catalogue DB paths не
 переносятся автоматически: missing/replaced DB по-прежнему откладывает GC.
 
+### Asset byte identity (collection not yet enabled)
+
+`081230b` использует общий ObjectStore в `assets/objects/.sonata-cas` для immutable
+SHA-256 identity. Обязательный Minecraft `objects/<sha1-prefix>/<sha1>` остаётся
+placement: valid legacy bytes импортируются с SHA-1 проверкой во время копирования,
+SQL IDs не меняются. Missing/corrupt regular placement можно атомарно восстановить
+из независимо проверенного CAS; aliases и SQL не cache proof. Copy размещение не
+позволяет изменением asset file изменить CAS. Corrupt authoritative object не
+перезаписывается; special/linked/escaping placements отклоняются. Downloaded bytes
+верифицируются/импортируются до register SQL, replay идемпотентен.
+
+Admission принадлежит blocking cache/import worker и живёт до его завершения после
+drop caller. Startup sweep удаляет только dead-owned import scratch в отдельном
+asset CAS; published objects, aliases, Mojang placements и SQL rows не удаляются.
+Это промежуточный identity контракт: полного asset roots/catalogue/pins gate ещё
+нет, published asset GC намеренно выключен. Raw paths/snapshots не retention pins.
+
+Полный Linux fmt/check/test/build: **433 passed, 0 failed, 1 ignored**. Девять новых
+asset tests плюс два прежних regressions: read-time import/SQL identity, независимые
+copies, relocation, SQL/alias hints/corrupt bytes, early registration rejection,
+cancellable admission, escaping links, drop caller в blocking worker, process exit
+после import до SQL и replay без duplicates, production sync repair без HTTP.
+Логи `/tmp/opencode/core-assets-cas-verified-{check,test,build}.log`.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots

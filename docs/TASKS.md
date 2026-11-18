@@ -40,7 +40,7 @@
 | D04 | P1/P2 — Два launch pipeline и три rule evaluator | P07 | Исправлено | Обе схемы установок используют один pipeline запуска, общий evaluator правил и одинаковую обработку аргументов и cwd. После проверки импортов ядра и GUI дублирующий launch builder удалён. Сравнительный тест старой и новой установки прошёл. Коммиты `03ed44b` и `3ea6a67`. |
 | D05 | P2 — Hash loops повторяются, контент читается многократно | P06 | Исправлено | Общий проход читает файл частями с отменой. CAS проверяет три хеша при копировании и валидирует staging перед публикацией без повторного чтения файла. Forge по-прежнему считает только SHA-1. Тест проверки staged-байтов и отсутствия публикации при отказе прошёл. Коммит `001025f`. |
 | D06 | P2 — Copy Maven tree почти одинаков в Forge/Cleanroom | P06 | Исправлено | Forge и Cleanroom вызывают один перенос дерева Maven с отменой и атомарной заменой файлов. Символические ссылки и специальные файлы отклоняются. Тесты замены, отмены и ссылок прошли. Коммит `4d037f1`. |
-| D07 | P2 — Несколько stores без единого контракта идентичности | P08 | Частично | `c20d4a9`: контент/runtime используют utils::object_store, SHA-256 bytes identity, verified SHA-1 hints, copy placements и read-time legacy import без удаления. `8a38e9d`: общий replayable Collection; `9659851`: runtime blob GC с profile/legacy SHA-1 и bytes сохранившихся generations, без alias/URL roots. Полный Linux fmt/check/test/build: 417 passed, 0 failed, 1 ignored. Assets Mojang layout и managed Java ещё требуют отдельных контрактов. |
+| D07 | P2 — Несколько stores без единого контракта идентичности | P08 | Частично | `c20d4a9`: контент/runtime используют utils::object_store, SHA-256 bytes identity, verified SHA-1 hints и copy placements; `8a38e9d`/`9659851`: общий Collection и runtime blob GC. `081230b`: assets используют тот же immutable store в objects/.sonata-cas; Mojang SHA-1 layout — изолированные placements, verified legacy import и восстановление из проверенного CAS без сети. SQL identity сохраняется, corrupt CAS не перезаписывается. Полный Linux fmt/check/test/build: 433 passed, 0 failed, 1 ignored, девять новых tests (11 asset tests вместе с прежними). Assets roots/GC и managed Java ещё открыты. |
 | D08 | P2 — Нет GC поколений/CAS, sweeper не понимает новые partials | P08 | Частично | Scratch: `31d9d2f`, `7859409`, `9be8fe8`, `0493299`; admission: `2d37a3d`; content CAS GC: `aef7a11`; runtime pins: `dd96cdd`; complete runtime catalogue/current roots: `47dbe51`; versioned generation quarantine/replay: `150e1f2`; общий Collection: `8a38e9d`; runtime blob GC: `9659851`. Startup GC — 7 дней, SQL/admission живут до completion после drop caller; unknown owners/layouts/quarantine и live/unknown processes fail-closed. Полный Linux fmt/check/test/build: 417 passed, 0 failed, 1 ignored, включая все прежние content/generation regressions и 18 новых blob tests. Assets и managed Java ещё открыты; реальные JVM/descendants, power-cut и Windows/macOS не проверены. Подробности — retention-contract.md. |
 | D09 | P2 — Одинаковые settings/rename меняют разные события | P05 | Исправлено | Оба сервисных пути публикуют одинаковые доменные события. Старые уведомления Scan и Option оставлены для совместимости. Тест событий патча прошёл. Коммит `7e0e7d1`. |
 | D10 | P2 — Platform normalization дублируется и расходится | P06 | Исправлено | Единый HostPlatform задаёт архитектуру и версию ОС. Установка и запуск получают один RuleContext. Названия Prism и Java остаются в своих адаптерах. Тест общего контекста и алиасов i386/i586 прошёл на Linux. Коммит `f938656`. |
@@ -136,3 +136,17 @@ relative placements. Семь новых regressions и полный Linux fmt/c
 **424 passed, 0 failed, 1 ignored**, логи core-library-paths-verified-{check,test,build}.
 Assets/managed Java ещё открыты; missing historical DB остаётся fail-closed, его
 catalogue path автоматически не переносится. Windows/macOS/manual не проверены.
+
+`081230b` продолжает D07: assets теперь хранят immutable SHA-256 bytes в общем
+ObjectStore (`assets/objects/.sonata-cas`), Mojang SHA-1 paths остаются проверяемыми
+copy placements. Legacy valid bytes импортируются без сети/удаления/смены SQL IDs;
+missing/corrupt placement восстанавливается только из независимо verified CAS.
+Corrupt authoritative object, symlinks/escaping ancestors не перезаписываются;
+register требует verified bytes до SQL. Owned blocking cache/import worker держит
+admission после drop caller. Startup очищает только dead-owned CAS scratch.
+Полный Linux fmt/check/test/build: **433 passed, 0 failed, 1 ignored**; девять новых
+tests плюс два прежних asset regressions: relocation, copies, SQL/alias/corrupt
+bytes, cancellation, links, drop caller, process exit между import и SQL/replay,
+production sync без transport. Логи core-assets-cas-verified-{check,test,build}.
+Published asset GC намеренно пока не включён: roots/complete catalogue/pins gate
+ещё не доказаны; SQL rows и aliases сами по себе не разрешают удаление.
