@@ -19,11 +19,7 @@ impl OwnedDirectory {
         // Publish the complete PID atomically: a concurrent sweep must not see
         // a numeric prefix of a still-being-written PID as a different dead PID.
         // Exit before publication leaves an unknown directory, which is kept.
-        super::atomic_write(
-            &directory.path().join(OWNER),
-            std::process::id().to_string().as_bytes(),
-        )
-        .map_err(io::Error::other)?;
+        crate::utils::process::write_owner(&directory.path().join(OWNER))?;
         Ok(Self(directory))
     }
 

@@ -59,9 +59,42 @@ pub(crate) fn read_owner(path: &std::path::Path) -> Option<u32> {
     pid.parse().ok().filter(|pid| *pid != 0)
 }
 
+/// Publish a complete PID without replacing another owner's marker. A numeric
+/// prefix of a live PID must never become visible as a different, dead PID.
+/// Like other publish helpers, this does not promise power-loss durability.
+pub(crate) fn write_owner(path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("owner marker has no parent"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(std::process::id().to_string().as_bytes())?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_publication_is_complete_and_never_replaces_an_existing_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("owner");
+        write_owner(&path).unwrap();
+        assert_eq!(read_owner(&path), Some(std::process::id()));
+        std::fs::write(&path, b"41").unwrap();
+        assert_eq!(
+            write_owner(&path).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"41");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn current_process_and_unknown_ownership_are_never_confirmed_dead() {
         assert!(may_be_alive(std::process::id()));

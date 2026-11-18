@@ -17,14 +17,11 @@ pub(crate) struct PartialOwner {
 
 impl PartialOwner {
     pub(crate) fn create(partial: &Path) -> std::io::Result<Self> {
-        use std::io::Write;
         let path = owner_path(partial);
         // Do not take cleanup ownership of an existing marker on collision.
-        let mut output = std::fs::File::create_new(&path)?;
+        crate::utils::process::write_owner(&path)?;
         #[allow(deprecated)]
         let marker = tempfile::TempPath::from_path(path);
-        output.write_all(std::process::id().to_string().as_bytes())?;
-        output.sync_all()?;
         Ok(Self { _marker: marker })
     }
 }
