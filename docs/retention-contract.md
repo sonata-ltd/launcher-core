@@ -597,6 +597,25 @@ Historical/unknown ownership не восстанавливается; asset SHA-
 не собираются. Real JVM/descendants, external unscoped APIs, Windows/macOS,
 GUI/manual и power-loss не объявлены PASS. API/consumer audit остаётся P11.
 
+### Managed recovery diagnostics do not weaken retention
+
+`8f9a953`: query/recovery изолирует corrupt/unsafe/oversized/unknown-schema records
+и cleanup errors по path/operation. InstallationsReport возвращает healthy records
+и diagnostics; excluded UUID получает recovery_record вместо общего initialize
+failure. Records читаются только как bounded regular files (1 MiB). Recovery
+работает с copy record: failed durable write не рекламирует новый memory stage.
+Unknown ownership/bytes не присваиваются. Bad records остаются на прежнем месте,
+не удаляются и не перемещаются из GC scan; их отсутствие в query **не разрешает GC**.
+Strict protected roots snapshot продолжает откладывать collection. Ошибки общей
+admission/directory/archive scope по-прежнему могут отложить initialize целиком.
+
+Четыре новых regressions и прежние ownership/GC/process-crash fixtures прошли:
+independent healthy record, corrupt/oversized/future/unsafe/identity/unknown file,
+cleanup isolation, linked external data и unchanged fail-closed GC. Linux
+fmt/check/test/build: **533 passed, 0 failed, 1 ignored**, прежние warnings;
+`/tmp/opencode/core-java-recovery-verified-{check,test,build}.log`.
+GUI diagnostics presentation, history/supervision и platform/manual остаются далее.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
