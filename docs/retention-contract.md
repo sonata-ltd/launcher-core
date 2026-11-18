@@ -172,13 +172,52 @@ drop будущего не пишет `.sonata-exited`, даже если kill-o
 не разрешает очистку при живом или погибшем launcher. Ссылки в ancestors нового
 поколения отвергаются до outputs; cleanup не проходит через process-pin links.
 
-Это пока не полный runtime lifecycle: нет полного catalogue всех DB/current
-profiles/legacy roots, generation/blob deletion protocol и старых generation
-ownership identities. Runtime GC остаётся выключен. Неподдерживаемые старые
+Это пока не полный runtime lifecycle: generation/blob deletion protocol и старые
+generation ownership identities ещё отсутствуют. Runtime GC остаётся выключен.
+Неподдерживаемые старые
 writers, конкурентная внешняя подмена ancestors и оторвавшиеся descendants
 внешнего процессора не покрываются обещанием direct-child ownership. Managed
 Java и assets требуют отдельных roots/pins. Проверки используют реальные OS
 subprocesses и fake processor executable, **не** живые game/installer JVM.
+
+### Runtime catalogue и current roots gate
+
+Коммит `47dbe51`; полный Linux fmt/check/test/build — PASS:
+**383 passed, 0 failed, 1 ignored**. Все content collector regressions прошли с
+общим LockedDatabases helper; добавлены 13 runtime gate tests. Старый reinstall
+fixture, создававший workspace до catalogue, зависал на правильном exclusive
+gate; fixture исправлен без ослабления production admission, повторный полный
+прогон прошёл. Логи: `/tmp/opencode/core-runtime-gate-final-{check,test,build}.log`.
+
+Library root теперь получает собственный append-only `.sonata-roots.json` до
+создания workspace и до запуска. Bootstrap и новые владельцы используют owned
+attach task: drop caller не освобождает admission до завершения записи каталога.
+Уже catalogued writer проверяет identity/coverage под shared admission, поэтому
+параллельная установка не требует повторного exclusive admission. Неизвестный
+owner durably снимает completeness; повреждённый/будущий catalogue не допускает
+нового writer. Catalogue, созданный поверх старых bytes, не становится complete.
+
+Runtime snapshot исключает broad live/unknown game pins и через общий
+`data::db::retention::LockedDatabases` открывает всех persistent owners без create,
+сверяет identity/path и удерживает SQLite `BEGIN IMMEDIATE` вместе с library
+maintenance. Этот helper используется и проверенным content collector; доменные
+roots остаются в соответствующих модулях.
+
+Snapshot сохраняет поколения и SHA-1 **всех** текущих profile artifacts независимо
+от classpath/native и наличия файлов. Profile version, неизвестные root/artifact
+поля, canonical `instances/<instance-id>/<uuid>/maven`, относительные paths и
+SHA-1 проверяются fail-closed. Учитываются instance_library_placements и связанные
+старые instances_libraries snapshots, включая missing files. Legacy absolute path
+принадлежит только фактическому library root; перенос без доказанного владельца
+блокирует gate. Digest/URL aliases не становятся semantic roots.
+
+Startup выполняет только diagnostic snapshot — ни поколения, ни runtime blobs
+не удаляются. Проверены persistent SQLite двух owners, current/legacy roots,
+ошибочные версии/fields/paths/hashes, historical/ephemeral/missing/replaced owners,
+catalogue до workspace outputs, повторный known-writer attach во время установки,
+cancelled admission, broad game pins, canonical aliases/escaping generation links,
+SQL/maintenance lifetime и drop attach caller. Runtime collector должен владеть
+snapshot всей owned задачей; передача одного raw path не создаёт retention pin.
 
 ### Порядок удаления и проверка
 

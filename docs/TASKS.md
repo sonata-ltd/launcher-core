@@ -83,3 +83,18 @@
 | L17 | P2/P3 — Finish публикуется до удаления active snapshot; terminal result не сохраняется. Для переподписки/overflow нужны reconciliation и bounded terminal history. | P09 | Запланировано | — |
 
 Дополнительные обязательные работы P11: consumer imports, удаление неподключённого кода и итоговая Linux/Windows/macOS проверка. Сборочная среда P00 отслеживается отдельно в плане.
+
+### Продолжение P08 после runtime pins
+
+`47dbe51` уточняет частичные D08/S05: library catalogue/current roots gate теперь
+реализован (generation/blob deletion protocol ещё открыт). Attach предшествует
+workspace outputs/launch reads, unknown/historical/ephemeral owners fail-closed,
+known writer допускается под shared lock без ожидания чужой установки. Все
+catalogued persistent SQLite identities удерживают BEGIN IMMEDIATE и maintenance;
+snapshot учитывает текущие профили и оба legacy placement snapshots, missing
+artifacts и SHA-1 независимо от ролей. Unknown schema/fields/paths/hashes,
+missing/replaced owners и broad game pins блокируют gate, aliases — не roots.
+Owned attach переживает drop caller. Полный Linux fmt/check/test/build:
+**383 passed, 0 failed, 1 ignored**, 13 новых tests и прежние content GC regressions.
+Startup пока diagnostic-only, runtime deletion не включён. Подробности и логи —
+[retention contract](retention-contract.md#runtime-catalogue-и-current-roots-gate).
