@@ -67,16 +67,18 @@ lock ContentService (`.sonata-store.lock`) и не глобальная блок
 Maintenance capability сама не проверяет их и не является разрешением на GC.
 `StoredObject` — verified snapshot, не pin; `path_for` только вычисляет layout.
 Возвращённый raw path/его копия не продлевают admission helper. Внутренние рабочие
-flows держат operation guard, но публичные low-level APIs/raw paths ещё не закрыты.
+flows держат operation guard. CAS types и content object storage теперь internal;
+публичные API других доменов/raw paths ещё предстоит закрыть в P11.
 Assets, managed Java и runtime generations пока не подключены к этому admission.
 
-## Обязательные условия будущего GC — пока не реализованы
+## Обязательные условия GC — content реализован, runtime остаётся открытым
 
 Ни SHA-256 filename, ни отсутствие SQL binding в одной БД, ни возраст файла сами
 по себе не дают права удалять опубликованный объект или runtime generation.
 CAS контента и runtime blobs используют общий bytes-код, но **разные каталоги**.
-Полного общего реестра roots сейчас нет, поэтому произвольный concurrent GC
-опубликованных данных запрещён.
+Content CAS использует отдельный complete owner catalogue и gate, описанные ниже.
+Полного runtime реестра roots пока нет; произвольный concurrent GC опубликованных
+данных вне проверенной content области запрещён.
 
 ### Область ресурса и admission
 
@@ -86,8 +88,8 @@ CAS контента и runtime blobs используют общий bytes-ко
    (например, один store разделяют разные БД), сборка откладывается.
 2. Все импортёры, cache readers, registration, recovery и collector должны
    участвовать в одной координации ресурса. Внутренние content/CAS runtime blob
-   flows используют описанный выше admission; collector, assets, generations и
-   managed Java ещё не реализованы/подключены. Lifetime lock ContentService не
+    flows используют описанный выше admission; content collector подключён,
+    assets, generations и managed Java — ещё нет. Lifetime lock ContentService не
    заменяет admission и не доказывает полноту roots.
 3. `preparing` удерживает **весь store**, в том числе ещё не зарегистрированные
    bytes в окне filesystem import → SQL registration. Проверка preparations и
@@ -96,8 +98,9 @@ CAS контента и runtime blobs используют общий bytes-ко
 4. Чтение существующего объекта должно резервировать его до проверки/копирования.
    Новые imports должны передавать владение atomically в object lease/root прежде,
    чем освобождать store-wide защиту. Уже реализованные content SQL leases —
-   часть этого контракта. Operation admission закрывает живое окно import → lease,
-   но durable gate после drop/process exit и полный каталог roots ещё отсутствуют.
+   часть этого контракта. Operation admission закрывает живое окно import → lease.
+   После drop/process exit durable gate content CAS реализован ниже; runtime
+   roots/generations/JVM пока требуют отдельного gate.
 
 ### Roots опубликованных объектов
 
@@ -197,5 +200,64 @@ Admission checkpoint `2d37a3d` добавляет **16** тестов. Осно�
 fixtures также прошли. Ignore и warnings не изменились. Логи:
 `/tmp/opencode/core-admission-final-{check,test,build}.log`.
 
-Эти доказательства закрывают только scratch cleanup и описанный admission
-внутренних CAS flows, а не durable roots gate/GC опубликованных данных.
+Эти admission-доказательства сами по себе не разрешают GC опубликованных данных.
+
+## Content CAS: durable roots gate и повторяемое удаление
+
+Collector запускается на старте ContentService после recovery и миграции
+зарегистрированных hardlinks, с минимальным возрастом **7 дней**. Он не работает
+с runtime generations, runtime blobs, assets или Java. Все instance bindings
+удерживают content bytes независимо от enabled/pinned/presence; копия мода в
+экземпляре не используется как замена durable binding.
+
+Миграция 0015 добавляет неизменяемую случайную identity SQLite. Append-only
+`.sonata-roots.json` находится в canonical content store и регистрирует каждую
+persistent БД до новых imports при exclusive maintenance. Alias того же store
+использует тот же каталог. Первый каталог может быть complete только в пустом
+store (не считая lock-файлов). Исторические данные без каталога, ephemeral DB и
+owner, identity которого невозможно прочитать, навсегда снимают completeness;
+автоматического восстановления исторического владения нет. Отсутствующая,
+заменённая или несовместимая БД откладывает GC. Старые owners не забываются даже
+после unregister. Если каталог нельзя безопасно обновить, bootstrap отказывает
+в допуске нового content writer, а не пишет bytes вне ранее complete каталога.
+
+Collector заново открывает **все** catalogued DB без create, сверяет canonical
+path и identity и держит `BEGIN IMMEDIATE` transactions от snapshot до unlink
+и SQL completion. Любой preparing, даже с чужим store key или без object ID,
+блокирует весь content CAS. Publishing journals должны иметь известную версию,
+canonical UUID, portable уникальные имена, существующую identity и lease на
+каждый файл. Неизвестные/повреждённые records не становятся пустыми roots.
+
+Удаление:
+
+1. Под exclusive admission и SQL-locks выбираются только regular SHA-256 objects
+   с корректным layout, digest и достаточным возрастом. Неизвестные имена,
+   повреждённые bytes, symlinks и future timestamps сохраняются.
+2. Versioned `.sonata-gc/<sha256>.json` фиксирует SHA-256, SHA-1 и size до unlink.
+3. Перед unlink bytes повторно проверяются. Только SHA-1 alias с **этим** SHA-256
+   удаляется; чужой alias не заменяется и не удаляется.
+4. В каждой БД `store_state` становится `external`; identity, provenance и FK
+   сохраняются. Intent удаляется только после commit всех catalogued DB.
+
+После process crash replay заново выполняет весь roots gate. Новый binding
+сохраняет bytes и снимает старый intent. Reimport тех же bytes заново проверяет
+возраст; старый intent не разрешает удалить свежий объект. Отсутствующие bytes
+не являются cache hit; replay завершает alias/SQL repair. Вся async collection
+принадлежит отдельной задаче: drop caller не освобождает transactions во время
+blocking unlink. Ошибки оставляют повторяемые intents и откладывают следующий
+проход; не обещается атомарный commit нескольких БД и файловой системы.
+
+Коммит `aef7a11`: проверена 21 новая regression/contract проверка (включая upgrade 0015), file
+SQLite нескольких owners, historical/ephemeral/missing/replaced DB, preparation
+без IDs, все binding states, publishing/лишний lease, corrupt/future journals и
+intents, canonical alias, symlinks, возраст, provenance, drop caller с реальным
+SQLite lock probe. `process_exit_replays_intent_unlink_alias_and_each_sql_commit_boundary`
+проверяет intent → unlink → alias → SQL updates → первый commit из двух → cleanup
+через `exit(74)` без destructors. Отдельный process-exit fixture добавляет live
+binding перед replay. Это process-crash гарантия, не power-loss гарантия;
+конкурентная внешняя подмена ancestors/DB и старые writers без admission не
+поддерживаются. Windows/macOS и живые JVM для этого шага не проверялись.
+
+Полный Linux fmt/check/test/build — PASS: **358 passed, 0 failed, 1 ignored**.
+Ignore и прежние Prism/proc-macro-error2 warnings не изменились. Логи content GC:
+`/tmp/opencode/core-content-gc-final-{check,test,build}.log`.

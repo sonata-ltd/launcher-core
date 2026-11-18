@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **337 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **358 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -129,12 +129,17 @@ release после process exit/последнего клона, дублика�
 preparing и удержание guard workers/SQL cleanup после drop caller/bootstrap.
 Предыдущие process-exit/scratch/links/unwind/marker fixtures также прошли.
 Это не закрытие всего P08: D07, D08, S05 и S06 остаются частичными. Scratch cleanup
-и admission внутренних CAS flows реализованы; GC опубликованного CAS и runtime
-generations — нет. Следующая работа: fail-closed durable preparations/roots gate,
-полный каталог БД/roots и durable pins живых game/installer JVM по
+и admission внутренних CAS flows реализованы. `aef7a11` добавляет content CAS GC:
+complete append-only каталог persistent DB identities до imports, fail-closed
+preparing/journal/binding/lease gate, SQLite write-locks до unlink/metadata
+completion и versioned deletion intents. Проверены несколько БД, unknown owners,
+возраст, symlinks, новые roots при replay, drop caller и process exit на шести
+FS/SQL границах. GC runtime generations/blobs пока нет. Следующая работа:
+runtime каталог БД/roots и durable pins живых game/installer JVM по
 retention-contract.md; затем portability/bytes identity и подключение оставшихся
 stores. Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
+CAS types и content object storage теперь internal, остальные API — работа P11.
 Power-loss durability не обещается. Windows/macOS, живые API и GUI/manual flows
 не проверены. Исходное локальное изменение Cargo.lock не включено в коммиты.
 
