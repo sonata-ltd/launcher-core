@@ -84,6 +84,19 @@
 
 Дополнительные обязательные работы P11: consumer imports, удаление неподключённого кода и итоговая Linux/Windows/macOS проверка. Сборочная среда P00 отслеживается отдельно в плане.
 
+### Интеграционные задачи P11
+
+Эти задачи раскрывают consumer-часть основных пунктов, не добавляют новых замечаний к 73 пунктам аудита. Каждая задача коммитится вместе со своим patch, tests и evidence.
+
+| ID | Задача | Статус | Evidence |
+|---|---|---|---|
+| P11-G01 | GUI credentials и cooperative close (A09/Q12) | Реализован контракт | Этот commit (`fix(gui): inject credentials and await cooperative close`): source-only 02-host-lifecycle.patch. Host читает CURSEFORGE_API_KEY и передаёт Config; empty key исключён без logging credentials. Main native close request не закрывает окно до core.shutdown; повтор не запускает второй future, routing/admission UI закрыты, publishing future не abort/timeout. Waiting view объясняет cleanup/живые игры, Stop games — только явное действие пользователя. 3 regressions: injected config без env mutation, repeated close state, isolated core shutdown/admission. Linux GUI fmt/check/test/build: 223 passed, 0 failed, 7 ignored; /tmp/opencode/core-p11-lifecycle-{check,test,build}.log. Core owned worker/process wait покрыт Q12; native close/живой game/manual и platform runtime не проверены, abnormal renderer/process termination не обещает cooperative close. Исходный GUI не изменён. |
+| P11-G02 | Operation reconciliation/correlation (A08/L17) | Запланировано | — |
+| P11-G03 | Managed reports и typed UI errors (Q05/Q07/L15) | Запланировано | — |
+| P11-G04 | GUI content recovery actions (B05) | Запланировано | — |
+| P11-V01 | Итоговая документация и Linux verification | Запланировано | — |
+| P11-V02 | Windows/macOS CI и manual isolated launch/install/content | Открыто | Нет runtime evidence; не объявлять PASS по Linux compile/tests. |
+
 ### Продолжение P08 после runtime pins
 
 `47dbe51` уточняет частичные D08/S05: library catalogue/current roots gate теперь

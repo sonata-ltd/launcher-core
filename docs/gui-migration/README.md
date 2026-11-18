@@ -45,5 +45,19 @@ passed, 0 failed, 1 ignored**. Логи первой интеграции:
 
 Первый GUI test run: 214 passed, 6 failed из-за старых невалидных SHA-256 fixtures;
 fixtures исправлены, повтор прошёл без ослабления parser.
-Новые GUI lifetime/reconciliation/diagnostic/recovery flows — следующие patches.
+## 02 — Host credentials и cooperative close
+
+`02-host-lifecycle.patch`: credentials из host env передаются явно в Config;
+blank credential не становится ключом. Main window перехватывает close request,
+оставляет waiting view и ждёт `core.shutdown()` без abort/timeout. Повторные close
+requests идемпотентны, routing/window creation на время close выключены.
+Игры не убиваются автоматически: есть явный `Stop games`; shutdown иначе ждёт exit.
+Три regressions проверяют config injection без env mutation, one-shot close state
+и shutdown admission isolated core. Linux GUI fmt/check/test/build:
+**223 passed, 0 failed, 7 ignored**, логи `/tmp/opencode/core-p11-lifecycle-*.log`.
+Это normal-close wiring; аварийное завершение renderer/process не превращается
+в graceful shutdown. News имеет собственный GUI lifetime и не объявляется частью
+core Tasks. Native close с настоящей игрой вручную пока не проверен.
+
+Reconciliation/diagnostic/recovery flows — следующие patches.
 Это compile/test evidence, не ручной launch/install и не Windows/macOS PASS.
