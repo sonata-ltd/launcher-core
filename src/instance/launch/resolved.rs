@@ -31,6 +31,13 @@ pub struct LaunchCommand {
     pub game_dir: PathBuf,
     pub args: Vec<String>,
     natives: NativeDirectory,
+    runtime_pin: Option<crate::utils::process_pin::ProcessPin>,
+}
+
+impl LaunchCommand {
+    pub(crate) fn retain_runtime(&mut self, pin: crate::utils::process_pin::ProcessPin) {
+        self.runtime_pin = Some(pin);
+    }
 }
 
 fn validate_java(java: &JavaRuntime, policy: &JavaPolicy) -> Result<()> {
@@ -323,12 +330,16 @@ async fn prepare_command(
         game_dir: game,
         args,
         natives,
+        runtime_pin: None,
     })
 }
 
 pub(crate) fn spawn(
-    command: LaunchCommand,
+    mut command: LaunchCommand,
 ) -> Result<(async_std::process::Child, NativeDirectory)> {
+    if let Some(pin) = &command.runtime_pin {
+        pin.before_spawn().map_err(LaunchError::Spawn)?;
+    }
     command
         .natives
         .before_spawn()
@@ -339,6 +350,10 @@ pub(crate) fn spawn(
         .spawn()
         .map_err(LaunchError::Spawn)?;
     command.natives.record_child(child.id());
+    if let Some(pin) = command.runtime_pin.take() {
+        pin.record_child(child.id());
+        command.natives.retain_runtime(pin);
+    }
     Ok((child, command.natives))
 }
 

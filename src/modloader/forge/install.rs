@@ -281,6 +281,12 @@ pub async fn run(
                 cwd: prepared.extracted.clone(),
                 log: prepared.extracted.join(format!("processor-{index}.log")),
                 outputs,
+                retention_root: libraries
+                    .parent()
+                    .ok_or_else(|| {
+                        ModloaderError::Invalid("Maven root has no generation parent".into())
+                    })?
+                    .to_owned(),
             },
             cancel,
             &mut publish_output,

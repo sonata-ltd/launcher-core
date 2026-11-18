@@ -88,7 +88,12 @@ pub(crate) async fn execute<'a>(
     context.cancel.check()?;
     request.loader.validate(&request.game_version)?;
 
-    let workspace = InstallWorkspace::create(context.paths, request.instance_id).await?;
+    let workspace = InstallWorkspace::create_with_cancellation(
+        context.paths,
+        request.instance_id,
+        context.cancel,
+    )
+    .await?;
 
     let result = async {
         let unvalidated_profile = install(request, context, &workspace).await?;

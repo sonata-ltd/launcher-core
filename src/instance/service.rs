@@ -372,7 +372,17 @@ impl InstanceService {
             .await
             .map_err(|source| InstanceError::ContentInventory { id, source })?;
 
-        let command = match instance::init::storage::load(&self.db, id).await? {
+        // A broad durable pin precedes profile/legacy reads. A lazy JVM JAR open
+        // remains protected after launcher exit, not only until spawn returns.
+        let runtime_store =
+            crate::utils::object_store::ObjectStore::new(self.paths.libraries().clone());
+        let _runtime_access = runtime_store
+            .access(&crate::utils::cancellation::Cancellation::new())
+            .await
+            .map_err(crate::instance::launch::LaunchError::Retention)?;
+        let runtime_pin = crate::utils::process_pin::ProcessPin::create(self.paths.libraries())
+            .map_err(crate::instance::launch::LaunchError::Retention)?;
+        let mut command = match instance::init::storage::load(&self.db, id).await? {
             Some(profile) => {
                 resolved::prepare(&rec, &settings, &java, &self.paths, profile).await?
             }
@@ -382,6 +392,7 @@ impl InstanceService {
             }
             None => return Err(InstanceError::NotInstalled(id)),
         };
+        command.retain_runtime(runtime_pin);
         let (child, natives) = resolved::spawn(command)?;
         reservation.commit_with_natives(child, natives);
 

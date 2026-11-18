@@ -18,6 +18,8 @@ pub struct ProcessorCommand {
     pub cwd: PathBuf,
     pub log: PathBuf,
     pub outputs: Vec<(PathBuf, String)>,
+    /// Entire generation, not just the extracted processor work directory.
+    pub retention_root: PathBuf,
 }
 
 fn output_matches(path: &std::path::Path, expected: &str, cancel: &Cancellation) -> Result<bool> {
@@ -81,7 +83,9 @@ pub async fn run(
     let classpath = std::env::join_paths(&command.classpath)
         .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
 
-    let mut child = Command::new(&command.java)
+    let pin = crate::utils::process_pin::ProcessPin::create(&command.retention_root)?;
+    pin.before_spawn()?;
+    let child = Command::new(&command.java)
         .arg("-cp")
         .arg(classpath)
         .arg(&command.main_class)
@@ -92,15 +96,38 @@ pub async fn run(
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true)
         .spawn()?;
+    pin.record_child(child.id());
+    let mut process_exited = false;
+    let result = run_child(
+        command,
+        child,
+        cancel,
+        &mut on_output,
+        &mut tail,
+        &mut process_exited,
+    )
+    .await;
+    pin.finish(process_exited);
+    result
+}
 
+async fn run_child(
+    command: ProcessorCommand,
+    mut child: async_std::process::Child,
+    cancel: &Cancellation,
+    on_output: &mut (impl FnMut(Vec<OutputLine>) + Send),
+    tail: &mut Option<OutputTail>,
+    process_exited: &mut bool,
+) -> Result<()> {
     let started = Instant::now();
 
     loop {
         let status = child.try_status();
         let finished = !matches!(&status, Ok(None));
-        poll_output(&mut tail, finished, &mut on_output).await;
+        poll_output(tail, finished, on_output).await;
 
         if let Some(status) = status? {
+            *process_exited = true;
             if !status.success() {
                 return Err(ModloaderError::Processor(format!(
                     "exit {status}; log {}",
@@ -115,9 +142,9 @@ pub async fn run(
         if cancelled || started.elapsed() > Duration::from_secs(15 * 60) {
             let killed = child.kill();
             if killed.is_ok() {
-                let _ = child.status().await;
+                *process_exited = child.status().await.is_ok();
             }
-            poll_output(&mut tail, true, &mut on_output).await;
+            poll_output(tail, true, on_output).await;
             killed?;
 
             return Err(if cancelled {

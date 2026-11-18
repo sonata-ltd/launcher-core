@@ -41,6 +41,9 @@ pub enum LaunchError {
 
     #[error("failed to extract natives: {0}")]
     Natives(#[source] std::io::Error),
+
+    #[error("could not retain runtime libraries: {0}")]
+    Retention(#[source] std::io::Error),
 }
 
 #[derive(Deserialize, Debug)]

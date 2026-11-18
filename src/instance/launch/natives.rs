@@ -15,6 +15,7 @@ const PREFIX: &str = "run-";
 pub(crate) struct NativeDirectory {
     directory: Arc<tempfile::TempDir>,
     extracted: PathBuf,
+    runtime_pin: Option<crate::utils::process_pin::ProcessPin>,
 }
 
 impl NativeDirectory {
@@ -37,6 +38,7 @@ impl NativeDirectory {
         Ok(Self {
             directory: Arc::new(directory),
             extracted,
+            runtime_pin: None,
         })
     }
 
@@ -57,6 +59,9 @@ impl NativeDirectory {
     }
 
     pub(crate) fn finish(self, process_exited: bool) {
+        if let Some(pin) = &self.runtime_pin {
+            pin.finish(process_exited);
+        }
         if let Ok(directory) = Arc::try_unwrap(self.directory) {
             if process_exited {
                 let path = directory.path().to_owned();
@@ -68,6 +73,10 @@ impl NativeDirectory {
                 tracing::warn!(path = %path.display(), "kept native libraries because process exit was unconfirmed");
             }
         }
+    }
+
+    pub(crate) fn retain_runtime(&mut self, pin: crate::utils::process_pin::ProcessPin) {
+        self.runtime_pin = Some(pin);
     }
 }
 

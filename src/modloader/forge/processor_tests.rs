@@ -13,6 +13,7 @@ fn command(root: &std::path::Path, script: &str) -> ProcessorCommand {
         cwd: root.into(),
         log: root.join("processor.log"),
         outputs: Vec::new(),
+        retention_root: root.into(),
     }
 }
 
@@ -66,4 +67,44 @@ async fn cancellation_keeps_output_already_produced() {
     .unwrap_err();
     assert!(matches!(error, ModloaderError::Cancelled));
     assert_eq!(updates.last().unwrap()[0].text, "ready");
+    assert!(crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
+}
+
+#[async_std::test]
+async fn dropping_processor_future_never_acknowledges_kill_on_drop_as_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = command(dir.path(), "printf 'ready\\n'; while :; do :; done");
+    let cancel = Cancellation::new();
+    let (sender, receiver) = futures::channel::oneshot::channel();
+    let mut sender = Some(sender);
+    let mut future = Box::pin(run(command, &cancel, |_| {
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(());
+        }
+    }));
+    let ready = async_std::future::timeout(Duration::from_secs(5), receiver);
+    futures::pin_mut!(ready);
+    match futures::future::select(ready, future.as_mut()).await {
+        futures::future::Either::Left((result, _)) => {
+            result.unwrap().unwrap();
+        }
+        futures::future::Either::Right((result, _)) => {
+            panic!("processor completed before drop: {result:?}")
+        }
+    }
+    assert!(!crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
+    drop(future);
+    assert!(!crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
+    let pins = fs::read_dir(dir.path().join(".sonata-processes")).unwrap();
+    for pin in pins {
+        assert!(!pin.unwrap().path().join(".sonata-exited").exists());
+    }
+}
+
+#[async_std::test]
+async fn failed_processor_acknowledges_confirmed_exit_not_just_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = command(dir.path(), "exit 7");
+    assert!(run(command, &Cancellation::new(), |_| {}).await.is_err());
+    assert!(crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
 }

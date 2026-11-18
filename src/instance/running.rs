@@ -282,7 +282,7 @@ mod tests {
     #[async_std::test]
     async fn native_directory_survives_running_process_and_is_removed_before_exit_event() {
         let root = tempfile::tempdir().unwrap();
-        let natives = NativeDirectory::create(root.path()).unwrap();
+        let mut natives = NativeDirectory::create(root.path()).unwrap();
         let path = natives.as_ref().to_owned();
         std::fs::write(path.join("libtest.so"), b"test").unwrap();
         let bus = EventBus::new(16);
@@ -290,11 +290,16 @@ mod tests {
         let running = RunningInstances::new(bus);
         let id = 1.into();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let runtime_pin = crate::utils::process_pin::ProcessPin::create(root.path()).unwrap();
+        runtime_pin.before_spawn().unwrap();
+        runtime_pin.record_child(child.id());
+        natives.retain_runtime(runtime_pin);
         running
             .reserve(id)
             .unwrap()
             .commit_with_natives(child, natives);
         assert!(path.join("libtest.so").exists());
+        assert!(!crate::utils::process_pin::allows_cleanup(root.path()).unwrap());
         running.kill(id).unwrap();
         async_std::future::timeout(std::time::Duration::from_secs(3), async {
             while !matches!(
@@ -306,6 +311,7 @@ mod tests {
         .unwrap();
         assert!(!path.exists());
         assert!(running.phase(id).is_none());
+        assert!(crate::utils::process_pin::allows_cleanup(root.path()).unwrap());
     }
 
     #[cfg(unix)]
