@@ -227,3 +227,24 @@ root/store locks, добавляет deterministic duplicated-descriptor regress
 логи core-managed-bytes-verified-{check,test,build}, прежние warnings/ignore.
 Managed published-home ownership/catalogue/roots/process pins/GC — следующая работа;
 P08 остаётся частичным, P09–P11 не закрыты.
+
+`18f3c37` добавляет managed Java append-only owner catalogue до production SQL
+upgrade/operations/bytes и independent versioned `.sonata-java-home.json` до home
+publication. Marker связывает generation/operation/package, source archive digest/
+size, original publisher PID/time и optional persistent DB identity; validation
+не переименовывает publisher и не присваивает historical homes. First catalogue
+с pre-existing metadata/homes, ephemeral или unbound writer неполный навсегда.
+Protected roots snapshot держит `.managed` → archive maintenance → все owner DB
+BEGIN IMMEDIATE locks. Все Java registrations всех owners (не только selected),
+checked operation homes и archive identities — roots; surviving owned home
+сохраняет archive даже после потери SQL/operation roots. Manual aliases в owned
+home тоже удерживают generation, включая missing executable. Missing/replaced DB,
+unknown/legacy/future/mismatched marker/record/schema/path, active operations и
+pending/unknown scratch откладывают всю область. Startup только inspect, GC нет.
+12 новых regressions и sixth process-exit phase home-owned; полный Linux
+fmt/check/test/build: **497 passed, 0 failed, 1 ignored**, прежние warnings/ignore.
+Логи core-managed-roots-verified-{check,test,build}. Первый focused run исправил
+shadowing test helper, затем fixture identity deletion упёрся в immutable trigger:
+fault injection теперь явно снимает trigger; expanded и final full прошли.
+Managed validation/game/installer process pins и replayable published GC — дальше;
+complete GC eligibility, real JVM/platform/GUI/power-loss ещё не PASS.

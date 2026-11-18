@@ -490,6 +490,44 @@ regression проверяет release и исключение второго в�
 `/tmp/opencode/core-managed-bytes-verified-{check,test,build}.log`.
 Process-crash/synthetic evidence, не real JVM/platform/GUI/power-loss PASS.
 
+### Managed Java catalogue and durable home/archive roots
+
+`18f3c37`: production JavaService/ManagedJavaService связаны с database owner.
+Append-only `.managed/.sonata-roots.json` предшествует production SQL upgrade,
+operation/staging/archive/home writes. Standalone ManagedJavaService не получает
+постфактум ownership DB: unbound/ephemeral writer делает catalogue incomplete.
+First upgraded catalogue учитывает historical metadata в `.managed` и placements
+в sibling `managed/`; наличие старых homes тоже permanently unknown coverage.
+Known owner не требует exclusive rewrite под чужим shared writer. Missing/replaced
+historical DB и lost identity не реконструируются/создаются при roots inspection.
+
+До rename generation публикуется no-clobber bounded regular home marker с version,
+operation/package, persistent DB identity или unknown, original PID/time, relative
+home и source archive SHA-256/size. Marker не mutable operation owner: explicit
+validation может переприсвоить operation, но не provenance original publisher.
+Archive-supplied marker не перезаписывается. Historical unmarked homes не adopt-ятся.
+
+Owned diagnostic inspect удерживает `.managed` maintenance, nested archive
+maintenance и все catalogue DB BEGIN IMMEDIATE transactions до completion после
+drop caller. Roots — все Java registrations всех owners, включая unselected и
+checked manual/discovered aliases в owned home, durable operation homes и archive
+identities. Missing executable не означает missing intended root. Surviving owned
+home удерживает archive независимо от SQL/operation record. Unknown SQL source,
+external/relocated managed pair, escaping path, unknown nested record fields,
+future/legacy/mismatched owner и pending scratch fail-closed для всей области.
+Snapshots/paths сами по себе не process pin; это roots inspection, не разрешение GC.
+Eligibility old/dead-owned trees, runtime pins и replayable deletion ещё не включены.
+
+12 новых regressions: append-only multiple DB, early catalogue, historical/ephemeral/
+unbound stores, all SQL/operation/surviving-home roots, missing/replaced/lost identity,
+unknown/future/conflicting records/markers, pending scratch, aliases/missing exec,
+external sources и no-clobber marker. Caller-drop тест подтверждает оба maintenance
+barriers и реальный SQL write-lock probe. Existing process-exit fixture расширен
+шестой границей home-owned перед publication. Final Linux fmt/check/test/build:
+**497 passed, 0 failed, 1 ignored**; логи
+`/tmp/opencode/core-managed-roots-verified-{check,test,build}.log`.
+Это не real JVM/descendants, platform/GUI/manual или power-loss verification.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
