@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **383 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **399 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -143,8 +143,13 @@ profile/legacy generation/hash roots и общий LockedDatabases helper; known
 не ждёт exclusive readmission во время чужой установки. Все content GC regressions
 и 13 новых runtime gate tests прошли; один старый fixture требовал catalogue до
 удержания workspace, исправлен и повторный полный прогон прошёл.
-GC runtime generations/blobs пока нет. Следующая работа:
-versioned generation ownership и deletion protocol по
+`150e1f2` добавляет versioned generation ownership до outputs и startup generation
+GC (7 дней): complete snapshot → intent → quarantine rename → outputs → metadata
+→ completion. 16 новых tests, process-exit шести границ, new-root restore,
+drop caller/SQL locks, повторная age проверка и stale/live/unknown child ownership
+прошли. Старые/неизвестные поколения сохраняются, не реконструируются по PID.
+Runtime blob GC пока нет. Следующая работа:
+защищённые roots всех сохранившихся generations и blob deletion protocol по
 retention-contract.md; затем portability/bytes identity и подключение оставшихся
 stores. Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.

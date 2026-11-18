@@ -98,3 +98,14 @@ Owned attach переживает drop caller. Полный Linux fmt/check/test
 **383 passed, 0 failed, 1 ignored**, 13 новых tests и прежние content GC regressions.
 Startup пока diagnostic-only, runtime deletion не включён. Подробности и логи —
 [retention contract](retention-contract.md#runtime-catalogue-и-current-roots-gate).
+
+`150e1f2` продолжает D08/S05: versioned generation record до outputs, отказ
+uncatalogued writer и no-clobber UUID directory; startup GC только catalogued,
+dead-owned, unrooted поколений старше 7 дней и без live/unknown process pins.
+Intent/quarantine/outputs/metadata/completion replay сохраняет неизвестные данные,
+links и replacement identity; новые current roots до replay возвращают оставшиеся
+quarantined bytes без overwrite. Весь collector удерживает SQL/maintenance после
+drop caller. Полный Linux fmt/check/test/build: **399 passed, 0 failed, 1 ignored**,
+16 новых tests, включая subprocess exits шести deletion границ и проверку возраста
+новых outputs. Runtime blob GC, portability, assets и managed Java остаются
+открытыми; P08 ещё не объявлен завершённым.

@@ -211,13 +211,57 @@ SHA-1 проверяются fail-closed. Учитываются instance_librar
 принадлежит только фактическому library root; перенос без доказанного владельца
 блокирует gate. Digest/URL aliases не становятся semantic roots.
 
-Startup выполняет только diagnostic snapshot — ни поколения, ни runtime blobs
-не удаляются. Проверены persistent SQLite двух owners, current/legacy roots,
+В `47dbe51` startup выполнял только diagnostic snapshot, без удаления поколений
+или runtime blobs. Проверены persistent SQLite двух owners, current/legacy roots,
 ошибочные версии/fields/paths/hashes, historical/ephemeral/missing/replaced owners,
 catalogue до workspace outputs, повторный known-writer attach во время установки,
 cancelled admission, broad game pins, canonical aliases/escaping generation links,
 SQL/maintenance lifetime и drop attach caller. Runtime collector должен владеть
 snapshot всей owned задачей; передача одного raw path не создаёт retention pin.
+
+### Versioned generation ownership и quarantine/replay
+
+Коммит `150e1f2`; полный Linux fmt/check/test/build — PASS:
+**399 passed, 0 failed, 1 ignored**. 16 новых tests, включая настоящие subprocess
+создания workspace и exit без destructors; process-exit collector на intent,
+rename, outputs, metadata, removed и cleaned; new current root после intent/rename;
+replay fresh outputs/age; caller drop с SQLite lock probe; другая catalogued DB и
+legacy placements; live/unknown child после смерти owner; unknown/future/replaced
+ownership и links. Логи: `/tmp/opencode/core-generation-gc-verified-{check,test,build}.log`.
+Прежние ignore/Prism/proc-macro-error2 warnings не изменились. Реальные JVM,
+Windows/macOS и power-cut не проверялись.
+
+Новые production workspaces проверяют catalogue coverage после shared admission
+и записывают `.sonata-generation.json` до maven/work outputs. Record содержит
+version 1, instance/UUID, persistent DB identity (либо unknown для ephemeral DB),
+полный owner PID и creation time. UUID directory создаётся no-clobber; совпадение
+PID в чужом существующем каталоге не даёт права удалить его при ошибке создания.
+Ошибка owner read теперь возвращается **до** generation outputs.
+
+Generation collector использует complete runtime snapshot всей owned задачей:
+library exclusive maintenance и SQL locks всех DB сохраняются до окончания
+blocking rename/remove. Кандидат должен иметь matching layout/record/PID и
+catalogued persistent identity, подтверждённо отсутствующего launcher owner,
+отсутствие live/unknown process pins, известные top-level entries и только
+regular descendants. Возраст **7 дней** проверяется по record creation и всем
+оставшимся файлам, а не только по возрасту каталога. Future timestamps,
+unknown/corrupt ownership, чужие top-level files и links сохраняются. Старые
+поколения с одним PID marker не получают ownership автоматически.
+
+Versioned `.sonata-runtime-gc/generations/<uuid>.json` сохраняет ownership до
+rename в одноимённую quarantine directory. Только затем удаляются maven/work
+и завершённые process pins; ownership metadata удаляется последней, directory и
+intent — после outputs. Replay снова выполняет current roots/owners/process/age
+gate и проверяет original/quarantine ancestors. Replacement owner или неизвестная
+quarantine не разрешают unlink. Если до replay появляется current root, ещё
+сохранившиеся проверяемые quarantined bytes возвращаются без overwrite; это не
+обещание восстановить bytes, уже удалённые до crash. Новое поколение никогда не
+публикуется с повторно использованным UUID существующего workspace.
+
+Generation GC запускается на startup; runtime **blob GC пока выключен**, assets
+и managed Java не затрагиваются. API unregister сам по себе не означает удаление
+game files. Гарантия остаётся process-crash, не power-loss; concurrent внешняя
+подмена filesystem/DB, старые writers и detached descendants не поддерживаются.
 
 ### Порядок удаления и проверка
 
