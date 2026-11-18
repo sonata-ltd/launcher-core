@@ -258,10 +258,48 @@ quarantine не разрешают unlink. Если до replay появляет
 обещание восстановить bytes, уже удалённые до crash. Новое поколение никогда не
 публикуется с повторно использованным UUID существующего workspace.
 
-Generation GC запускается на startup; runtime **blob GC пока выключен**, assets
-и managed Java не затрагиваются. API unregister сам по себе не означает удаление
+В `150e1f2` generation GC запускается на startup; blob collector добавлен отдельным
+проверенным шагом ниже. Assets и managed Java не затрагиваются. API unregister сам по себе не означает удаление
 game files. Гарантия остаётся process-crash, не power-loss; concurrent внешняя
 подмена filesystem/DB, старые writers и detached descendants не поддерживаются.
+
+### Runtime blob collection
+
+`8a38e9d` выделяет neutral `object_store::collection::{Collection, Roots,
+DeleteIntent}`: versioned intents, проверка bytes/age при replay, unlink и cleanup
+только matching SHA-1 alias. Domain SQL completion/identity/provenance не переезжает
+в FS helper. Все прежние content/generation regressions прошли (399 tests).
+
+`9659851` добавляет runtime blob collector и startup-порядок generation → blobs,
+возраст 7 дней. Owned task удерживает complete runtime snapshot/все SQLite
+BEGIN IMMEDIATE и exclusive library admission; blob maintenance берётся вторым,
+через try, чтобы не ждать standalone importer под SQL locks. Оба admission и SQL
+живут до окончания blocking root scan/plan/unlink/intent cleanup, даже после drop
+caller. Каждый replay строит roots заново.
+
+Semantic roots — SHA-1 всех current profile artifacts и обоих legacy snapshots,
+даже missing/не-classpath files; дополнительно хешируются regular maven/work bytes
+**каждого сохранившегося** versioned generation с known catalogued owner.
+Snapshot не угадывает будущие inputs: live/unknown owner/child, unknown/future
+metadata/timestamps/layouts, linked/special files, неизвестные top-level library
+entries и pending/unknown quarantine блокируют всю blob-область. Completed
+generation с ещё живым launcher PID также консервативно блокирует blobs.
+
+Удаляются только проверенные canonical SHA-256 objects. Aliases и URL indexes —
+hints, не roots; stale URL hints и flat legacy SHA-1 blobs не удаляются, consumers
+обязаны проверять bytes. SQL identity/provenance collector не меняет.
+
+Полный Linux fmt/check/test/build — PASS: **417 passed, 0 failed, 1 ignored**;
+18 новых tests, все предыдущие content/generation regressions. Проверены четыре
+process-exit границы intent/unlink/alias/cleaned, new profile roots и fresh reimport
+age при replay, drop caller на snapshot и blocking intent с SQL probes, independent
+blob admission, two DB/legacy/current/missing roots, surviving maven/work,
+live/unknown/future preparations, canonical aliases, links, pending/corrupt/unknown
+quarantine и startup generation→blobs. Логи:
+`/tmp/opencode/core-blob-gc-verified-{check,test,build}.log`.
+Ignore и прежние Prism/proc-macro-error2 warnings сохранены; новые warnings не
+появились. Assets/managed Java, реальные JVM, detached descendants, Windows/macOS,
+GUI/manual и power-cut ещё не подтверждены. Process-crash — не power-loss гарантия.
 
 ### Порядок удаления и проверка
 

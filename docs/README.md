@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **399 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **417 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -148,10 +148,13 @@ GC (7 дней): complete snapshot → intent → quarantine rename → outputs 
 → completion. 16 новых tests, process-exit шести границ, new-root restore,
 drop caller/SQL locks, повторная age проверка и stale/live/unknown child ownership
 прошли. Старые/неизвестные поколения сохраняются, не реконструируются по PID.
-Runtime blob GC пока нет. Следующая работа:
-защищённые roots всех сохранившихся generations и blob deletion protocol по
-retention-contract.md; затем portability/bytes identity и подключение оставшихся
-stores. Exclusive capability не доказывает отсутствие roots. Публичные low-level
+`8a38e9d` выделяет общий Collection; `9659851` добавляет startup runtime blob GC
+после generation maintenance. Current/legacy SHA-1 и bytes всех surviving owned
+generations — roots; live/unknown/future preparations и pending/unknown quarantine
+блокируют область. 18 новых blob tests и прежние content/generation regressions
+прошли, включая startup integration, четыре process-exit границы и drop caller
+во время blocking intent. Следующая работа: portability legacy paths и контракты
+assets/managed Java. Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.
 Power-loss durability не обещается. Windows/macOS, живые API и GUI/manual flows
