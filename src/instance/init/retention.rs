@@ -58,17 +58,12 @@ pub(crate) async fn attach(
 
 pub(crate) async fn initialize(db: Arc<Database>, paths: Arc<LauncherPaths>) -> Result<()> {
     attach(db, paths.libraries().clone(), Cancellation::new()).await?;
-    // Exercise the durable gate in production without enabling deletion before
-    // its generation/blob protocol and independent regressions are ready.
-    async_std::task::spawn(async move {
-        match snapshot(&paths).await {
-            Ok(snapshot) => {
-                tracing::debug!(root = %snapshot.maintenance.root().display(), roots = snapshot.generations.len(), hashes = snapshot.sha1.len(), "runtime roots snapshot validated; deletion remains disabled");
-                snapshot.databases.close().await;
-            }
-            Err(error) => tracing::debug!(%error, "runtime retention gate deferred"),
-        }
-    }).await;
+    // Unknown historical ownership and live/unknown pins conservatively defer.
+    // Blob collection is not enabled by generation ownership alone.
+    match super::generation_gc::collect(paths, std::time::Duration::from_secs(7 * 86400)).await {
+        Ok(removed) => tracing::debug!(removed, "runtime generation maintenance completed"),
+        Err(error) => tracing::debug!(%error, "runtime retention gate deferred"),
+    }
     Ok(())
 }
 

@@ -95,10 +95,11 @@ pub(crate) async fn execute<'a>(
     )
     .await?;
 
-    let workspace = InstallWorkspace::create_with_cancellation(
+    let workspace = InstallWorkspace::create_owned(
         context.paths,
         request.instance_id,
         context.cancel,
+        &context.db,
     )
     .await?;
 

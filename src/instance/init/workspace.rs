@@ -27,14 +27,57 @@ impl InstallWorkspace {
         .await
     }
 
+    #[cfg(test)]
     pub async fn create_with_cancellation(
         paths: &LauncherPaths,
         instance_id: InstanceId,
         cancel: &crate::utils::cancellation::Cancellation,
     ) -> Result<InstallWorkspace> {
+        Self::create_inner(paths, instance_id, cancel, None).await
+    }
+
+    pub async fn create_owned(
+        paths: &LauncherPaths,
+        instance_id: InstanceId,
+        cancel: &crate::utils::cancellation::Cancellation,
+        db: &crate::data::db::Database,
+    ) -> Result<InstallWorkspace> {
+        Self::create_inner(paths, instance_id, cancel, Some(db)).await
+    }
+
+    async fn create_inner(
+        paths: &LauncherPaths,
+        instance_id: InstanceId,
+        cancel: &crate::utils::cancellation::Cancellation,
+        db: Option<&crate::data::db::Database>,
+    ) -> Result<InstallWorkspace> {
         let store = crate::utils::object_store::ObjectStore::new(paths.libraries().clone());
         let admission = store.access(cancel).await?;
-        let generation_uuid = Uuid::new_v4().to_string();
+        let db_owner = if let Some(db) = db {
+            let owner = db
+                .retention_owner()
+                .await
+                .map_err(crate::data::db::DbError::from)?;
+            if !crate::utils::object_store::catalog::RootCatalog::covers(
+                admission.root(),
+                owner.as_ref(),
+            )? {
+                return Err(std::io::Error::other(
+                    "uncatalogued runtime writer cannot create a generation",
+                )
+                .into());
+            }
+            owner
+        } else {
+            None
+        };
+        let generation = Uuid::new_v4();
+        let generation_uuid = generation.to_string();
+        let owner = super::generation_gc::GenerationOwner::new(
+            db_owner.map(|owner| owner.identity),
+            instance_id.get(),
+            generation,
+        )?;
 
         let generation_root = crate::utils::files::child(
             paths.libraries(),
@@ -59,10 +102,14 @@ impl InstallWorkspace {
             _admission: admission,
         };
 
+        // An existing UUID directory is never ours, even if its PID marker
+        // matches. Fail before cleanup can touch another workspace's files.
+        async_std::fs::create_dir_all(workspace.generation_root.parent().unwrap()).await?;
+        async_std::fs::create_dir(&workspace.generation_root).await?;
         let dir_creation_result = async {
-            async_std::fs::create_dir_all(&workspace.generation_root).await?;
             // Ownership is visible before any useful runtime outputs.
             crate::utils::process::write_owner(&workspace.generation_root.join(".sonata-owner"))?;
+            owner.write(&workspace.generation_root)?;
             async_std::fs::create_dir_all(workspace.maven_dir()).await?;
             async_std::fs::create_dir_all(workspace.work_dir()).await?;
 

@@ -211,8 +211,8 @@ async fn cancelled_installation_returns_typed_error_without_creating_workspace()
 #[async_std::test]
 async fn database_read_failure_keeps_source_error_and_cleans_new_generation() {
     let (_temp, paths, db, catalog) = empty_installation().await;
-    // Fail the first storage read, after workspace creation and before metadata
-    // requests. No network, assets downloads or Java processes are needed.
+    // Fail the owner/storage read before outputs or metadata requests. No
+    // network, assets downloads or Java processes are needed.
     db.pool.close().await;
     let operations = OperationRegistry::new(EventBus::new(32));
     let op = operations.begin("instance.install".into(), vec![]);
@@ -235,11 +235,6 @@ async fn database_read_failure_keeps_source_error_and_cleans_new_generation() {
         error,
         InitError::Db(crate::data::db::DbError::Db(sqlx::Error::PoolClosed))
     ));
-    assert_eq!(
-        std::fs::read_dir(paths.libraries().join("instances/1"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert!(!paths.libraries().join("instances/1").exists());
     op.finish(Outcome::Failed);
 }
