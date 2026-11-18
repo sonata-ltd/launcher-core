@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     data::{db::Database, layout::LauncherPaths},
     instance::{
-        download::{libs::linked_libs, manifest::load_or_fetch},
+        download::{libs::linked_libs_at, manifest::load_or_fetch},
         error::InstanceError,
         model::InstanceRecord,
         settings::EffectiveSettings,
@@ -31,7 +31,7 @@ async fn legacy_inputs(
     serde_json::Value,
     Vec<crate::instance::download::libs::LibInfo>,
 )> {
-    let libs = linked_libs(rec.id, db).await?;
+    let libs = linked_libs_at(rec.id, db, paths.libraries()).await?;
     if libs.is_empty() {
         return Err(InstanceError::NotInstalled(rec.id));
     }

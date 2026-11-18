@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use sqlx::{QueryBuilder, Sqlite};
@@ -16,14 +20,50 @@ const INSERT_CHUNK: usize = 100;
 
 pub struct DbLibStore {
     db: Arc<Database>,
+    library_root: Option<PathBuf>,
 }
 
 impl DbLibStore {
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self {
+            db,
+            library_root: None,
+        }
+    }
+
+    pub fn at(db: Arc<Database>, library_root: &Path) -> Self {
+        Self {
+            db,
+            library_root: Some(library_root.to_owned()),
+        }
     }
 
     pub async fn link_instance(&self, id: InstanceId, libs: &[&LibInfo]) -> Result<(), DbError> {
+        let paths: Vec<String> = libs
+            .iter()
+            .map(|lib| {
+                let Some(root) = &self.library_root else {
+                    return Ok(lib.path().clone());
+                };
+                let path = Path::new(lib.path());
+                let relative = if path.is_absolute() {
+                    path.strip_prefix(root).map_err(|_| {
+                        DbError::InvalidInput("library placement outside configured root".into())
+                    })?
+                } else {
+                    path
+                };
+                if relative.to_string_lossy().contains('\\') {
+                    return Err(DbError::ResultCorrupted);
+                }
+                files::child(root, relative)
+                    .map_err(|error| DbError::InvalidInput(error.to_string()))?;
+                relative
+                    .to_str()
+                    .map(str::to_owned)
+                    .ok_or(DbError::ResultCorrupted)
+            })
+            .collect::<Result<_, _>>()?;
         let mut tx = self.db.pool.begin().await?;
         sqlx::query("DELETE FROM instance_library_placements WHERE instance_id = ?")
             .bind(id)
@@ -38,7 +78,7 @@ impl DbLibStore {
                     .push_bind((chunk_index * INSERT_CHUNK + index) as i64)
                     .push_bind(lib.hash())
                     .push_bind(lib.name())
-                    .push_bind(lib.path())
+                    .push_bind(&paths[chunk_index * INSERT_CHUNK + index])
                     .push_bind(lib.is_native())
                     .push_bind(lib.url());
             });

@@ -57,7 +57,15 @@ pub(crate) async fn attach(
 }
 
 pub(crate) async fn initialize(db: Arc<Database>, paths: Arc<LauncherPaths>) -> Result<()> {
-    attach(db, paths.libraries().clone(), Cancellation::new()).await?;
+    attach(db.clone(), paths.libraries().clone(), Cancellation::new()).await?;
+    match super::library_paths::migrate(db, paths.libraries().clone()).await {
+        Ok(report) => tracing::debug!(
+            converted = report.converted,
+            unresolved = report.unresolved,
+            "legacy library paths inspected"
+        ),
+        Err(error) => tracing::debug!(%error, "legacy library path upgrade deferred"),
+    }
     // Unknown historical ownership and live/unknown pins conservatively defer.
     match super::generation_gc::collect(paths.clone(), std::time::Duration::from_secs(7 * 86400))
         .await

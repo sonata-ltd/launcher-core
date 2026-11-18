@@ -132,8 +132,39 @@ impl LibInfo {
     }
 }
 
+/// Returns the stored placement snapshot, whose paths may be library-relative.
+/// It does not resolve paths or acquire a runtime retention pin.
+#[deprecated(note = "use linked_libs_at with the configured library root")]
 pub async fn linked_libs(id: InstanceId, db: Arc<Database>) -> Result<Vec<LibInfo>, DbError> {
     DbLibStore::new(db).for_instance(id).await
+}
+
+/// Resolves library-relative placements against the current root. Unknown old
+/// absolute paths remain external paths; no relocated root is guessed. Caller
+/// must hold runtime admission/pin before reading an executable launch snapshot.
+pub async fn linked_libs_at(
+    id: InstanceId,
+    db: Arc<Database>,
+    root: &Path,
+) -> Result<Vec<LibInfo>, DbError> {
+    let mut libraries = DbLibStore::new(db).for_instance(id).await?;
+    for library in &mut libraries {
+        if !files::hash_valid(&library.hash, 40) {
+            return Err(DbError::ResultCorrupted);
+        }
+        let path = Path::new(&library.path);
+        if !path.is_absolute() {
+            if library.path.contains('\\') {
+                return Err(DbError::ResultCorrupted);
+            }
+            library.path = files::child(root, path)
+                .map_err(|error| DbError::InvalidInput(error.to_string()))?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| DbError::ResultCorrupted)?;
+        }
+    }
+    Ok(libraries)
 }
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadLibs;
@@ -159,13 +190,56 @@ impl<'a, 'b> LibsData<'a, 'b> {
             MetaProvider::Prism => data.parse_manifest_prism().await?,
         };
 
-        Self::sync_prepared(id, wanted, db, op).await
+        Self::sync_prepared_at(id, wanted, db, op, paths.libraries()).await
     }
 
     pub async fn sync_prepared(
         id: InstanceId,
         wanted: Vec<LibInfo>,
         db: Arc<Database>,
+        op: &OperationHandle,
+    ) -> Result<LibsOutcome, LibsSyncError> {
+        Self::sync_prepared_inner(id, wanted, DbLibStore::new(db), op).await
+    }
+
+    /// Root-aware legacy adapter; new snapshots store relative placements.
+    /// The caller is responsible for runtime admission throughout this operation.
+    pub async fn sync_prepared_at(
+        id: InstanceId,
+        mut wanted: Vec<LibInfo>,
+        db: Arc<Database>,
+        op: &OperationHandle,
+        root: &Path,
+    ) -> Result<LibsOutcome, LibsSyncError> {
+        for lib in &mut wanted {
+            let path = Path::new(lib.path());
+            let relative = if path.is_absolute() {
+                path.strip_prefix(root).map_err(|_| {
+                    LibsSyncError::ManifestMalformed(
+                        "library placement outside configured root".into(),
+                    )
+                })?
+            } else {
+                path
+            };
+            if relative.to_string_lossy().contains('\\') {
+                return Err(LibsSyncError::ManifestMalformed(
+                    "invalid relative placement".into(),
+                ));
+            }
+            lib.path = files::child(root, relative)
+                .map_err(|error| LibsSyncError::ManifestMalformed(error.to_string()))?
+                .into_os_string()
+                .into_string()
+                .map_err(|_| LibsSyncError::ManifestMalformed("non-Unicode library path".into()))?;
+        }
+        Self::sync_prepared_inner(id, wanted, DbLibStore::at(db, root), op).await
+    }
+
+    async fn sync_prepared_inner(
+        id: InstanceId,
+        wanted: Vec<LibInfo>,
+        store: DbLibStore,
         op: &OperationHandle,
     ) -> Result<LibsOutcome, LibsSyncError> {
         op.start_stage_determinable(STAGE_TYPE);
@@ -182,8 +256,6 @@ impl<'a, 'b> LibsData<'a, 'b> {
                 }
             }
         }
-
-        let store = DbLibStore::new(db);
 
         let outcome = Syncer::default()
             .run(
@@ -265,6 +337,7 @@ fn construct_os_name() -> Result<&'static str, LibsSyncError> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod prepared_tests {
     use super::*;
 
