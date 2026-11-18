@@ -93,6 +93,7 @@ impl InstanceContentService {
             Err(error) => tracing::warn!(%error, "could not sweep content import staging"),
         })
         .await;
+        super::staging::sweep_stale(paths.instances().clone()).await;
         match recovery::recover(&db, &paths, &registry, None).await {
             Ok(failures) => {
                 for failure in failures {

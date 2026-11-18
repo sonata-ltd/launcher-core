@@ -10,6 +10,7 @@ pub mod recovery;
 pub mod resolve;
 pub mod scan_policy;
 pub mod service;
+mod staging;
 pub mod storage;
 pub mod store;
 pub mod watch;

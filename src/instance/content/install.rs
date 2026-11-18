@@ -72,10 +72,7 @@ async fn execute_preparing(
     let mods = files::child(root, Path::new("mods"))?;
     fs::create_dir_all(&mods)?;
     // Временные записи лежат вне mods и на том же томе, что назначения.
-    let stage = tempfile::Builder::new()
-        .prefix(".sonata-content-")
-        .tempdir_in(root)?;
-    let download_stage = tempfile::tempdir()?;
+    let stage = super::staging::ContentStaging::create(root)?;
     let mut prepared = Vec::new();
     for (index, action) in releases.iter().enumerate() {
         let release = &action.release;
@@ -136,7 +133,7 @@ async fn execute_preparing(
             let object = if let Some(object) = cached_object {
                 object
             } else {
-                let download = download_stage.path().join(format!("{index}.jar"));
+                let download = stage.downloads().join(format!("{index}.jar"));
                 transfer::download(&file.url, &download, file.sha1.as_deref(), cancel).await?;
                 let source = download;
                 let token = cancel.clone();
@@ -157,7 +154,7 @@ async fn execute_preparing(
             };
             let object_id =
                 super::store::storage::register_leased(&db, &object.digests, true, id).await?;
-            let target = stage.path().join(&file.file_name);
+            let target = stage.files().join(&file.file_name);
             let source = object.path.clone();
             let token = cancel.clone();
             async_std::task::spawn_blocking(move || placement::copy_new(&source, &target, &token))
@@ -190,7 +187,7 @@ async fn execute_preparing(
         .iter()
         .filter(|file| file.placement != Placement::External)
     {
-        let source = stage.path().join(&file.name);
+        let source = stage.files().join(&file.name);
         let target = mods.join(&file.name);
         async_std::task::spawn_blocking(move || files::publish::publish_new(source, target))
             .await?;

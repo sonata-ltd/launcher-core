@@ -156,6 +156,48 @@ async fn cached_release(
     (store, object, release)
 }
 
+fn content_staging_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(b".sonata-content-")
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
+
+#[async_std::test]
+async fn startup_keeps_live_content_staging_and_legacy_unknown_ownership() {
+    let fixture = fixture().await;
+    let stage = super::staging::ContentStaging::create(&fixture.root).unwrap();
+    std::fs::write(stage.files().join("mod.jar"), b"active preparation").unwrap();
+    let legacy = fixture.root.join(".sonata-content-legacy");
+    std::fs::create_dir(&legacy).unwrap();
+    std::fs::write(legacy.join("mod.jar"), b"unknown preparation").unwrap();
+    let _service = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(content_staging_paths(&fixture.root).len(), 2);
+    assert_eq!(
+        std::fs::read(stage.files().join("mod.jar")).unwrap(),
+        b"active preparation"
+    );
+    assert_eq!(
+        std::fs::read(legacy.join("mod.jar")).unwrap(),
+        b"unknown preparation"
+    );
+}
+
 #[async_std::test]
 async fn cache_selection_leases_bytes_before_verification_and_blocks_admission() {
     let fixture = fixture().await;
@@ -289,6 +331,7 @@ async fn cancellation_after_staging_releases_preparation_without_publishing() {
     assert!(result.is_err());
     assert!(!fixture.root.join("mods/cached.jar").exists());
     assert_eq!(std::fs::read(object.path).unwrap(), b"cached mod");
+    assert!(content_staging_paths(&fixture.root).is_empty());
     assert!(storage::leased_objects(&fixture.db, operation)
         .await
         .unwrap()
@@ -319,6 +362,7 @@ async fn failed_cache_verification_discards_only_preparation() {
     .await
     .is_err());
     assert!(!fixture.root.join("mods/cached.jar").exists());
+    assert!(content_staging_paths(&fixture.root).is_empty());
     assert!(storage::leased_objects(&fixture.db, operation)
         .await
         .unwrap()
@@ -353,6 +397,7 @@ async fn failed_publication_preserves_journal_and_leases_for_recovery() {
     .await
     .is_err());
     assert_eq!(std::fs::read(&target).unwrap(), b"user file");
+    assert!(content_staging_paths(&fixture.root).is_empty());
     assert_eq!(
         storage::leased_objects(&fixture.db, operation)
             .await

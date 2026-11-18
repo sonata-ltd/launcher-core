@@ -188,6 +188,20 @@ async fn process_exit_recovers_each_publication_boundary_without_duplicate_links
         let fixture = fixture_with_database(true).await;
         let operation = terminate_writer(&fixture, phase).await;
         let abandoned = matches!(phase, "preparing" | "staged");
+        let scratch = content_staging_paths(&fixture.root);
+        assert_eq!(
+            scratch.len(),
+            usize::from(matches!(phase, "staged" | "intent")),
+            "{phase}"
+        );
+        for path in &scratch {
+            assert!(path.join(".sonata-owner").is_file(), "{phase}");
+            assert_eq!(
+                std::fs::read(path.join("files/cached.jar")).unwrap(),
+                b"cached mod",
+                "{phase}"
+            );
+        }
         let leases = storage::leased_objects(&fixture.db, operation)
             .await
             .unwrap();
@@ -205,6 +219,7 @@ async fn process_exit_recovers_each_publication_boundary_without_duplicate_links
         )
         .await
         .unwrap();
+        assert!(content_staging_paths(&fixture.root).is_empty(), "{phase}");
         assert!(
             !storage::has_pending(&fixture.db, fixture.id).await.unwrap(),
             "{phase}"
