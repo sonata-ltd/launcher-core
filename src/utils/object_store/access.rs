@@ -10,6 +10,11 @@ const LOCK: &str = ".sonata-access.lock";
 pub(crate) struct StoreLock(fs::File);
 
 impl StoreLock {
+    /// Only for a bounded blocking worker, never on an async executor thread.
+    pub(crate) fn blocking_exclusive(file: fs::File) -> io::Result<Self> {
+        file.lock()?;
+        Ok(Self(file))
+    }
     /// Lifetime ownership needs the same explicit release as admission: a
     /// fork/duplicated descriptor is not a new logical lock owner.
     pub(crate) fn exclusive(file: fs::File) -> io::Result<Self> {

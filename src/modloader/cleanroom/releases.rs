@@ -37,16 +37,86 @@ pub async fn register(repo: &Repository, release: CleanroomRelease) -> Result<()
         ));
     }
 
-    let mut all = get_releases(repo).await?;
-    all.retain(|v| v.version != release.version);
-    all.push(release);
+    let root = repo.cache.clone();
+    // Lock/read/modify/atomic-write are one owned blocking transaction. Separate
+    // Repository objects, aliases and processes share the same file lock.
+    async_std::task::spawn_blocking(move || -> Result<()> {
+        std::fs::create_dir_all(&root)?;
+        let lock_path = files::child(&root, std::path::Path::new(".cleanroom-registry.lock"))?;
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        let _lock = crate::utils::object_store::StoreLock::blocking_exclusive(lock)?;
+        let path = files::child(&root, std::path::Path::new("cleanroom-releases.json"))?;
+        let mut all: Vec<CleanroomRelease> = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.into()),
+        };
+        all.retain(|entry| entry.version != release.version);
+        all.push(release);
+        files::atomic_write(&path, &serde_json::to_vec_pretty(&all)?)?;
+        Ok(())
+    })
+    .await
+}
 
-    let bytes = serde_json::to_vec_pretty(&all)?;
-    let path = repo.cache.join("cleanroom-releases.json");
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    async_std::task::spawn_blocking(move || files::atomic_write(&path, &bytes)).await?;
+    fn release(version: String) -> CleanroomRelease {
+        CleanroomRelease {
+            version,
+            minecraft: "1.12.2".into(),
+            archive_url: "https://example.invalid/release.zip".into(),
+            archive_sha256: "a".repeat(64),
+            archive_root: String::new(),
+            java: JavaPolicy {
+                majors: vec![21],
+                allow_newer: false,
+            },
+        }
+    }
 
-    Ok(())
+    #[async_std::test]
+    async fn concurrent_registrations_across_repository_objects_never_lose_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let results = futures::future::join_all((0..32).map(|id| async move {
+            let repo = Repository::new(root.into());
+            register(&repo, release(format!("release-{id}"))).await
+        }))
+        .await;
+        assert!(results.iter().all(Result::is_ok));
+        let entries = get_releases(&Repository::new(root.into())).await.unwrap();
+        assert_eq!(entries.len(), 32);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| &entry.version)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            32
+        );
+    }
+
+    #[async_std::test]
+    async fn corrupt_registry_is_preserved_and_registration_does_not_replace_unknown_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cleanroom-releases.json");
+        std::fs::write(&path, b"corrupt old registry").unwrap();
+        assert!(register(
+            &Repository::new(directory.path().into()),
+            release("new".into())
+        )
+        .await
+        .is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"corrupt old registry");
+    }
 }
 
 pub async fn import_archive(
