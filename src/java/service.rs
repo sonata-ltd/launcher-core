@@ -34,11 +34,12 @@ impl JavaService {
             Arc::new(DbJavaStore::at(Arc::clone(&db), own_runtimes.clone()));
 
         Self {
-            db,
+            db: db.clone(),
             registry: Arc::new(JavaRegistry::new(store, DEFAULT_JAVAREG_CACHE_SIZE)),
             bus,
-            managed: Arc::new(super::managed::ManagedJavaService::new(
+            managed: Arc::new(super::managed::ManagedJavaService::at(
                 own_runtimes.clone(),
+                db,
             )),
             own_runtimes,
             discovery: Mutex::new(()),
@@ -51,6 +52,9 @@ impl JavaService {
     pub async fn initialize(&self) -> JavaResult<()> {
         let mut initialized = self.paths_initialized.lock().await;
         if !*initialized {
+            super::managed::retention::attach(Some(self.db.clone()), self.own_runtimes.clone())
+                .await
+                .map_err(|error| crate::data::db::DbError::InvalidInput(error.diagnostic()))?;
             let report =
                 super::storage::paths::migrate(self.db.clone(), self.own_runtimes.clone()).await?;
             tracing::debug!(
@@ -58,6 +62,15 @@ impl JavaService {
                 unresolved = report.unresolved,
                 "managed Java SQL path upgrade"
             );
+            // Diagnostic gate only: no Java home/archive deletion is enabled.
+            match super::managed::retention::inspect(self.own_runtimes.clone()).await {
+                Ok((homes, archives)) => {
+                    tracing::debug!(homes, archives, "managed Java retention roots inspected")
+                }
+                Err(error) => {
+                    tracing::debug!(error = %error.diagnostic(), "managed Java retention gate deferred")
+                }
+            }
             *initialized = true;
         }
         Ok(())

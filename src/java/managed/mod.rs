@@ -3,6 +3,7 @@ mod catalog;
 mod extract;
 pub mod model;
 mod ownership;
+pub(crate) mod retention;
 #[cfg(test)]
 mod tests;
 mod transfer;
@@ -41,6 +42,7 @@ struct Entry {
 
 pub struct ManagedJavaService {
     root: PathBuf,
+    database: Option<Arc<crate::data::db::Database>>,
     entries: Mutex<HashMap<Uuid, Entry>>,
     initialized: AsyncMutex<bool>,
     catalog: AsyncMutex<Option<ManagedJavaCatalog>>,
@@ -50,9 +52,17 @@ impl ManagedJavaService {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
+            database: None,
             entries: Mutex::new(HashMap::new()),
             initialized: AsyncMutex::new(false),
             catalog: AsyncMutex::new(None),
+        }
+    }
+
+    pub(crate) fn at(root: PathBuf, database: Arc<crate::data::db::Database>) -> Self {
+        Self {
+            database: Some(database),
+            ..Self::new(root)
         }
     }
 
@@ -442,6 +452,19 @@ impl ManagedJavaService {
         let relative_home = home
             .strip_prefix(&destination)
             .map_err(|e| ManagedJavaError::new("extract", e))?;
+        let database = match &self.database {
+            Some(database) => database
+                .retention_owner()
+                .await
+                .map_err(storage)?
+                .map(|owner| owner.identity),
+            None => None,
+        };
+        let owner = ownership::HomeOwner::new(id, package, relative_home.to_owned(), database)?;
+        let owner_path = destination.clone();
+        task::spawn_blocking(move || owner.write(&owner_path)).await?;
+        #[cfg(test)]
+        tests::ownership_checkpoint(&self.root, "home-owned");
         self.update(id, |record| {
             record.home = Some(final_relative.join(relative_home))
         });
@@ -568,6 +591,7 @@ impl ManagedJavaService {
         if *initialized {
             return Ok(());
         }
+        retention::attach(self.database.clone(), self.root.clone()).await?;
         let root = self.root.clone();
         let records = task::spawn_blocking(move || -> Result<Vec<Record>> {
             let _maintenance = ownership::maintenance(&root)?;

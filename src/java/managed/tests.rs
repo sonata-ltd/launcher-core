@@ -11,7 +11,7 @@ pub(super) use ownership_tests::{
     async_checkpoint as ownership_async_checkpoint, checkpoint as ownership_checkpoint,
 };
 
-fn package() -> ManagedJavaPackage {
+pub(in crate::java::managed) fn package() -> ManagedJavaPackage {
     ManagedJavaPackage {
         id: "temurin-test".into(),
         version: "21.0.5+11".into(),
@@ -248,7 +248,7 @@ async fn write_errors_reach_the_caller_without_false_progress() {
     assert!(error.details.contains("disk full"));
 }
 
-fn tar_fixture(path: &Path) {
+pub(in crate::java::managed) fn tar_fixture(path: &Path) {
     let encoder = flate2::write::GzEncoder::new(
         std::fs::File::create(path).unwrap(),
         flate2::Compression::default(),
@@ -271,7 +271,10 @@ fn tar_fixture(path: &Path) {
     tar.into_inner().unwrap().finish().unwrap();
 }
 
-fn pin_archive(mut package: ManagedJavaPackage, archive: &Path) -> ManagedJavaPackage {
+pub(in crate::java::managed) fn pin_archive(
+    mut package: ManagedJavaPackage,
+    archive: &Path,
+) -> ManagedJavaPackage {
     package.sha256 = crate::utils::files::sha256_file(archive).unwrap();
     package.size = std::fs::metadata(archive).unwrap().len();
     package

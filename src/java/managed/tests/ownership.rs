@@ -411,6 +411,7 @@ async fn process_exit_before_and_after_managed_publication_replays_only_dead_own
         "created",
         "staging",
         "archive-imported",
+        "home-owned",
         "published",
         "cleanup",
     ] {
@@ -445,7 +446,7 @@ async fn process_exit_before_and_after_managed_publication_replays_only_dead_own
             snapshot.stage,
             if phase == "created" {
                 ManagedJavaStage::Downloading
-            } else if ["staging", "archive-imported"].contains(&phase) {
+            } else if ["staging", "archive-imported", "home-owned"].contains(&phase) {
                 ManagedJavaStage::Failed
             } else {
                 ManagedJavaStage::AwaitingValidation

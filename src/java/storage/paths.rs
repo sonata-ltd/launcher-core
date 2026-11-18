@@ -37,7 +37,7 @@ pub(super) fn relative(root: &Path, path: &Path) -> Option<PathBuf> {
     Some(relative.to_owned())
 }
 
-pub(super) fn pair(root: &Path, exec: &Path, home: &Path) -> Option<(String, String)> {
+pub(in crate::java) fn pair(root: &Path, exec: &Path, home: &Path) -> Option<(String, String)> {
     let exec = relative(root, exec)?;
     let home = relative(root, home)?;
     let child = exec.strip_prefix(&home).ok()?;

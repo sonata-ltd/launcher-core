@@ -7,6 +7,7 @@ use crate::utils::{
     process,
 };
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -31,7 +32,7 @@ impl Owner {
             pid: std::process::id(),
         }
     }
-    fn valid(&self, operation: Uuid) -> bool {
+    pub(super) fn valid(&self, operation: Uuid) -> bool {
         self.version == 1 && self.operation == operation && self.pid != 0
     }
     pub(super) fn local(&self, operation: Uuid) -> bool {
@@ -39,6 +40,99 @@ impl Owner {
     }
     pub(super) fn dead(&self, operation: Uuid) -> bool {
         self.valid(operation) && !process::may_be_alive(self.pid)
+    }
+}
+
+pub(super) const HOME_MARKER: &str = ".sonata-java-home.json";
+
+/// Publication ownership is independent of the mutable operation owner. A later
+/// validator may claim the operation but never adopts historical homes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HomeOwner {
+    pub version: u32,
+    pub operation: Uuid,
+    pub package: String,
+    pub database: Option<String>,
+    pub pid: u32,
+    pub created: u64,
+    pub home: PathBuf,
+    pub sha256: String,
+    pub size: u64,
+}
+
+impl HomeOwner {
+    pub(super) fn new(
+        operation: Uuid,
+        package: &super::ManagedJavaPackage,
+        home: PathBuf,
+        database: Option<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            version: 1,
+            operation,
+            package: package.id.clone(),
+            database,
+            pid: std::process::id(),
+            created: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(storage)?
+                .as_secs(),
+            home,
+            sha256: package.sha256.to_ascii_lowercase(),
+            size: package.size,
+        })
+    }
+
+    pub(super) fn generation(&self) -> PathBuf {
+        PathBuf::from("managed")
+            .join(&self.package)
+            .join(self.operation.to_string())
+    }
+
+    pub(super) fn validate(&self) -> Result<()> {
+        if self.version != 1
+            || self.pid == 0
+            || self.size == 0
+            || !files::hash_valid(&self.sha256, 64)
+            || self
+                .database
+                .as_ref()
+                .is_some_and(|identity| !files::hash_valid(identity, 32))
+            || self.package.is_empty()
+            || self.package.contains(['/', '\\', ':'])
+            || self.package == "."
+            || self.package == ".."
+            || self.home.to_str().is_none_or(|home| home.contains('\\'))
+            || (!self.home.as_os_str().is_empty() && files::relative(&self.home).is_err())
+            || self.created
+                > SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(storage)?
+                    .as_secs()
+        {
+            return Err(storage("unknown managed home ownership"));
+        }
+        Ok(())
+    }
+
+    pub(super) fn write(&self, generation: &Path) -> Result<()> {
+        self.validate()?;
+        let path = files::child(generation, Path::new(HOME_MARKER)).map_err(storage)?;
+        let mut file = tempfile::NamedTempFile::new_in(generation).map_err(storage)?;
+        serde_json::to_writer(&mut file, self).map_err(storage)?;
+        file.as_file().sync_all().map_err(storage)?;
+        file.persist_noclobber(path).map_err(storage)?;
+        Ok(())
+    }
+
+    pub(super) fn read(generation: &Path) -> Result<Self> {
+        let owner: Self = serde_json::from_slice(
+            &read_regular(&generation.join(HOME_MARKER), 4096).map_err(storage)?,
+        )
+        .map_err(storage)?;
+        owner.validate()?;
+        Ok(owner)
     }
 }
 
