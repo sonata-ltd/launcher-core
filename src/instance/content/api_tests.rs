@@ -17,6 +17,9 @@ use std::sync::Arc;
 #[path = "crash_tests.rs"]
 mod crash_tests;
 
+#[path = "admission_tests.rs"]
+mod admission_tests;
+
 struct Fixture {
     _directory: tempfile::TempDir,
     paths: Arc<LauncherPaths>,
@@ -315,7 +318,7 @@ async fn cancellation_after_staging_releases_preparation_without_publishing() {
     let cancel = Cancellation::default();
     let result = super::install::execute(
         fixture.db.clone(),
-        store,
+        store.clone(),
         fixture.id,
         &fixture.root,
         operation,
@@ -324,6 +327,7 @@ async fn cancellation_after_staging_releases_preparation_without_publishing() {
         &cancel,
         |_, publishing| {
             assert!(!publishing);
+            assert!(store.try_maintenance().is_err());
             cancel.cancel();
         },
     )
@@ -337,6 +341,7 @@ async fn cancellation_after_staging_releases_preparation_without_publishing() {
         .unwrap()
         .is_empty());
     assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    assert!(store.try_maintenance().is_ok());
 }
 
 #[async_std::test]
@@ -350,7 +355,7 @@ async fn failed_cache_verification_discards_only_preparation() {
     let operation = uuid::Uuid::new_v4();
     assert!(super::install::execute(
         fixture.db.clone(),
-        store,
+        store.clone(),
         fixture.id,
         &fixture.root,
         operation,
@@ -368,6 +373,7 @@ async fn failed_cache_verification_discards_only_preparation() {
         .unwrap()
         .is_empty());
     assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    assert!(store.try_maintenance().is_ok());
 }
 
 #[async_std::test]
@@ -381,7 +387,7 @@ async fn failed_publication_preserves_journal_and_leases_for_recovery() {
     let target = fixture.root.join("mods/cached.jar");
     assert!(super::install::execute(
         fixture.db.clone(),
-        store,
+        store.clone(),
         fixture.id,
         &fixture.root,
         operation,
@@ -406,6 +412,8 @@ async fn failed_publication_preserves_journal_and_leases_for_recovery() {
         1
     );
     assert_eq!(storage::pending(&fixture.db, None).await.unwrap().len(), 1);
+    // The journal/leases remain roots even though operation admission is released.
+    assert!(store.try_maintenance().is_ok());
     storage::discard_preparation(&fixture.db, operation)
         .await
         .unwrap();

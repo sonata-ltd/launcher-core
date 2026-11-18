@@ -83,7 +83,16 @@ impl InstanceContentService {
         let activity = instances.activity();
         let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
         let store_lock = store.lock_exclusive()?;
-        storage::clear_abandoned_preparations(&db, &store.root_key()?).await?;
+        let maintenance = store.try_maintenance()?;
+        let cleanup_db = db.clone();
+        async_std::task::spawn(async move {
+            #[cfg(test)]
+            if let Some(operation) = storage::preparation_checkpoint(&cleanup_db).await? {
+                super::install::checkpoints::wait(operation, "cleanup").await;
+            }
+            storage::clear_abandoned_preparations(&cleanup_db, &maintenance).await
+        })
+        .await?;
         let scratch_store = store.clone();
         async_std::task::spawn_blocking(move || match scratch_store.sweep_staging() {
             Ok(removed) if removed > 0 => {

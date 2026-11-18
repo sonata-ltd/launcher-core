@@ -58,14 +58,28 @@ pub(super) async fn begin_preparation(
     Ok(())
 }
 
-/// Only callable during startup while the corresponding store's root lock is held.
+/// Initiated by startup under service ownership; its cleanup task retains
+/// exclusive CAS maintenance until SQL finishes, even if bootstrap is dropped.
 /// Preparing never changes mods; publishing journals must not be discarded.
-pub(super) async fn clear_abandoned_preparations(db: &Database, store_root: &[u8]) -> Result<()> {
+pub(super) async fn clear_abandoned_preparations(
+    db: &Database,
+    maintenance: &crate::utils::object_store::StoreMaintenance,
+) -> Result<()> {
     sqlx::query("DELETE FROM content_operations WHERE state='preparing' AND store_root=?")
-        .bind(store_root)
+        .bind(maintenance.root_key())
         .execute(&db.pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) async fn preparation_checkpoint(db: &Database) -> Result<Option<Uuid>> {
+    let id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM content_operations WHERE state='preparing' ORDER BY rowid LIMIT 1",
+    )
+    .fetch_optional(&db.pool)
+    .await?;
+    Ok(id.and_then(|id| Uuid::parse_str(&id).ok()))
 }
 
 pub(super) async fn discard_preparation(db: &Database, id: Uuid) -> Result<()> {

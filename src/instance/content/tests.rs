@@ -406,7 +406,7 @@ fn cancelled_import_preserves_source_and_leaves_no_staging_files() {
 
     assert!(store.import_file(&source, None, &cancellation).is_err());
     assert_eq!(fs::metadata(source).unwrap().len(), 128 * 1024);
-    assert_eq!(fs::read_dir(root.join("staging")).unwrap().count(), 0);
+    assert!(!root.exists());
 }
 
 #[test]

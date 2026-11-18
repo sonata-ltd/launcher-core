@@ -138,6 +138,10 @@ pub async fn place(
     blobs: &Path,
     cancel: &Cancel,
 ) -> Result<String> {
+    cancel.check()?;
+    let access = ObjectStore::new(blobs.to_owned()).access(cancel).await;
+    cancel.check()?;
+    let access = access?;
     let index = blobs.join("urls").join(files::sha256(url.as_bytes()));
     let cached = async_std::fs::read_to_string(&index)
         .await
@@ -152,7 +156,7 @@ pub async fn place(
             return Err(DownloadError::Invalid("invalid SHA-1".into()));
         }
         let legacy_blob = blobs.join(hash.to_ascii_lowercase());
-        let store = ObjectStore::new(blobs.to_owned());
+        let store = access.clone();
         let target = path.to_owned();
         let digest = hash.to_owned();
         let cancellation = cancel.clone();
@@ -192,17 +196,26 @@ pub async fn place(
 
     fs::create_dir_all(blobs).await?;
 
-    cache_blob(path, blobs, &hash, cancel).await?;
+    cache_blob(path, access.clone(), &hash, cancel).await?;
 
     let body = hash.as_bytes().to_vec();
-    async_std::task::spawn_blocking(move || files::atomic_write(&index, &body)).await?;
+    let writer = access.clone();
+    async_std::task::spawn_blocking(move || {
+        let _access = writer;
+        files::atomic_write(&index, &body)
+    })
+    .await?;
 
     Ok(hash)
 }
 
-async fn cache_blob(source: &Path, root: &Path, expected: &str, cancel: &Cancel) -> Result<()> {
+async fn cache_blob(
+    source: &Path,
+    store: crate::utils::object_store::StoreAccess,
+    expected: &str,
+    cancel: &Cancel,
+) -> Result<()> {
     let source = source.to_owned();
-    let store = ObjectStore::new(root.to_owned());
     let expected = expected.to_owned();
     let cancel = cancel.clone();
     task::spawn_blocking(move || -> Result<()> {
@@ -233,6 +246,28 @@ pub async fn check_file(path: PathBuf, expected: String) -> Result<()> {
 #[cfg(test)]
 mod cache_tests {
     use super::*;
+    #[async_std::test]
+    async fn cancelled_maintenance_wait_does_not_read_the_cache_or_touch_destination() {
+        use futures::{pin_mut, poll};
+        let temp = tempfile::tempdir().unwrap();
+        let blobs = temp.path().join("blobs");
+        let store = ObjectStore::new(blobs.clone());
+        let maintenance = store.try_maintenance().unwrap();
+        let destination = temp.path().join("previous.jar");
+        fs::write(&destination, b"previous bytes").await.unwrap();
+        let cancel = Cancel::new();
+        let place = place("not-a-network-url", &destination, None, &blobs, &cancel);
+        pin_mut!(place);
+        assert!(poll!(place.as_mut()).is_pending());
+        cancel.cancel();
+        assert!(place.await.unwrap_err().is_cancelled());
+        assert_eq!(fs::read(&destination).await.unwrap(), b"previous bytes");
+        assert!(!blobs.join("staging").exists());
+        assert!(!blobs.join("urls").exists());
+        drop(maintenance);
+        assert!(store.try_access().is_ok());
+    }
+
     #[async_std::test]
     async fn cancelled_cache_hit_preserves_existing_destination() {
         let temp = tempfile::tempdir().unwrap();
@@ -267,7 +302,8 @@ mod cache_tests {
         let hash = files::sha1_file(&source).unwrap();
         let blob = blobs.join(&hash);
         fs::write(&blob, b"corrupt").await.unwrap();
-        cache_blob(&source, &blobs, &hash, &Cancel::default())
+        let access = ObjectStore::new(blobs.clone()).try_access().unwrap();
+        cache_blob(&source, access, &hash, &Cancel::default())
             .await
             .unwrap();
         assert_eq!(fs::read(&blob).await.unwrap(), b"corrupt");

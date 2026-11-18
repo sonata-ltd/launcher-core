@@ -15,6 +15,9 @@ use crate::utils::{
 
 const IMPORT_PREFIX: &str = "import-";
 
+mod access;
+pub(crate) use access::{StoreAccess, StoreMaintenance};
+
 pub struct ObjectStore {
     root: PathBuf,
 }
@@ -148,6 +151,9 @@ mod tests {
 }
 
 #[derive(Debug)]
+/// A verified bytes snapshot, not a retention pin. A caller using its raw path
+/// after this helper returns must retain operation admission (internal flows do)
+/// or establish a durable root before a future collector may be enabled.
 pub struct StoredObject {
     pub digests: FileDigests,
     pub path: PathBuf,
@@ -172,9 +178,8 @@ impl ObjectStore {
         )?))
     }
 
-    /// Content ownership/cleanup locks the actual store, even if two launcher
-    /// roots reach it through different aliases. Runtime blob retention does
-    /// not yet use this lock and must not run concurrent collection.
+    /// Content service ownership, distinct from the shared admission/exclusive
+    /// maintenance barrier. Both follow the actual store through aliases.
     pub(crate) fn lock_exclusive(&self) -> io::Result<fs::File> {
         fs::create_dir_all(&self.root)?;
         let lock = fs::OpenOptions::new()
@@ -187,6 +192,7 @@ impl ObjectStore {
         Ok(lock)
     }
 
+    /// Pure layout resolution: the returned path neither verifies nor pins bytes.
     pub fn path_for(&self, sha256: &str) -> io::Result<PathBuf> {
         if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(io::Error::new(
@@ -199,6 +205,8 @@ impl ObjectStore {
         Ok(self.root.join("objects/sha256").join(&hash[..2]).join(hash))
     }
 
+    /// Synchronous admission is fail-fast (`WouldBlock` during maintenance).
+    /// The returned snapshot does not extend this call's admission lifetime.
     pub fn import_file(
         &self,
         source: &Path,
@@ -221,6 +229,8 @@ impl ObjectStore {
         cancellation: &Cancellation,
         validate: impl FnOnce(&FileDigests) -> Result<(), E>,
     ) -> Result<StoredObject, E> {
+        cancellation.check().map_err(io::Error::from)?;
+        let _access = self.try_access()?;
         let staging = OwnedDirectory::create(&self.root.join("staging"), IMPORT_PREFIX)?;
         let mut temporary = tempfile::NamedTempFile::new_in(staging.path())?;
         let digests = copy_and_digest(source, &mut temporary, cancellation)?;
@@ -275,6 +285,7 @@ impl ObjectStore {
         cancel: &Cancellation,
     ) -> io::Result<Option<StoredObject>> {
         cancel.check().map_err(io::Error::from)?;
+        let _access = self.try_access()?;
         let alias = self.alias_path(sha1)?;
         let sha256 = match fs::read_to_string(alias) {
             Ok(hash) => hash,

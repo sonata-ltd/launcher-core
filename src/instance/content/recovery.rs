@@ -30,7 +30,9 @@ pub(super) async fn recover(
     instances: &InstanceRegistry,
     filter: Option<InstanceId>,
 ) -> Result<Vec<RecoveryFailure>> {
-    let store = ObjectStore::new(paths.root().join("content-store"));
+    let store = ObjectStore::new(paths.root().join("content-store"))
+        .access(&Cancellation::default())
+        .await?;
     let mut failures = Vec::new();
     let mut blocked_instance = None;
     for pending in storage::pending(db, filter).await? {
@@ -53,7 +55,7 @@ async fn recover_one(
     db: &Database,
     paths: &LauncherPaths,
     instances: &InstanceRegistry,
-    store: &ObjectStore,
+    store: &crate::utils::object_store::StoreAccess,
     pending: &PendingPublication,
 ) -> Result<()> {
     let instance = pending.instance_id;
@@ -123,7 +125,9 @@ async fn recover_one(
         let object = store.path_for(&file.sha256)?;
         let expected = file.sha256.clone();
         let staged = stage.path().join(&file.name);
+        let reader = store.clone();
         async_std::task::spawn_blocking(move || -> Result<()> {
+            let _access = reader;
             placement::copy_new(&object, &staged, &Cancellation::default())?;
             if !files::sha256_file(&staged)?.eq_ignore_ascii_case(&expected) {
                 return Err(ContentError::Invalid(
@@ -136,6 +140,8 @@ async fn recover_one(
         .await?;
         file.placement = Placement::Copy;
     }
+    #[cfg(test)]
+    super::install::checkpoints::wait(id, "recovering").await;
     storage::complete(db, id, instance, &expected_files).await?;
     Ok(())
 }
