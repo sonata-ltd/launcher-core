@@ -140,6 +140,8 @@ pub fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Atomically replaces a file after syncing its bytes. This does not sync the
+/// parent directory and is not a power-loss durable filesystem transaction.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()

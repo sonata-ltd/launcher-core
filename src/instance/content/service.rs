@@ -39,6 +39,12 @@ struct Job {
     created: Instant,
 }
 
+/// Add-only content publication with forward recovery after a process crash.
+///
+/// `Completed` is not a promise of power-loss durability: filesystem directory
+/// entries and SQLite are not committed as one transaction. See the publication
+/// contract in `docs/publication-contract.md`. External writers may cause a
+/// recovery conflict; recovery never replaces their differing bytes.
 pub struct InstanceContentService {
     operations: Arc<crate::data::registry::operation::OperationRegistry>,
     catalog: ContentCatalog,

@@ -1,5 +1,7 @@
 //! Публикация нового файла без перезаписи назначения. Общая операция не знает
 //! ни о модах, ни о SQLite. Источник обязан быть приватным staging-файлом.
+//! No-clobber visibility is not power-loss durability: parent directory entries
+//! are not synced here. See docs/publication-contract.md for the FS/SQL boundary.
 use std::{io, path::PathBuf};
 
 #[allow(deprecated)] // from_path поддерживается минимальной tempfile 3.21 из Cargo.lock.

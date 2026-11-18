@@ -14,6 +14,9 @@ use crate::{
 };
 use std::sync::Arc;
 
+#[path = "crash_tests.rs"]
+mod crash_tests;
+
 struct Fixture {
     _directory: tempfile::TempDir,
     paths: Arc<LauncherPaths>,
@@ -25,6 +28,10 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with_database(false).await
+}
+
+async fn fixture_with_database(persistent: bool) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let paths = Arc::new(
         LauncherPaths::resolve(&Config {
@@ -34,7 +41,12 @@ async fn fixture() -> Fixture {
         .await
         .unwrap(),
     );
-    let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+    let url = if persistent {
+        format!("sqlite://{}", directory.path().join("crash.db").display())
+    } else {
+        "sqlite::memory:".into()
+    };
+    let db = Arc::new(Database::init(&url).await.unwrap());
     let bus = EventBus::new(64);
     let operations = Arc::new(OperationRegistry::new(bus.clone()));
     let java = Arc::new(JavaService::new(

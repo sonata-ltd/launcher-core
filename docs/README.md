@@ -10,6 +10,7 @@
 
 - `baseline-manifest.json` и `source-status.txt`: исторические материалы снимка; в этой рабочей копии отсутствуют.
 - [TASKS.md](TASKS.md): полный реестр замечаний с пакетами реализации.
+- [publication-contract.md](publication-contract.md): порядок FS/SQL и явные границы process-crash гарантии; power-loss durability не обещается.
 - [check.sh](check.sh): воспроизводимый запуск проверок без GUI Cargo patches.
 - `verify-baseline.py`: историческая проверка снимка; в этой рабочей копии отсутствует.
 
