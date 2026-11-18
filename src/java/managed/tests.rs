@@ -8,6 +8,8 @@ use std::io::Write;
 mod bytes_tests;
 #[path = "tests/ownership.rs"]
 mod ownership_tests;
+#[path = "tests/recovery.rs"]
+mod recovery_tests;
 #[cfg(unix)]
 #[path = "tests/registrar.rs"]
 mod registrar_tests;

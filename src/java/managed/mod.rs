@@ -5,6 +5,7 @@ pub(crate) mod gc;
 pub mod model;
 mod ownership;
 pub(crate) mod process;
+mod recovery;
 pub mod registrar;
 pub(crate) mod retention;
 #[cfg(test)]
@@ -43,6 +44,7 @@ pub struct ManagedJavaService {
     root: PathBuf,
     database: Option<Arc<crate::data::db::Database>>,
     entries: Mutex<HashMap<Uuid, Entry>>,
+    recovery_diagnostics: Mutex<Vec<ManagedRecoveryDiagnostic>>,
     initialized: AsyncMutex<bool>,
     catalog: AsyncMutex<Option<ManagedJavaCatalog>>,
 }
@@ -53,6 +55,7 @@ impl ManagedJavaService {
             root,
             database: None,
             entries: Mutex::new(HashMap::new()),
+            recovery_diagnostics: Mutex::new(Vec::new()),
             initialized: AsyncMutex::new(false),
             catalog: AsyncMutex::new(None),
         }
@@ -87,6 +90,12 @@ impl ManagedJavaService {
     }
 
     pub async fn installations(&self) -> Result<Vec<ManagedJavaSnapshot>> {
+        Ok(self.installations_report().await?.installations)
+    }
+
+    /// Queries healthy records alongside record-local recovery diagnostics.
+    /// Bad records remain on disk and continue to block conservative GC.
+    pub async fn installations_report(&self) -> Result<ManagedInstallationsReport> {
         self.initialize().await?;
         let mut snapshots: Vec<_> = self
             .entries
@@ -96,11 +105,36 @@ impl ManagedJavaService {
             .map(|e| e.record.snapshot.clone())
             .collect();
         snapshots.sort_by_key(|s| s.created_at);
-        Ok(snapshots)
+        Ok(ManagedInstallationsReport {
+            installations: snapshots,
+            diagnostics: self
+                .recovery_diagnostics
+                .lock()
+                .expect("managed diagnostics poisoned")
+                .clone(),
+        })
     }
 
     pub async fn installation(&self, id: Uuid) -> Result<ManagedJavaSnapshot> {
         self.initialize().await?;
+        if let Some(diagnostic) = self
+            .recovery_diagnostics
+            .lock()
+            .expect("managed diagnostics poisoned")
+            .iter()
+            .find(|diagnostic| diagnostic.operation == Some(id))
+        {
+            // A cleanup diagnostic may coexist with a readable record. Only a
+            // record excluded from entries should fail the specific query.
+            if !self
+                .entries
+                .lock()
+                .expect("managed entries poisoned")
+                .contains_key(&id)
+            {
+                return Err(diagnostic.error.clone());
+            }
+        }
         self.entries
             .lock()
             .expect("managed entries poisoned")
@@ -578,81 +612,16 @@ impl ManagedJavaService {
         }
         retention::attach(self.database.clone(), self.root.clone()).await?;
         let root = self.root.clone();
-        let records = task::spawn_blocking(move || -> Result<Vec<Record>> {
-            let _maintenance = ownership::maintenance(&root)?;
-            #[cfg(test)]
-            tests::ownership_checkpoint(&root, "recovery");
-            let directory = crate::utils::files::child(&root, Path::new(".managed/operations"))
-                .map_err(storage)?;
-            std::fs::create_dir_all(&directory).map_err(storage)?;
-            let archive_root = crate::utils::files::child(&root, Path::new(".managed/bytes")).map_err(storage)?;
-            crate::utils::object_store::ObjectStore::new(archive_root).sweep_staging().map_err(storage)?;
-            let mut records = Vec::new();
-            for entry in std::fs::read_dir(&directory).map_err(storage)? {
-                let path = entry.map_err(storage)?.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let mut record: Record = serde_json::from_slice(
-                    &crate::utils::object_store::catalog::read_regular(&path, 1024 * 1024)
-                        .map_err(storage)?,
-                )
-                .map_err(storage)?;
-                if path.file_name().and_then(|name| name.to_str())
-                    != Some(&format!("{}.json", record.snapshot.id))
-                    || record.home.as_ref().is_some_and(|home| {
-                        home.to_string_lossy().contains('\\')
-                            || crate::utils::files::child(&root, home).is_err()
-                    })
-                {
-                    return Err(ManagedJavaError::new(
-                        "storage",
-                        format!("Invalid Java home in {}", path.display()),
-                    ));
-                }
-                // A terminal record can leave crash scratch, but never grants
-                // permission to delete its published home.
-                if let Some(owner) = record.owner.as_ref().filter(|owner| owner.dead(record.snapshot.id)) {
-                    if let Err(error) = ownership::cleanup_staging(&root, record.snapshot.id, owner, true) {
-                        tracing::warn!(id = %record.snapshot.id, error = %error.diagnostic(), "managed recovery deferred for unknown staging ownership");
-                        records.push(record);
-                        continue;
-                    }
-                }
-                if record.snapshot.stage.is_active() {
-                    if !record.owner.as_ref().is_some_and(|owner| owner.dead(record.snapshot.id)) {
-                        // Old writers did not publish operation ownership. Do not
-                        // overwrite their active record or touch private bytes.
-                        records.push(record);
-                        continue;
-                    }
-                    let installed = record
-                        .home
-                        .as_ref()
-                        .and_then(|h| crate::utils::files::child(&root, &h.join(if cfg!(windows) { "bin/java.exe" } else { "bin/java" })).ok())
-                        .is_some_and(|exec| exec.is_file());
-                    record.snapshot.stage = if installed {
-                        ManagedJavaStage::AwaitingValidation
-                    } else {
-                        ManagedJavaStage::Failed
-                    };
-                    record.snapshot.error = if installed {
-                        None
-                    } else {
-                        Some(ManagedJavaError::new(
-                            "interrupted",
-                            "The launcher stopped before installation completed",
-                        ))
-                    };
-                    write_record(&root, &record)?;
-                }
-                records.push(record);
-            }
-            Ok(records)
-        })
-        .await?;
+        let report = task::spawn_blocking(move || recovery::load(&root)).await?;
+        for diagnostic in &report.diagnostics {
+            tracing::warn!(path = %diagnostic.path.display(), error = %diagnostic.error.diagnostic(), "managed record recovery requires attention");
+        }
+        *self
+            .recovery_diagnostics
+            .lock()
+            .expect("managed diagnostics poisoned") = report.diagnostics;
         let mut entries = self.entries.lock().expect("managed entries poisoned");
-        for record in records {
+        for record in report.records {
             entries.insert(
                 record.snapshot.id,
                 Entry {
@@ -682,14 +651,7 @@ fn read_record(root: &Path, id: Uuid) -> Result<Option<Record>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(storage(error)),
     };
-    let record: Record = serde_json::from_slice(&bytes).map_err(storage)?;
-    if record.snapshot.id != id
-        || record.home.as_ref().is_some_and(|home| {
-            home.to_string_lossy().contains('\\') || crate::utils::files::child(root, home).is_err()
-        })
-    {
-        return Err(storage("invalid managed operation identity or home"));
-    }
+    let record = recovery::decode_bytes(root, &path, &bytes)?;
     Ok(Some(record))
 }
 

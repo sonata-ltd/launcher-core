@@ -565,7 +565,11 @@ async fn managed_root_aliases_share_admission_and_escaping_links_never_modify_ex
         } else {
             service.update(id, |rec| rec.home = Some("managed/jre".into()));
             service.persist(id).await.unwrap();
-            assert!(service.initialize().await.is_err());
+            let recovered = ManagedJavaService::new(root.clone());
+            let report = recovered.installations_report().await.unwrap();
+            assert!(report.installations.is_empty());
+            assert_eq!(report.diagnostics.len(), 1);
+            assert_eq!(report.diagnostics[0].operation, Some(id));
         }
         assert_eq!(fs::read(outside.join("victim")).unwrap(), b"keep");
         assert_eq!(fs::read_dir(outside).unwrap().count(), 1);
@@ -625,13 +629,11 @@ async fn recovery_rejects_record_identity_mismatch_and_unsafe_home_without_modif
             path = other;
         }
         let bytes = fs::read(&path).unwrap();
-        assert!(
-            ManagedJavaService::new(dir.path().into())
-                .initialize()
-                .await
-                .is_err(),
-            "{mode}"
-        );
+        let recovered = ManagedJavaService::new(dir.path().into());
+        let report = recovered.installations_report().await.unwrap();
+        assert!(report.installations.is_empty(), "{mode}");
+        assert_eq!(report.diagnostics.len(), 1, "{mode}");
+        assert_eq!(report.diagnostics[0].path, path);
         assert_eq!(fs::read(path).unwrap(), bytes);
         assert!(service.staging(id).is_dir());
     }

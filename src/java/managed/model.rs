@@ -102,6 +102,19 @@ pub struct ManagedJavaSnapshot {
     pub error: Option<ManagedJavaError>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedRecoveryDiagnostic {
+    pub path: std::path::PathBuf,
+    pub operation: Option<Uuid>,
+    pub error: ManagedJavaError,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagedInstallationsReport {
+    pub installations: Vec<ManagedJavaSnapshot>,
+    pub diagnostics: Vec<ManagedRecoveryDiagnostic>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error, PartialEq, Eq)]
 #[error("{message}")]
 pub struct ManagedJavaError {
