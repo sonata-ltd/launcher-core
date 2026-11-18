@@ -1,6 +1,46 @@
 use super::*;
 
 #[async_std::test]
+async fn object_path_upgrade_keeps_identity_links_and_journal_leases() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 12)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider) VALUES(1,'old','old','1.21','vanilla','https://example.invalid','prism')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO content_objects(id,sha256,size_bytes,store_path,store_state) VALUES(1,?,3,'/old/root/object','ready')")
+        .bind(format!("{:064x}", 1)).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO content_operations(id,instance_id,state,recovery_json) VALUES('pending',1,'publishing','[]')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO content_object_leases(operation_id,object_id) VALUES('pending',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0013_content_object_paths.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let row: (Option<String>, String, i64) = sqlx::query_as("SELECT o.store_path,o.store_state,l.object_id FROM content_objects o JOIN content_object_leases l ON l.object_id=o.id")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(row, (None, "ready".into(), 1));
+    assert!(
+        sqlx::query("UPDATE content_objects SET store_path='/new/absolute' WHERE id=1")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(sqlx::query("DELETE FROM content_objects WHERE id=1")
+        .execute(&pool)
+        .await
+        .is_err());
+}
+
+#[async_std::test]
 async fn library_placement_upgrade_preserves_legacy_order_paths_and_roles() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     for migration in sqlx::migrate!("./migrations")

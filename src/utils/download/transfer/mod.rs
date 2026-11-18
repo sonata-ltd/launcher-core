@@ -6,6 +6,7 @@ use super::{
 use crate::{
     utils::download::transfer::error::{DownloadError, Result},
     utils::files,
+    utils::object_store::ObjectStore,
 };
 use async_std::{fs, task};
 #[cfg(test)]
@@ -149,15 +150,29 @@ pub async fn place(
         if !files::hash_valid(hash, 40) {
             return Err(DownloadError::Invalid("invalid SHA-1".into()));
         }
-        let blob = blobs.join(hash.to_ascii_lowercase());
+        let legacy_blob = blobs.join(hash.to_ascii_lowercase());
+        let store = ObjectStore::new(blobs.to_owned());
         let target = path.to_owned();
         let digest = hash.to_owned();
         let cancellation = cancel.clone();
         let placed = task::spawn_blocking(move || -> Result<bool> {
-            if !files::matches_cancellable(&blob, &digest, &cancellation)? {
-                return Ok(false);
-            }
-            files::placement::copy_replace(&blob, &target, &cancellation)?;
+            let object = if let Some(object) = store.find_sha1(&digest, &cancellation)? {
+                object
+            } else {
+                if !files::matches_cancellable(&legacy_blob, &digest, &cancellation)? {
+                    return Ok(false);
+                }
+                // Read-compatible migration; keep the legacy file for older clients.
+                store.import_checked(&legacy_blob, &cancellation, |hashes| {
+                    if !hashes.sha1.eq_ignore_ascii_case(&digest) {
+                        return Err(DownloadError::Invalid(
+                            "legacy blob changed during import".into(),
+                        ));
+                    }
+                    Ok(())
+                })?
+            };
+            files::placement::copy_replace(&object.path, &target, &cancellation)?;
             Ok(true)
         })
         .await;
@@ -176,8 +191,7 @@ pub async fn place(
 
     fs::create_dir_all(blobs).await?;
 
-    let blob = blobs.join(&hash);
-    cache_blob(path, &blob).await?;
+    cache_blob(path, blobs, &hash, cancel).await?;
 
     let body = hash.as_bytes().to_vec();
     async_std::task::spawn_blocking(move || files::atomic_write(&index, &body)).await?;
@@ -185,17 +199,21 @@ pub async fn place(
     Ok(hash)
 }
 
-// The downloaded source has already passed checksum verification. Persist
-// atomically replaces a corrupt blob and handles concurrent identical writers.
-async fn cache_blob(source: &Path, destination: &Path) -> Result<()> {
+async fn cache_blob(source: &Path, root: &Path, expected: &str, cancel: &Cancel) -> Result<()> {
     let source = source.to_owned();
-    let destination = destination.to_owned();
-    task::spawn_blocking(move || {
-        files::placement::copy_replace(
-            &source,
-            &destination,
-            &crate::utils::cancellation::Cancellation::default(),
-        )
+    let store = ObjectStore::new(root.to_owned());
+    let expected = expected.to_owned();
+    let cancel = cancel.clone();
+    task::spawn_blocking(move || -> Result<()> {
+        store.import_checked(&source, &cancel, |hashes| {
+            if !hashes.sha1.eq_ignore_ascii_case(&expected) {
+                return Err(DownloadError::Invalid(
+                    "source changed before cache import".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(())
     })
     .await?;
     Ok(())
@@ -239,7 +257,7 @@ mod cache_tests {
     }
 
     #[async_std::test]
-    async fn corrupted_blob_is_replaced_and_next_placement_needs_no_network() {
+    async fn corrupt_legacy_blob_is_bypassed_and_shared_store_needs_no_network() {
         let temp = tempfile::tempdir().unwrap();
         let blobs = temp.path().join("blobs");
         fs::create_dir_all(&blobs).await.unwrap();
@@ -248,8 +266,15 @@ mod cache_tests {
         let hash = files::sha1_file(&source).unwrap();
         let blob = blobs.join(&hash);
         fs::write(&blob, b"corrupt").await.unwrap();
-        cache_blob(&source, &blob).await.unwrap();
-        assert!(files::matches(&blob, &hash).unwrap());
+        cache_blob(&source, &blobs, &hash, &Cancel::default())
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&blob).await.unwrap(), b"corrupt");
+        let object = ObjectStore::new(blobs.clone())
+            .find_sha1(&hash, &Cancel::default())
+            .unwrap()
+            .unwrap();
+        assert!(files::matches(&object.path, &hash).unwrap());
         let destination = temp.path().join("next/library.jar");
         place(
             "not-a-network-url",
