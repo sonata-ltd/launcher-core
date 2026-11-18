@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **358 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **370 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -134,8 +134,12 @@ complete append-only каталог persistent DB identities до imports, fail-
 preparing/journal/binding/lease gate, SQLite write-locks до unlink/metadata
 completion и versioned deletion intents. Проверены несколько БД, unknown owners,
 возраст, symlinks, новые roots при replay, drop caller и process exit на шести
-FS/SQL границах. GC runtime generations/blobs пока нет. Следующая работа:
-runtime каталог БД/roots и durable pins живых game/installer JVM по
+FS/SQL границах. `dd96cdd` добавляет broad game pin до profile/legacy reads,
+generation ownership до outputs, отменяемый workspace admission и direct-child
+Forge pins; cleanup сохраняет work/maven после drop/unknown exit. Process-exit
+fixture сохраняет живой child после смерти launcher; fake executable, не JVM.
+GC runtime generations/blobs пока нет. Следующая работа:
+runtime каталог БД/current profile roots и deletion protocol по
 retention-contract.md; затем portability/bytes identity и подключение оставшихся
 stores. Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.

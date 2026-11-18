@@ -69,7 +69,8 @@ Maintenance capability сама не проверяет их и не являе�
 Возвращённый raw path/его копия не продлевают admission helper. Внутренние рабочие
 flows держат operation guard. CAS types и content object storage теперь internal;
 публичные API других доменов/raw paths ещё предстоит закрыть в P11.
-Assets, managed Java и runtime generations пока не подключены к этому admission.
+Workspace установки и сервисный запуск держат отдельный shared admission
+canonical library root. Assets и managed Java пока не подключены к нему.
 
 ## Обязательные условия GC — content реализован, runtime остаётся открытым
 
@@ -132,6 +133,52 @@ Collector допускается только после доказательс�
 активных preparations и live/unknown pins. Неизвестные старые поколения или
 нечитаемые/неподдерживаемые профили сохраняются. Удаление регистрации экземпляра
 сейчас оставляет game files, поэтому само по себе также не разрешает их очистку.
+
+### Реализованные runtime process pins (ещё не разрешение GC)
+
+Коммит `dd96cdd`; полный Linux fmt/check/test/build — PASS:
+**370 passed, 0 failed, 1 ignored** (12 новых tests и расширенная watcher
+regression). Проверены owner до outputs, cancelled admission без generation,
+workspace cleanup при live/unknown pins, fake processor success/failed/cancel
+и drop future, watcher acknowledgement до Exited event, marker/version/link/PID
+fixtures. `process_exit_preserves_live_child_and_unknown_spawn_intent` завершает
+launcher через exit(75), сохраняет живой OS child и intent без известного child
+PID. Логи: `/tmp/opencode/core-runtime-pins-verified-{check,test,build}.log`.
+Ignore, прежние Prism warnings и proc-macro-error2 не изменились.
+
+`utils::process_pin` записывает UUID-каталог `.sonata-processes/<uuid>` с полным
+owner PID до возврата capability. Versioned spawn intent предшествует spawn;
+полный child PID записывается no-clobber после spawn. `.sonata-exited` появляется
+только после подтверждённого выхода и окончания сопровождающих owned workers.
+Все markers публикуются полностью через synced tempfile/no-clobber. У pin нет
+автоматического удаления при Drop: kill-on-drop не является exit acknowledgement.
+Unknown entries/versions/PIDs, symlinks и PID reuse сохраняют данные.
+
+Сервисный launch получает shared admission canonical library root и **широкий
+pin всего library store до чтения InstalledProfile/legacy inputs**. После spawn
+pin передаётся watcher вместе с natives и подтверждает завершение до Exited event.
+Если launcher погиб, marker остаётся: owner PID сам по себе не разрешает очистку,
+когда child ещё жив или его PID неизвестен. Широкий pin сознательно не пытается
+восстановить минимальный набор лениво открываемых JVM библиотек; будущий collector
+должен сохранять всю pinned library область.
+
+Workspace получает отменяемый shared library admission до создания поколения и
+записывает `.sonata-owner` до maven/work outputs. Forge processors создают отдельные
+pins **в корне поколения**, а не в extracted work. Подтверждённый success, failed
+exit или kill+wait разрешают завершение pin после diagnostics/verification;
+drop будущего не пишет `.sonata-exited`, даже если kill-on-drop уже отправлен.
+`cleanup_failed` и `cleanup_work` требуют проверяемого собственного поколения и
+отсутствия live/unknown process pins; иначе оставляют maven/work. Неизвестный child
+не разрешает очистку при живом или погибшем launcher. Ссылки в ancestors нового
+поколения отвергаются до outputs; cleanup не проходит через process-pin links.
+
+Это пока не полный runtime lifecycle: нет полного catalogue всех DB/current
+profiles/legacy roots, generation/blob deletion protocol и старых generation
+ownership identities. Runtime GC остаётся выключен. Неподдерживаемые старые
+writers, конкурентная внешняя подмена ancestors и оторвавшиеся descendants
+внешнего процессора не покрываются обещанием direct-child ownership. Managed
+Java и assets требуют отдельных roots/pins. Проверки используют реальные OS
+subprocesses и fake processor executable, **не** живые game/installer JVM.
 
 ### Порядок удаления и проверка
 
