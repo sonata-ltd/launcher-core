@@ -9,6 +9,7 @@ use std::{
 };
 
 use super::{api::*, install, recovery, storage};
+use crate::utils::jobs::history::History;
 use crate::{
     data::{db::Database, layout::LauncherPaths},
     instance::content::{
@@ -26,6 +27,11 @@ use crate::{
 };
 use uuid::Uuid;
 
+const ACTIVE_LIMIT: usize = 128;
+const HISTORY_LIMIT: usize = 128;
+const HISTORY_TTL: Duration = Duration::from_secs(3600);
+const PLAN_TTL: Duration = Duration::from_secs(300);
+
 struct StoredPlan {
     preview: InstallPreview,
     releases: Vec<install::PlannedRelease>,
@@ -41,6 +47,7 @@ struct Job {
 }
 
 impl Job {
+    #[cfg(test)]
     fn retained_at(&self, now: Instant) -> bool {
         self.snapshot.active()
             || self.completed.is_none_or(|completed| {
@@ -53,6 +60,47 @@ impl Job {
         self.snapshot.error = error;
         self.completed = Some(Instant::now());
         self.snapshot.finished_at = Some(chrono::Utc::now());
+    }
+}
+
+struct Jobs {
+    active: HashMap<Uuid, Job>,
+    history: History<Uuid, Job>,
+}
+
+impl Jobs {
+    fn new() -> Self {
+        Self {
+            active: HashMap::new(),
+            history: History::new(HISTORY_LIMIT, HISTORY_TTL),
+        }
+    }
+
+    fn admit(&mut self, id: Uuid, job: Job) -> Result<()> {
+        if self.active.len() >= ACTIVE_LIMIT {
+            return Err(ContentError::Invalid(
+                "Too many active installations; try again later".into(),
+            ));
+        }
+        self.active.insert(id, job);
+        Ok(())
+    }
+
+    fn finish(&mut self, id: Uuid, phase: ContentPhase, error: Option<String>) {
+        if let Some(mut job) = self.active.remove(&id) {
+            job.finish(phase, error);
+            self.history.push(id, job);
+        }
+    }
+
+    fn latest(&mut self, instance: InstanceId) -> Option<ContentJobSnapshot> {
+        self.history.prune();
+        self.active
+            .values()
+            .chain(self.history.records().map(|record| &record.value))
+            .filter(|job| job.snapshot.instance_id == instance)
+            .max_by_key(|job| job.created)
+            .map(|job| job.snapshot.clone())
     }
 }
 
@@ -71,8 +119,8 @@ pub struct InstanceContentService {
     paths: Arc<LauncherPaths>,
     db: Arc<Database>,
     store: Arc<ObjectStore>,
-    plans: Mutex<HashMap<Uuid, StoredPlan>>,
-    jobs: Mutex<HashMap<Uuid, Job>>,
+    plans: Arc<Mutex<HashMap<Uuid, StoredPlan>>>,
+    jobs: Arc<Mutex<Jobs>>,
     // OS-lock защищает от второго обновлённого процесса с тем же корнем.
     // In-memory барьер InstanceService защищает launch и install внутри процесса.
     _root_lock: crate::utils::object_store::StoreLock,
@@ -159,6 +207,26 @@ impl InstanceContentService {
             }
         })
         .await;
+        let plans = Arc::new(Mutex::new(HashMap::<Uuid, StoredPlan>::new()));
+        let jobs = Arc::new(Mutex::new(Jobs::new()));
+        let weak_plans = Arc::downgrade(&plans);
+        let weak_jobs = Arc::downgrade(&jobs);
+        async_std::task::spawn(async move {
+            loop {
+                async_std::task::sleep(Duration::from_secs(60)).await;
+                let (Some(plans), Some(jobs)) = (weak_plans.upgrade(), weak_jobs.upgrade()) else {
+                    break;
+                };
+                plans
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
+                jobs.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .history
+                    .prune();
+            }
+        });
         Ok(Self {
             operations,
             catalog: ContentCatalog::new(curseforge_key),
@@ -168,8 +236,8 @@ impl InstanceContentService {
             paths: paths.clone(),
             db,
             store,
-            plans: Mutex::new(HashMap::new()),
-            jobs: Mutex::new(HashMap::new()),
+            plans,
+            jobs,
             _root_lock: root_lock,
             _store_lock: store_lock,
         })
@@ -354,7 +422,7 @@ impl InstanceContentService {
             .plans
             .lock()
             .map_err(|_| ContentError::Invalid("Plan lock poisoned".into()))?;
-        plans.retain(|_, plan| plan.created.elapsed() < Duration::from_secs(300));
+        plans.retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
         if plans.len() >= 32 {
             return Err(ContentError::Invalid(
                 "Слишком много предпросмотров; повторите позднее".into(),
@@ -374,12 +442,15 @@ impl InstanceContentService {
     }
 
     pub fn start_install(self: &Arc<Self>, plan_id: Uuid) -> Result<Uuid> {
-        let plan = self
-            .plans
-            .lock()
-            .map_err(|_| ContentError::Invalid("Plan lock poisoned".into()))?
-            .remove(&plan_id)
-            .ok_or_else(|| ContentError::Invalid("План устарел; обновите предпросмотр".into()))?;
+        let plan = {
+            let mut plans = self
+                .plans
+                .lock()
+                .map_err(|_| ContentError::Invalid("Plan lock poisoned".into()))?;
+            plans.retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
+            plans.remove(&plan_id)
+        }
+        .ok_or_else(|| ContentError::Invalid("План устарел; обновите предпросмотр".into()))?;
         if plan.created.elapsed() >= Duration::from_secs(300) {
             return Err(ContentError::Invalid(
                 "План устарел; обновите предпросмотр".into(),
@@ -411,13 +482,7 @@ impl InstanceContentService {
                 .jobs
                 .lock()
                 .map_err(|_| ContentError::Invalid("Job lock poisoned".into()))?;
-            jobs.retain(|_, job| job.retained_at(Instant::now()));
-            if jobs.len() >= 128 {
-                return Err(ContentError::Invalid(
-                    "История установок заполнена; перезапустите лаунчер".into(),
-                ));
-            }
-            jobs.insert(
+            jobs.admit(
                 id,
                 Job {
                     snapshot: ContentJobSnapshot {
@@ -434,7 +499,7 @@ impl InstanceContentService {
                     created: Instant::now(),
                     completed: None,
                 },
-            );
+            )?;
         }
         let service = self.clone();
         async_std::task::spawn(async move {
@@ -468,7 +533,7 @@ impl InstanceContentService {
                 }
             }
             if let Ok(mut jobs) = service.jobs.lock() {
-                if let Some(job) = jobs.get_mut(&id) {
+                if let Some(job) = jobs.active.get(&id) {
                     let phase = if error.is_none() {
                         ContentPhase::Completed
                     } else if cancel.check().is_err()
@@ -478,7 +543,7 @@ impl InstanceContentService {
                     } else {
                         ContentPhase::Failed
                     };
-                    job.finish(phase, error.as_ref().map(|error| error.to_string()));
+                    jobs.finish(id, phase, error.as_ref().map(|error| error.to_string()));
                 }
             }
             let cancelled = service
@@ -486,8 +551,10 @@ impl InstanceContentService {
                 .lock()
                 .ok()
                 .and_then(|jobs| {
-                    jobs.get(&id)
-                        .map(|job| job.snapshot.phase == ContentPhase::Cancelled)
+                    jobs.history
+                        .records()
+                        .find(|record| record.id == id)
+                        .map(|record| record.value.snapshot.phase == ContentPhase::Cancelled)
                 })
                 .unwrap_or(false);
             let outcome = if error.is_none() {
@@ -568,7 +635,7 @@ impl InstanceContentService {
                     );
                 }
                 if let Ok(mut jobs) = self.jobs.lock() {
-                    if let Some(job) = jobs.get_mut(&id) {
+                    if let Some(job) = jobs.active.get_mut(&id) {
                         job.snapshot.completed_files = done;
                         if publishing {
                             job.snapshot.phase = ContentPhase::Publishing;
@@ -642,7 +709,11 @@ impl InstanceContentService {
             .jobs
             .lock()
             .map_err(|_| ContentError::Invalid("Job lock poisoned".into()))?;
+        if jobs.history.records().any(|record| record.id == id) {
+            return Ok(());
+        }
         let job = jobs
+            .active
             .get(&id)
             .ok_or_else(|| ContentError::Invalid("Установка не найдена".into()))?;
         if job.snapshot.phase == ContentPhase::Downloading {
@@ -652,12 +723,7 @@ impl InstanceContentService {
     }
 
     pub fn latest_job(&self, instance: InstanceId) -> Option<ContentJobSnapshot> {
-        let mut jobs = self.jobs.lock().ok()?;
-        jobs.retain(|_, job| job.retained_at(Instant::now()));
-        jobs.values()
-            .filter(|job| job.snapshot.instance_id == instance)
-            .max_by_key(|job| job.created)
-            .map(|job| job.snapshot.clone())
+        self.jobs.lock().ok()?.latest(instance)
     }
 }
 
@@ -704,5 +770,43 @@ mod history_tests {
             assert!(!job.retained_at(completed + Duration::from_secs(3600)));
             assert!(job.created < completed);
         }
+    }
+
+    #[test]
+    fn full_completed_ring_never_rejects_new_active_jobs_and_active_limit_is_independent() {
+        let mut jobs = Jobs::new();
+        for _ in 0..1000 {
+            let job = job(Instant::now());
+            let id = job.snapshot.id;
+            jobs.admit(id, job).unwrap();
+            jobs.finish(id, ContentPhase::Completed, None);
+        }
+        assert_eq!(jobs.history.records().count(), HISTORY_LIMIT);
+        for _ in 0..ACTIVE_LIMIT {
+            let job = job(Instant::now());
+            jobs.admit(job.snapshot.id, job).unwrap();
+        }
+        let extra = job(Instant::now());
+        assert!(jobs.admit(extra.snapshot.id, extra).is_err());
+        let id = *jobs.active.keys().next().unwrap();
+        jobs.finish(id, ContentPhase::Cancelled, None);
+        let extra = job(Instant::now());
+        jobs.admit(extra.snapshot.id, extra).unwrap();
+        assert_eq!(jobs.history.records().count(), HISTORY_LIMIT);
+    }
+
+    #[test]
+    fn latest_preserves_creation_order_when_an_older_job_finishes_last() {
+        let mut jobs = Jobs::new();
+        let old = job(Instant::now() - Duration::from_secs(7200));
+        let old_id = old.snapshot.id;
+        let new = job(Instant::now());
+        let new_id = new.snapshot.id;
+        jobs.admit(old_id, old).unwrap();
+        jobs.admit(new_id, new).unwrap();
+        jobs.finish(new_id, ContentPhase::Completed, None);
+        jobs.finish(old_id, ContentPhase::Failed, None);
+        assert_eq!(jobs.latest(1.into()).unwrap().id, new_id);
+        assert_eq!(jobs.active.len(), 0);
     }
 }
