@@ -15,6 +15,9 @@ V01 обновляет документацию, не меняет провер�
 | Локальный core Cargo.lock | SHA-256 до/после проверок | Неизменён; не включён в commits |
 
 Это **Linux compile/test/replay PASS**, не blanket P08/P11 или manual/platform PASS.
+Последующий [P11-V02 core шаг](../platform-verification.md) добавляет platform runner,
+CI configuration и Windows GNU compile/link evidence без GUI запуска/проверки.
+Числа и inputs этого V01 checkpoint ниже сохранены, не переименованы в новый GUI PASS.
 Повтор использует fresh source snapshot и общий external build cache, не запуск
 исходного GUI. Все test suites повторно выполнялись, не только compile checks.
 

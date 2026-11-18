@@ -1,0 +1,43 @@
+name: Core platform contracts
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-core:
+    name: Native core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      SQLX_OFFLINE: 'true'
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Runner regression tests
+        run: python -m unittest discover -s docs -p test_verify_platform.py
+      - name: Native fmt, all-target check, tests, build
+        run: python docs/verify-platform.py --output platform-evidence
+      - name: Keep evidence even after a failing command
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-platform-${{ matrix.os }}
+          path: platform-evidence/
+          if-no-files-found: warn

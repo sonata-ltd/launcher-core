@@ -26,3 +26,7 @@ dev.db*
 
 # Run logs
 logs/
+
+# Local platform verification reports and Python runner bytecode
+/platform-evidence/
+__pycache__/

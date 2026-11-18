@@ -15,6 +15,7 @@
 - [consumer-contract.md](consumer-contract.md): service API, observer reconciliation, typed diagnostics, recovery и shutdown.
 - [gui-migration/README.md](gui-migration/README.md): source-only GUI patches 01–05 и изолированный runner.
 - [gui-migration/linux-verification.md](gui-migration/linux-verification.md): итоговые Linux evidence и непроверенные критерии.
+- [platform-verification.md](platform-verification.md): P11-V02 core native/cross runner, CI matrix и непроверенные Windows/macOS/GUI критерии.
 - [check.sh](check.sh): воспроизводимый запуск проверок без GUI Cargo patches.
 - `verify-baseline.py`: историческая проверка снимка; в этой рабочей копии отсутствует.
 
@@ -120,6 +121,15 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 
 ## Текущее состояние
 
+**P11-V02 (core часть):** native CI matrix Linux/Windows/macOS настроен, но hosted
+jobs ещё не запускались. Linux core fmt/all-target check/test/build: **572 library
++ 2 CLI + 2 integration + 18 doctests passed**, 1 ignored. Windows GNU all-target
+check/test --no-run/build прошли из Linux — **compile/link, не execution**. MSVC
+cross-check заблокирован C toolchain; macOS runner отсутствует. Четыре process
+regressions теперь используют controlled Rust child вместо Unix shell/sleep.
+[Команды, reports и ограничения](platform-verification.md). GUI запуск/явная
+проверка отложены пользователем; GUI runtime/manual не PASS.
+
 **P11-V01: полный Linux verification выполнен**, но весь P08/P11 не объявлен
 завершённым. Проверенный core code — `9594de6`; последующее обновление V01 меняет
 документацию. Core fmt/check/test/build: **571 library + 2 CLI + 2 integration +
@@ -149,7 +159,7 @@ resolve/fmt/check/test/build PASS, **238 passed, 0 failed, 7 ignored**.
 
 Остаются частичными **B02, B06, D08, S05, S06**: historical hardlinks/provenance,
 недостающие dependency metadata, ownership/placement migration и более агрессивный
-GC не угадываются автоматически. **P11-V02 открыт:** Windows/macOS, manual isolated
+GC не угадываются автоматически. **P11-V02 частичен:** native Windows/macOS, manual isolated
 launch/install/content, реальные JVM/descendants, live providers, external concurrent
 FS/DB replacement и power-loss не получили runtime evidence. Abnormal GUI process
 termination не превращается в cooperative close. Исторические string UI adapters

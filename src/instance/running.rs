@@ -224,12 +224,10 @@ async fn watch(
 
 #[cfg(test)]
 mod tests {
-    use async_std::process::Command;
-
     use super::*;
     use crate::bus::event::CoreEvent;
+    use crate::utils::process::tests::waiting_child;
 
-    #[cfg(unix)]
     #[async_std::test]
     async fn shutdown_waits_for_admitted_preparation_and_confirmed_process_exit() {
         let tasks = crate::utils::jobs::supervisor::Tasks::default();
@@ -238,7 +236,7 @@ mod tests {
         let mut shutdown = Box::pin(tasks.shutdown());
         assert!(futures::poll!(&mut shutdown).is_pending());
         assert!(running.reserve(2.into()).is_err());
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (_child_root, child) = waiting_child().await;
         reservation.commit(child);
         assert!(futures::poll!(&mut shutdown).is_pending());
         running.kill(1.into()).unwrap();
@@ -291,7 +289,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[async_std::test]
     async fn the_watcher_reports_the_exit_code_and_clears_the_entry() {
         let bus = EventBus::new(16);
@@ -299,22 +296,28 @@ mod tests {
         let running = RunningInstances::new(bus);
         let id = InstanceId::from(1);
 
-        let child = Command::new("sh").args(["-c", "exit 3"]).spawn().unwrap();
+        let (child_root, child) = waiting_child().await;
         running.reserve(id).unwrap().commit(child);
+        std::fs::write(child_root.path().join("exit"), b"3").unwrap();
 
         let _ = next_instance_event(&mut rx).await; // Preparing
         assert!(matches!(
             next_instance_event(&mut rx).await,
             InstanceEvent::Started { .. }
         ));
+        let exited = async_std::future::timeout(
+            std::time::Duration::from_secs(10),
+            next_instance_event(&mut rx),
+        )
+        .await
+        .unwrap();
         assert!(matches!(
-            next_instance_event(&mut rx).await,
+            exited,
             InstanceEvent::Exited { code: Some(3), .. }
         ));
         assert!(running.snapshot().is_empty());
     }
 
-    #[cfg(unix)]
     #[async_std::test]
     async fn native_directory_survives_running_process_and_is_removed_before_exit_event() {
         let root = tempfile::tempdir().unwrap();
@@ -325,7 +328,7 @@ mod tests {
         let mut rx = bus.subscribe();
         let running = RunningInstances::new(bus);
         let id = 1.into();
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (_child_root, child) = waiting_child().await;
         let runtime_pin = crate::utils::process_pin::ProcessPin::create(root.path()).unwrap();
         runtime_pin.before_spawn().unwrap();
         runtime_pin.record_child(child.id());
@@ -350,7 +353,6 @@ mod tests {
         assert!(crate::utils::process_pin::allows_cleanup(root.path()).unwrap());
     }
 
-    #[cfg(unix)]
     #[async_std::test]
     async fn kill_ends_the_process() {
         let bus = EventBus::new(16);
@@ -358,16 +360,23 @@ mod tests {
         let running = RunningInstances::new(bus);
         let id = InstanceId::from(1);
 
-        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let (_child_root, child) = waiting_child().await;
         running.reserve(id).unwrap().commit(child);
         running.kill(id).unwrap();
 
-        loop {
-            if let InstanceEvent::Exited { code, .. } = next_instance_event(&mut rx).await {
-                assert_eq!(code, None, "killed by a signal, so no exit code");
-                break;
+        async_std::future::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let InstanceEvent::Exited { code, .. } = next_instance_event(&mut rx).await {
+                    #[cfg(unix)]
+                    assert_eq!(code, None, "killed by a signal, so no exit code");
+                    #[cfg(windows)]
+                    assert!(code.is_some(), "Windows termination reports an exit code");
+                    break;
+                }
             }
-        }
+        })
+        .await
+        .unwrap();
         assert!(matches!(
             running.kill(id),
             Err(InstanceError::NotRunning(_))

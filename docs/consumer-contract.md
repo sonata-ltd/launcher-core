@@ -92,3 +92,9 @@ patches не включают пользовательский baseline. Исх�
 [Linux verification](gui-migration/linux-verification.md) покрывает fmt/check/test/build,
 service/API/reducer/headless regressions и full fresh replay, не Windows/macOS,
 manual native launch/install/content, реальные JVM/descendants или power-loss.
+
+[P11-V02 core platform runner](platform-verification.md) добавляет native CI matrix
+и Linux/Windows GNU compile/link evidence. Hosted Windows/macOS jobs ещё не запускались;
+cross test --no-run не выполняет assertions. Четыре lifecycle regressions используют
+controlled Rust child без shell/Java. Явная GUI verification отложена пользователем;
+этот шаг не меняет GUI и не закрывает manual/native/platform критерии.

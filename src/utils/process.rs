@@ -77,8 +77,62 @@ pub(crate) fn write_owner(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A controllable real child of the current Rust test binary. No shell,
+    /// installed JVM, platform-specific sleep command, or user data is needed.
+    pub(crate) async fn waiting_child() -> (tempfile::TempDir, async_std::process::Child) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = async_std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "utils::process::tests::controlled_child_fixture",
+                "--nocapture",
+            ])
+            .env("SONATA_TEST_CONTROLLED_CHILD", directory.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let ready = async_std::future::timeout(std::time::Duration::from_secs(10), async {
+            while !directory.path().join("ready").is_file() {
+                assert!(
+                    child.try_status().unwrap().is_none(),
+                    "child exited before ready"
+                );
+                async_std::task::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        if ready.is_err() {
+            let _ = child.kill();
+            let _ = child.status().await;
+            panic!("controlled child did not become ready");
+        }
+        (directory, child)
+    }
+
+    #[test]
+    fn controlled_child_fixture() {
+        let Some(directory) = std::env::var_os("SONATA_TEST_CONTROLLED_CHILD") else {
+            return;
+        };
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::write(directory.join("ready"), b"ready").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Ok(code) = std::fs::read_to_string(directory.join("exit")) {
+                std::process::exit(code.parse().unwrap());
+            }
+            // A failed parent drops its TempDir; do not leave an orphan fixture.
+            if !directory.is_dir() || std::time::Instant::now() >= deadline {
+                std::process::exit(1);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn owner_publication_is_complete_and_never_replaces_an_existing_marker() {
