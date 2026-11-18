@@ -64,6 +64,7 @@ pub(crate) struct InstallContext<'a> {
     pub(crate) catalog: &'a ModloaderCatalog,
     // Java runtimes that can be used during modloader installation.
     pub(crate) modloader_java_runtimes: &'a [Arc<JavaRuntime>],
+    pub(crate) java_use: &'a crate::java::managed::process::JavaUse,
     pub(crate) op: &'a OperationHandle,
     pub(crate) cancel: &'a Cancel,
 }
@@ -304,7 +305,7 @@ async fn install<'a>(
     complete(context.op, OperationStage::DownloadLibs, started);
 
     if let Some(prepared) = forge_installer {
-        modloader::forge::finalize(
+        modloader::forge::finalize_retained(
             forge::FinalizeRequest {
                 game_dir: &context
                     .paths
@@ -320,6 +321,7 @@ async fn install<'a>(
                 cancel: context.cancel,
             },
             &game_components,
+            context.java_use,
         )
         .await?;
     }

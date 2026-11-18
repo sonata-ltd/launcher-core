@@ -3,6 +3,7 @@ mod catalog;
 mod extract;
 pub mod model;
 mod ownership;
+pub(crate) mod process;
 pub(crate) mod retention;
 #[cfg(test)]
 mod tests;
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use crate::java::{
     model::{JavaRuntime, JavaSource, NewJavaRuntime},
     service::JavaService,
-    utils::detect_properties,
+    utils::detect_properties_retained,
 };
 use crate::utils::cancellation::Cancellation;
 pub use model::*;
@@ -294,9 +295,10 @@ impl ManagedJavaService {
         let bus = java.managed_bus();
         let (tx, rx) = async_channel::bounded(1);
         task::spawn(async move {
-            let _admission = admission;
             let _operation = operation;
+            let java_use = process::JavaUse::admitted(admission);
             let result: Result<Arc<JavaRuntime>> = async {
+                let java_use = java_use.as_ref().map_err(storage)?;
                 service.persist(id).await?;
                 let snapshot = service.installation(id).await?;
                 let home = crate::utils::files::child(&service.root, &home).map_err(storage)?;
@@ -309,15 +311,17 @@ impl ManagedJavaService {
                     }),
                 )
                 .map_err(storage)?;
-                let detected = detect_properties(executable).await.map_err(|e| {
-                    ManagedJavaError::new(
-                        "validation",
-                        format!(
+                let detected = detect_properties_retained(executable, java_use)
+                    .await
+                    .map_err(|e| {
+                        ManagedJavaError::new(
+                            "validation",
+                            format!(
                             "Executable: {}\nArguments: -XshowSettings:properties -version\n{e}",
                             extract::executable(&home).display()
                         ),
-                    )
-                })?;
+                        )
+                    })?;
                 validate_detected(&home, &snapshot.package, &detected)?;
                 let exec = detected.exec_path.clone();
                 let existing = registry
@@ -351,7 +355,12 @@ impl ManagedJavaService {
                 // observe it, including after the validation caller is dropped.
                 let root = service.root.clone();
                 let persisted_record = ready_record.clone();
-                task::spawn_blocking(move || write_record(&root, &persisted_record)).await?;
+                task::spawn_blocking(move || {
+                    #[cfg(test)]
+                    tests::ownership_checkpoint(&root, "validation-ready");
+                    write_record(&root, &persisted_record)
+                })
+                .await?;
                 service.update(id, |record| *record = ready_record);
                 bus.publish(crate::java::model::JavaEvent::ListChanged);
                 Ok(runtime)
@@ -361,6 +370,9 @@ impl ManagedJavaService {
                 Ok(runtime) => Ok(runtime),
                 Err(error) => Err(service.fail(id, error).await),
             };
+            if let Ok(java_use) = java_use {
+                java_use.finish(true);
+            }
             let _ = tx.send(result).await;
         });
         rx.recv()

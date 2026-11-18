@@ -22,9 +22,24 @@ pub struct DetectedJavaRuntime {
     pub vendor: Option<String>,
 }
 
+/// Unscoped external-runtime probe. A path is not a managed retention pin;
+/// core managed consumers use the retained variant before touching a home.
 pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJavaRuntime> {
-    let input = input.as_ref();
+    detect_properties_impl(input.as_ref(), None).await
+}
 
+pub(crate) async fn detect_properties_retained(
+    input: impl AsRef<Path>,
+    java_use: &super::managed::process::JavaUse,
+) -> io::Result<DetectedJavaRuntime> {
+    let pin = java_use.child_pin()?;
+    detect_properties_impl(input.as_ref(), Some(&pin)).await
+}
+
+async fn detect_properties_impl(
+    input: &Path,
+    pin: Option<&crate::utils::process_pin::ProcessPin>,
+) -> io::Result<DetectedJavaRuntime> {
     let exec_path = dunce::canonicalize(input).unwrap_or_else(|_| input.to_path_buf());
 
     let mut cmd = Command::new(&exec_path);
@@ -38,7 +53,7 @@ pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJa
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = run_with_timeout(&mut cmd, PROBE_TIMEOUT).await?;
+    let output = run_with_timeout_retained(&mut cmd, PROBE_TIMEOUT, pin).await?;
 
     // java -version writes only to stderr but we still have to check the stdout
     let output = {
@@ -94,11 +109,26 @@ pub async fn detect_properties(input: impl AsRef<Path>) -> io::Result<DetectedJa
     })
 }
 
+#[cfg(test)]
 async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::process::Output> {
+    run_with_timeout_retained(cmd, dur, None).await
+}
+
+async fn run_with_timeout_retained(
+    cmd: &mut Command,
+    dur: Duration,
+    pin: Option<&crate::utils::process_pin::ProcessPin>,
+) -> io::Result<std::process::Output> {
     cmd.kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(pin) = pin {
+        pin.before_spawn()?;
+    }
     let mut child = cmd.spawn()?;
+    if let Some(pin) = pin {
+        pin.record_child(child.id());
+    }
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
     let mut stdout_bytes = Vec::new();
@@ -118,7 +148,10 @@ async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::p
         Ok(Ok(status)) => status,
         failure => {
             let _ = child.kill();
-            let _ = child.status().await;
+            let exited = child.status().await.is_ok();
+            if let Some(pin) = pin {
+                pin.finish(exited);
+            }
             let (kind, reason) = match failure {
                 Ok(Err(error)) => (error.kind(), error.to_string()),
                 _ => (io::ErrorKind::TimedOut, "Java process timed out".into()),
@@ -133,6 +166,9 @@ async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::p
             ));
         }
     };
+    if let Some(pin) = pin {
+        pin.finish(true);
+    }
     let output = std::process::Output {
         status,
         stdout: stdout_bytes,
@@ -267,6 +303,132 @@ Property settings:
             .unwrap();
         assert_eq!(output.stdout.len(), 64 * 1024);
         assert_eq!(output.stderr.len(), 64 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn retained_probe_child_completion_does_not_release_home_reads_or_registration() {
+        use crate::java::managed::process::JavaRetention;
+        use crate::utils::{cancellation::Cancellation, process_pin::allows_cleanup};
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("java");
+        let db = std::sync::Arc::new(
+            crate::data::db::Database::init("sqlite::memory:")
+                .await
+                .unwrap(),
+        );
+        let java_use = JavaRetention::new(db, root.clone())
+            .begin(&Cancellation::new())
+            .await
+            .unwrap();
+        let home = root.join("fixture");
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        let executable = home.join("bin/java");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf 'java.home = {}\\njava.specification.version = 21\\n'\n",
+                home.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            home.join("release"),
+            "JAVA_VERSION=\"21.0.5\"\nIMPLEMENTOR=\"fixture vendor\"\n",
+        )
+        .unwrap();
+        let found = detect_properties_retained(&executable, &java_use)
+            .await
+            .unwrap();
+        assert_eq!(found.vendor.as_deref(), Some("fixture vendor"));
+        assert_eq!(found.version.as_deref(), Some("21.0.5"));
+        let scope = root.join(".managed");
+        assert!(!allows_cleanup(&scope).unwrap());
+        let pins: Vec<_> = std::fs::read_dir(scope.join(".sonata-processes"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(pins.len(), 2);
+        assert_eq!(
+            pins.iter()
+                .filter(|path| path.join(".sonata-exited").exists())
+                .count(),
+            1
+        );
+        java_use.finish(true);
+        assert!(allows_cleanup(&scope).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn retained_runner_finishes_success_failure_and_timeout_but_not_unknown_spawn() {
+        use crate::utils::process_pin::{allows_cleanup, ProcessPin};
+        for mode in ["success", "failure", "timeout", "spawn"] {
+            let dir = tempfile::tempdir().unwrap();
+            let pin = ProcessPin::create(dir.path()).unwrap();
+            let mut command = Command::new(if mode == "spawn" {
+                "/nonexistent/sonata-java"
+            } else {
+                "sh"
+            });
+            command.args([
+                "-c",
+                match mode {
+                    "timeout" => "exec sleep 30",
+                    "failure" => "exit 7",
+                    _ => "exit 0",
+                },
+            ]);
+            let result =
+                run_with_timeout_retained(&mut command, Duration::from_millis(100), Some(&pin))
+                    .await;
+            assert_eq!(result.is_ok(), mode == "success", "{mode}");
+            assert_eq!(
+                allows_cleanup(dir.path()).unwrap(),
+                mode != "spawn",
+                "{mode}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn dropped_retained_probe_keeps_child_pin_without_exit_acknowledgment() {
+        use crate::utils::process_pin::{allows_cleanup, ProcessPin};
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let pin = ProcessPin::create(dir.path()).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf ready > \"$1\"; exec sleep 30", "sh"])
+            .arg(&ready);
+        let mut caller = Box::pin(run_with_timeout_retained(
+            &mut command,
+            Duration::from_secs(5),
+            Some(&pin),
+        ));
+        let entered = async_std::future::timeout(Duration::from_secs(3), async {
+            while !ready.exists() {
+                async_std::task::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        futures::pin_mut!(entered);
+        match futures::future::select(entered, caller.as_mut()).await {
+            futures::future::Either::Left((result, _)) => result.unwrap(),
+            futures::future::Either::Right((result, _)) => {
+                panic!("probe finished early: {result:?}")
+            }
+        }
+        drop(caller);
+        assert!(!allows_cleanup(dir.path()).unwrap());
+        for entry in std::fs::read_dir(dir.path().join(".sonata-processes")).unwrap() {
+            let path = entry.unwrap().path();
+            assert!(path.join(".sonata-starting").is_file());
+            assert!(path.join(".sonata-child").is_file());
+            assert!(!path.join(".sonata-exited").exists());
+        }
     }
 
     /// Runs the `java` on `PATH`: `cargo test -- --ignored`.

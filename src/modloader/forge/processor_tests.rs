@@ -108,3 +108,98 @@ async fn failed_processor_acknowledges_confirmed_exit_not_just_success() {
     assert!(run(command, &Cancellation::new(), |_| {}).await.is_err());
     assert!(crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
 }
+
+async fn managed_use(root: &std::path::Path) -> crate::java::managed::process::JavaUse {
+    let db = std::sync::Arc::new(
+        crate::data::db::Database::init("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
+    crate::java::managed::process::JavaRetention::new(db, root.to_owned())
+        .begin(&Cancellation::new())
+        .await
+        .unwrap()
+}
+
+#[async_std::test]
+async fn retained_processors_each_have_independent_java_pins_and_leave_outer_reads_protected() {
+    use crate::utils::process_pin::allows_cleanup;
+    let dir = tempfile::tempdir().unwrap();
+    let java_root = dir.path().join("java");
+    let java_use = managed_use(&java_root).await;
+    let generation = dir.path().join("generation");
+    fs::create_dir(&generation).unwrap();
+    for script in ["exit 0", "exit 7"] {
+        let result = run_retained(
+            command(&generation, script),
+            &Cancellation::new(),
+            |_| {},
+            Some(&java_use),
+        )
+        .await;
+        assert_eq!(result.is_ok(), script == "exit 0");
+        assert!(allows_cleanup(&generation).unwrap());
+        assert!(!allows_cleanup(&java_root.join(".managed")).unwrap());
+    }
+    assert_eq!(
+        fs::read_dir(java_root.join(".managed/.sonata-processes"))
+            .unwrap()
+            .count(),
+        3
+    );
+    java_use.finish(true);
+    assert!(allows_cleanup(&java_root.join(".managed")).unwrap());
+}
+
+#[async_std::test]
+async fn retained_processor_cancel_confirms_exit_in_both_resources() {
+    use crate::utils::process_pin::allows_cleanup;
+    let dir = tempfile::tempdir().unwrap();
+    let java_root = dir.path().join("java");
+    let java_use = managed_use(&java_root).await;
+    let cancel = Cancellation::new();
+    let result = run_retained(
+        command(dir.path(), "printf 'ready\\n'; while :; do :; done"),
+        &cancel,
+        |_| cancel.cancel(),
+        Some(&java_use),
+    )
+    .await;
+    assert!(matches!(result, Err(ModloaderError::Cancelled)));
+    java_use.finish(true);
+    assert!(allows_cleanup(dir.path()).unwrap());
+    assert!(allows_cleanup(&java_root.join(".managed")).unwrap());
+}
+
+#[async_std::test]
+async fn outer_completion_after_processor_drop_cannot_acknowledge_unknown_java_child_exit() {
+    use crate::utils::process_pin::allows_cleanup;
+    let dir = tempfile::tempdir().unwrap();
+    let java_root = dir.path().join("java");
+    let java_use = managed_use(&java_root).await;
+    let cancel = Cancellation::new();
+    let (entered, receiver) = futures::channel::oneshot::channel();
+    let mut entered = Some(entered);
+    let mut caller = Box::pin(run_retained(
+        command(dir.path(), "printf 'ready\\n'; while :; do :; done"),
+        &cancel,
+        |_| {
+            if let Some(entered) = entered.take() {
+                let _ = entered.send(());
+            }
+        },
+        Some(&java_use),
+    ));
+    let ready = async_std::future::timeout(Duration::from_secs(3), receiver);
+    futures::pin_mut!(ready);
+    match futures::future::select(ready, caller.as_mut()).await {
+        futures::future::Either::Left((result, _)) => result.unwrap().unwrap(),
+        futures::future::Either::Right((result, _)) => {
+            panic!("processor finished early: {result:?}")
+        }
+    }
+    drop(caller);
+    java_use.finish(true);
+    assert!(!allows_cleanup(dir.path()).unwrap());
+    assert!(!allows_cleanup(&java_root.join(".managed")).unwrap());
+}

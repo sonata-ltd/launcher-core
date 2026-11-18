@@ -177,10 +177,30 @@ pub struct FinalizeContext<'a> {
     pub cancel: &'a Cancel,
 }
 
+/// Unscoped compatibility entry point for externally retained Java. Core
+/// installation uses explicit managed retention, never infers it from a path.
 pub async fn finalize<'a>(
     request: FinalizeRequest<'a>,
     context: &FinalizeContext<'a>,
     game_components: &Components,
+) -> Result<()> {
+    finalize_impl(request, context, game_components, None).await
+}
+
+pub(crate) async fn finalize_retained<'a>(
+    request: FinalizeRequest<'a>,
+    context: &FinalizeContext<'a>,
+    game_components: &Components,
+    java_use: &crate::java::managed::process::JavaUse,
+) -> Result<()> {
+    finalize_impl(request, context, game_components, Some(java_use)).await
+}
+
+async fn finalize_impl<'a>(
+    request: FinalizeRequest<'a>,
+    context: &FinalizeContext<'a>,
+    game_components: &Components,
+    java_use: Option<&crate::java::managed::process::JavaUse>,
 ) -> Result<()> {
     context.cancel.check()?;
 
@@ -213,16 +233,33 @@ pub async fn finalize<'a>(
             .path(),
         );
 
-    install::run(
-        request.prepared,
-        request.maven_dir.to_path_buf(),
-        request.maven_dir.join(client),
-        request.game_dir.to_path_buf(),
-        PathBuf::from(&java.exec_path),
-        context.cancel,
-        context.op,
-    )
-    .await?;
+    match java_use {
+        Some(java_use) => {
+            install::run_retained(
+                request.prepared,
+                request.maven_dir.to_path_buf(),
+                request.maven_dir.join(client),
+                request.game_dir.to_path_buf(),
+                PathBuf::from(&java.exec_path),
+                context.cancel,
+                context.op,
+                Some(java_use),
+            )
+            .await?
+        }
+        None => {
+            install::run(
+                request.prepared,
+                request.maven_dir.to_path_buf(),
+                request.maven_dir.join(client),
+                request.game_dir.to_path_buf(),
+                PathBuf::from(&java.exec_path),
+                context.cancel,
+                context.op,
+            )
+            .await?
+        }
+    }
 
     context.op.complete_stage(StageResult {
         status: Outcome::Completed,

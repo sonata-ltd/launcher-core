@@ -50,10 +50,20 @@ fn all_outputs_match(outputs: &[(PathBuf, String)], cancel: &Cancellation) -> Re
     Ok(true)
 }
 
+#[cfg(test)]
 pub async fn run(
     command: ProcessorCommand,
     cancel: &Cancellation,
+    on_output: impl FnMut(Vec<OutputLine>) + Send,
+) -> Result<()> {
+    run_retained(command, cancel, on_output, None).await
+}
+
+pub(crate) async fn run_retained(
+    command: ProcessorCommand,
+    cancel: &Cancellation,
     mut on_output: impl FnMut(Vec<OutputLine>) + Send,
+    java_use: Option<&crate::java::managed::process::JavaUse>,
 ) -> Result<()> {
     if cancel.is_cancelled() {
         return Err(ModloaderError::Cancelled);
@@ -84,7 +94,11 @@ pub async fn run(
         .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
 
     let pin = crate::utils::process_pin::ProcessPin::create(&command.retention_root)?;
+    let java_pin = java_use.map(|java_use| java_use.child_pin()).transpose()?;
     pin.before_spawn()?;
+    if let Some(pin) = &java_pin {
+        pin.before_spawn()?;
+    }
     let child = Command::new(&command.java)
         .arg("-cp")
         .arg(classpath)
@@ -97,6 +111,9 @@ pub async fn run(
         .kill_on_drop(true)
         .spawn()?;
     pin.record_child(child.id());
+    if let Some(pin) = &java_pin {
+        pin.record_child(child.id());
+    }
     let mut process_exited = false;
     let result = run_child(
         command,
@@ -108,6 +125,9 @@ pub async fn run(
     )
     .await;
     pin.finish(process_exited);
+    if let Some(pin) = &java_pin {
+        pin.finish(process_exited);
+    }
     result
 }
 

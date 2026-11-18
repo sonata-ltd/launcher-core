@@ -15,7 +15,7 @@ const PREFIX: &str = "run-";
 pub(crate) struct NativeDirectory {
     directory: Arc<tempfile::TempDir>,
     extracted: PathBuf,
-    runtime_pin: Option<crate::utils::process_pin::ProcessPin>,
+    runtime_pins: Vec<crate::utils::process_pin::ProcessPin>,
 }
 
 impl NativeDirectory {
@@ -38,7 +38,7 @@ impl NativeDirectory {
         Ok(Self {
             directory: Arc::new(directory),
             extracted,
-            runtime_pin: None,
+            runtime_pins: Vec::new(),
         })
     }
 
@@ -59,7 +59,7 @@ impl NativeDirectory {
     }
 
     pub(crate) fn finish(self, process_exited: bool) {
-        if let Some(pin) = &self.runtime_pin {
+        for pin in &self.runtime_pins {
             pin.finish(process_exited);
         }
         if let Ok(directory) = Arc::try_unwrap(self.directory) {
@@ -76,7 +76,7 @@ impl NativeDirectory {
     }
 
     pub(crate) fn retain_runtime(&mut self, pin: crate::utils::process_pin::ProcessPin) {
-        self.runtime_pin = Some(pin);
+        self.runtime_pins.push(pin);
     }
 }
 

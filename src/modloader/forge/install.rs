@@ -162,6 +162,22 @@ pub async fn run(
     cancel: &Cancel,
     op: &crate::data::registry::operation::handle::OperationHandle,
 ) -> Result<()> {
+    run_retained(
+        prepared, libraries, minecraft, game_root, java, cancel, op, None,
+    )
+    .await
+}
+
+pub(crate) async fn run_retained(
+    prepared: Prepared,
+    libraries: PathBuf,
+    minecraft: PathBuf,
+    game_root: PathBuf,
+    java: PathBuf,
+    cancel: &Cancel,
+    op: &crate::data::registry::operation::handle::OperationHandle,
+    java_use: Option<&crate::java::managed::process::JavaUse>,
+) -> Result<()> {
     let mut tokens = HashMap::from([
         ("SIDE".into(), "client".into()),
         (
@@ -272,7 +288,7 @@ pub async fn run(
         };
         publish_output(Vec::new());
 
-        processor::run(
+        processor::run_retained(
             ProcessorCommand {
                 java: java.clone(),
                 main_class,
@@ -290,6 +306,7 @@ pub async fn run(
             },
             cancel,
             &mut publish_output,
+            java_use,
         )
         .await?;
 

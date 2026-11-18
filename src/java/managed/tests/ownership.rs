@@ -374,6 +374,73 @@ async fn dropping_recovery_caller_retains_exclusive_admission_through_blocking_c
     );
 }
 
+#[cfg(unix)]
+#[async_std::test]
+async fn dropped_validation_caller_keeps_broad_pin_after_child_exit_until_ready_record_is_committed(
+) {
+    use crate::utils::process_pin::allows_cleanup;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        crate::data::db::Database::init("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
+    let java = JavaService::new(db, crate::bus::EventBus::new(16), dir.path().into());
+    java.managed.initialize().await.unwrap();
+    let mut rec = record(package(), ManagedJavaStage::AwaitingValidation);
+    let id = rec.snapshot.id;
+    let home = PathBuf::from("managed")
+        .join(&rec.snapshot.package.id)
+        .join(id.to_string())
+        .join("jre");
+    rec.home = Some(home.clone());
+    let home = dir.path().join(home);
+    fs::create_dir_all(home.join("bin")).unwrap();
+    let executable = home.join("bin/java");
+    fs::write(&executable, format!("#!/bin/sh\nprintf 'java.home = {}\\njava.runtime.version = {}\\njava.specification.version = 21\\nos.arch = {}\\njava.vendor = fixture\\n'\n", home.display(), rec.snapshot.package.version, crate::java::select::host_arch())).unwrap();
+    fs::set_permissions(executable, fs::Permissions::from_mode(0o700)).unwrap();
+    insert(&java.managed, rec);
+    java.managed.persist(id).await.unwrap();
+    let (entered, resume) = blocking_hook(dir.path(), "validation-ready");
+    let mut caller = Box::pin(java.managed.validate(id, &java));
+    match futures::future::select(Box::pin(entered.recv()), caller.as_mut()).await {
+        futures::future::Either::Left((result, _)) => result.unwrap(),
+        futures::future::Either::Right((result, _)) => {
+            panic!("validation finished early: {result:?}")
+        }
+    }
+    drop(caller);
+    let scope = dir.path().join(".managed");
+    assert!(!allows_cleanup(&scope).unwrap());
+    let pins: Vec<_> = fs::read_dir(scope.join(".sonata-processes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(pins.len(), 2);
+    assert_eq!(
+        pins.iter()
+            .filter(|path| path.join(".sonata-exited").exists())
+            .count(),
+        1
+    );
+    assert!(ownership::maintenance(dir.path()).is_err());
+    assert!(ownership::operation(dir.path(), id).is_err());
+    assert_eq!(java.list_all().await.unwrap().len(), 1);
+    resume.send(()).unwrap();
+    drop(
+        crate::utils::object_store::ObjectStore::new(scope.clone())
+            .maintenance(&Cancellation::new())
+            .await
+            .unwrap(),
+    );
+    assert!(allows_cleanup(&scope).unwrap());
+    assert_eq!(
+        read_record(dir.path(), id).unwrap().unwrap().snapshot.stage,
+        ManagedJavaStage::Ready
+    );
+}
+
 #[async_std::test]
 async fn managed_operation_crash_writer() {
     let Some(root) = std::env::var_os("SONATA_TEST_MANAGED_ROOT").map(PathBuf::from) else {

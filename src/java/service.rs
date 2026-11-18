@@ -80,6 +80,15 @@ impl JavaService {
         self.bus.clone()
     }
 
+    pub(crate) async fn retain_runtime(
+        &self,
+        cancel: &crate::utils::cancellation::Cancellation,
+    ) -> std::io::Result<super::managed::process::JavaUse> {
+        super::managed::process::JavaRetention::new(self.db.clone(), self.own_runtimes.clone())
+            .begin(cancel)
+            .await
+    }
+
     pub(crate) fn get_registry(&self) -> Arc<JavaRegistry> {
         Arc::clone(&self.registry)
     }
@@ -135,8 +144,27 @@ impl JavaService {
     }
 
     async fn discover_locked(&self, requested: bool) -> JavaResult<usize> {
+        let java_use = self
+            .retain_runtime(&crate::utils::cancellation::Cancellation::new())
+            .await
+            .map_err(|error| crate::data::db::DbError::InvalidInput(error.to_string()))?;
+        let result = self.discover_retained(requested, &java_use).await;
+        java_use.finish(true);
+        result
+    }
+
+    async fn discover_retained(
+        &self,
+        requested: bool,
+        java_use: &super::managed::process::JavaUse,
+    ) -> JavaResult<usize> {
         let cx = DiscoveryContext::system(self.own_runtimes.clone());
-        let candidates = async_std::task::spawn_blocking(move || discovery::candidates(&cx)).await;
+        let retained = java_use.clone();
+        let candidates = async_std::task::spawn_blocking(move || {
+            let _retained = retained;
+            discovery::candidates(&cx)
+        })
+        .await;
 
         let mut fresh = Vec::with_capacity(candidates.len());
         for path in candidates {
@@ -145,7 +173,7 @@ impl JavaService {
             }
         }
 
-        let found = discovery::probe_all(fresh).await;
+        let found = discovery::probe_all_retained(fresh, java_use).await;
 
         // A JDK the user added by another path (a symlink, `/usr/bin/java`)
         // is the same runtime: skip it by its home.

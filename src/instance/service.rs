@@ -205,10 +205,22 @@ impl InstanceService {
         );
 
         self.java_service.wait_discovery().await;
+        let java_use = match self.java_service.retain_runtime(cancel).await {
+            Ok(java_use) => java_use,
+            Err(error) => {
+                op.finish(if cancel.is_cancelled() {
+                    Outcome::Cancelled
+                } else {
+                    Outcome::Failed
+                });
+                return Err(crate::instance::launch::LaunchError::Retention(error).into());
+            }
+        };
         let java = match self.java.list_all().await {
             Ok(java) => java,
             Err(e) => {
                 op.finish(Outcome::Failed);
+                java_use.finish(true);
                 return Err(e.into());
             }
         };
@@ -231,17 +243,16 @@ impl InstanceService {
             db: Arc::clone(&self.db),
             catalog: &catalog,
             modloader_java_runtimes: &java,
+            java_use: &java_use,
             op: &op,
             cancel,
         };
 
         let result = instance::init::install::execute(&request, &context).await;
-
-        match result {
+        let result = match result {
             Ok(profile) => {
                 op.finish(Outcome::Completed);
-                self.auto_select_runtime(&rec, &profile.java, true).await?;
-                Ok(())
+                self.auto_select_runtime(&rec, &profile.java, true).await
             }
             Err(e) => {
                 let outcome = if e.is_cancelled() {
@@ -253,7 +264,9 @@ impl InstanceService {
                 op.finish(outcome);
                 Err(e.into())
             }
-        }
+        };
+        java_use.finish(true);
+        result
     }
 
     /// After new runtimes appear: picks a Java for every instance that has
@@ -315,7 +328,22 @@ impl InstanceService {
         notify: bool,
     ) -> Result<()> {
         self.java_service.wait_discovery().await;
+        let java_use = self
+            .java_service
+            .retain_runtime(&crate::utils::cancellation::Cancellation::new())
+            .await
+            .map_err(crate::instance::launch::LaunchError::Retention)?;
+        let result = self.auto_select_retained(rec, policy, notify).await;
+        java_use.finish(true);
+        result
+    }
 
+    async fn auto_select_retained(
+        &self,
+        rec: &InstanceRecord,
+        policy: &JavaPolicy,
+        notify: bool,
+    ) -> Result<()> {
         if self.has_own_java(rec.id).await? {
             return Ok(());
         }
@@ -363,46 +391,67 @@ impl InstanceService {
         self.ensure_content_recovered(id).await?;
         let rec = self.get_instance(id).await?;
         let settings = self.settings.effective(id).await?;
-        let java = self.resolve_java(id, &settings).await?;
-
-        let root =
-            crate::utils::files::child(self.paths.instances(), std::path::Path::new(&rec.dir))?;
-        self.mod_index
-            .before_launch(&self.db, &self.activity, id, root)
-            .await
-            .map_err(|source| InstanceError::ContentInventory { id, source })?;
-
-        // A broad durable pin precedes profile/legacy reads. A lazy JVM JAR open
-        // remains protected after launcher exit, not only until spawn returns.
-        instance::init::retention::attach(
-            self.db.clone(),
-            self.paths.libraries().clone(),
-            crate::utils::cancellation::Cancellation::new(),
-        )
-        .await?;
-        let runtime_store =
-            crate::utils::object_store::ObjectStore::new(self.paths.libraries().clone());
-        let _runtime_access = runtime_store
-            .access(&crate::utils::cancellation::Cancellation::new())
+        let java_use = self
+            .java_service
+            .retain_runtime(&crate::utils::cancellation::Cancellation::new())
             .await
             .map_err(crate::instance::launch::LaunchError::Retention)?;
-        let runtime_pin = crate::utils::process_pin::ProcessPin::create(self.paths.libraries())
-            .map_err(crate::instance::launch::LaunchError::Retention)?;
-        let mut command = match instance::init::storage::load(&self.db, id).await? {
-            Some(profile) => {
-                resolved::prepare(&rec, &settings, &java, &self.paths, profile).await?
-            }
-            None if rec.loader == LoaderKind::Vanilla => {
-                prepare::prepare_command(&rec, &settings, &java, &self.paths, Arc::clone(&self.db))
+        let result = async {
+            let java = self.resolve_java(id, &settings).await?;
+
+            let root =
+                crate::utils::files::child(self.paths.instances(), std::path::Path::new(&rec.dir))?;
+            self.mod_index
+                .before_launch(&self.db, &self.activity, id, root)
+                .await
+                .map_err(|source| InstanceError::ContentInventory { id, source })?;
+
+            // A broad durable pin precedes profile/legacy reads. A lazy JVM JAR open
+            // remains protected after launcher exit, not only until spawn returns.
+            instance::init::retention::attach(
+                self.db.clone(),
+                self.paths.libraries().clone(),
+                crate::utils::cancellation::Cancellation::new(),
+            )
+            .await?;
+            let runtime_store =
+                crate::utils::object_store::ObjectStore::new(self.paths.libraries().clone());
+            let _runtime_access = runtime_store
+                .access(&crate::utils::cancellation::Cancellation::new())
+                .await
+                .map_err(crate::instance::launch::LaunchError::Retention)?;
+            let runtime_pin = crate::utils::process_pin::ProcessPin::create(self.paths.libraries())
+                .map_err(crate::instance::launch::LaunchError::Retention)?;
+            let mut command = match instance::init::storage::load(&self.db, id).await? {
+                Some(profile) => {
+                    resolved::prepare(&rec, &settings, &java, &self.paths, profile).await?
+                }
+                None if rec.loader == LoaderKind::Vanilla => {
+                    prepare::prepare_command(
+                        &rec,
+                        &settings,
+                        &java,
+                        &self.paths,
+                        Arc::clone(&self.db),
+                    )
                     .await?
-            }
-            None => return Err(InstanceError::NotInstalled(id)),
-        };
-        command.retain_runtime(runtime_pin);
-        let (child, natives) = resolved::spawn(command)?;
-        reservation.commit_with_natives(child, natives);
+                }
+                None => return Err(InstanceError::NotInstalled(id)),
+            };
+            command.retain_runtime(runtime_pin);
+            command.retain_runtime(
+                java_use
+                    .child_pin()
+                    .map_err(crate::instance::launch::LaunchError::Retention)?,
+            );
+            let (child, natives) = resolved::spawn(command)?;
+            reservation.commit_with_natives(child, natives);
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+        java_use.finish(true);
+        result
     }
 
     pub fn running(&self) -> Vec<(InstanceId, RunPhase)> {

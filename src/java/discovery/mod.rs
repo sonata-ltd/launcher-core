@@ -73,10 +73,29 @@ pub fn candidates(cx: &DiscoveryContext) -> Vec<PathBuf> {
 
 /// Probes each candidate, `PROBE_CONCURRENCY` at a time. A candidate that
 /// fails is logged and skipped, never fails the search. One result per home.
+/// This unscoped helper does not pin managed homes; JavaService uses retention.
 pub async fn probe_all(paths: Vec<PathBuf>) -> Vec<DetectedJavaRuntime> {
+    probe_all_impl(paths, None).await
+}
+
+pub(crate) async fn probe_all_retained(
+    paths: Vec<PathBuf>,
+    java_use: &super::managed::process::JavaUse,
+) -> Vec<DetectedJavaRuntime> {
+    probe_all_impl(paths, Some(java_use)).await
+}
+
+async fn probe_all_impl(
+    paths: Vec<PathBuf>,
+    java_use: Option<&super::managed::process::JavaUse>,
+) -> Vec<DetectedJavaRuntime> {
     let probed: Vec<_> = stream::iter(paths)
         .map(|p| async move {
-            match detect_properties(&p).await {
+            let detected = match java_use {
+                Some(java_use) => super::utils::detect_properties_retained(&p, java_use).await,
+                None => detect_properties(&p).await,
+            };
+            match detected {
                 Ok(d) => Some(d),
                 Err(e) => {
                     tracing::debug!(path = %p.display(), error = %e, "java candidate rejected");

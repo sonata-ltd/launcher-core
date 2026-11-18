@@ -31,12 +31,12 @@ pub struct LaunchCommand {
     pub game_dir: PathBuf,
     pub args: Vec<String>,
     natives: NativeDirectory,
-    runtime_pin: Option<crate::utils::process_pin::ProcessPin>,
+    runtime_pins: Vec<crate::utils::process_pin::ProcessPin>,
 }
 
 impl LaunchCommand {
     pub(crate) fn retain_runtime(&mut self, pin: crate::utils::process_pin::ProcessPin) {
-        self.runtime_pin = Some(pin);
+        self.runtime_pins.push(pin);
     }
 }
 
@@ -330,14 +330,14 @@ async fn prepare_command(
         game_dir: game,
         args,
         natives,
-        runtime_pin: None,
+        runtime_pins: Vec::new(),
     })
 }
 
 pub(crate) fn spawn(
     mut command: LaunchCommand,
 ) -> Result<(async_std::process::Child, NativeDirectory)> {
-    if let Some(pin) = &command.runtime_pin {
+    for pin in &command.runtime_pins {
         pin.before_spawn().map_err(LaunchError::Spawn)?;
     }
     command
@@ -350,7 +350,7 @@ pub(crate) fn spawn(
         .spawn()
         .map_err(LaunchError::Spawn)?;
     command.natives.record_child(child.id());
-    if let Some(pin) = command.runtime_pin.take() {
+    for pin in command.runtime_pins {
         pin.record_child(child.id());
         command.natives.retain_runtime(pin);
     }
@@ -404,6 +404,68 @@ fn adapt_forge_ignore_list(profile: &InstalledProfile, args: &mut [String]) {
 mod forge_ignore_tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn game_spawn_hands_all_resource_pins_to_child_and_completes_only_after_exit() {
+        use crate::utils::process_pin::{allows_cleanup, ProcessPin};
+        for confirmed in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let libraries = dir.path().join("libraries");
+            let java = dir.path().join("java");
+            let mut command = LaunchCommand {
+                java: "sh".into(),
+                game_dir: dir.path().into(),
+                args: vec!["-c".into(), "exit 0".into()],
+                natives: NativeDirectory::create(&dir.path().join("natives")).unwrap(),
+                runtime_pins: Vec::new(),
+            };
+            for resource in [&libraries, &java] {
+                command.retain_runtime(ProcessPin::create(resource).unwrap());
+            }
+            let (mut child, natives) = spawn(command).unwrap();
+            for resource in [&libraries, &java] {
+                assert!(!allows_cleanup(resource).unwrap());
+                let pin = std::fs::read_dir(resource.join(".sonata-processes"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                assert_eq!(
+                    std::fs::read_to_string(pin.join(".sonata-child")).unwrap(),
+                    child.id().to_string()
+                );
+            }
+            assert!(child.status().await.unwrap().success());
+            natives.finish(confirmed);
+            for resource in [&libraries, &java] {
+                assert_eq!(allows_cleanup(resource).unwrap(), confirmed);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_game_spawn_preserves_all_unknown_child_intents() {
+        use crate::utils::process_pin::{allows_cleanup, ProcessPin};
+        let dir = tempfile::tempdir().unwrap();
+        let resources = [dir.path().join("java"), dir.path().join("libraries")];
+        let mut command = LaunchCommand {
+            java: dir.path().join("missing-java"),
+            game_dir: dir.path().into(),
+            args: Vec::new(),
+            natives: NativeDirectory::create(&dir.path().join("natives")).unwrap(),
+            runtime_pins: Vec::new(),
+        };
+        for resource in &resources {
+            command.retain_runtime(ProcessPin::create(resource).unwrap());
+        }
+        assert!(spawn(command).is_err());
+        for resource in &resources {
+            assert!(!allows_cleanup(resource).unwrap());
+        }
+    }
     fn profile() -> InstalledProfile {
         serde_json::from_value(json!({
             "format_version":1,"minecraft":"1.20","loader":{"kind":"forge","version":"46.0.14"},

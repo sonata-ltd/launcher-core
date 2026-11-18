@@ -107,16 +107,25 @@ async fn failed_reinstall_removes_new_generation_and_preserves_published_install
         loader: previous_profile.loader.clone(),
     };
     let cancel = Cancel::default();
+    let java_use = crate::java::managed::process::JavaRetention::new(
+        db.clone(),
+        paths.java_runtimes().clone(),
+    )
+    .begin(&cancel)
+    .await
+    .unwrap();
     let context = InstallContext {
         paths: &paths,
         db: Arc::clone(&db),
         catalog: &catalog,
         modloader_java_runtimes: &[],
+        java_use: &java_use,
         op: &op,
         cancel: &cancel,
     };
 
     let error = install::execute(&request, &context).await.unwrap_err();
+    java_use.finish(true);
 
     assert!(matches!(
         error,
@@ -185,12 +194,20 @@ async fn cancelled_installation_returns_typed_error_without_creating_workspace()
     let operations = OperationRegistry::new(EventBus::new(32));
     let op = operations.begin("instance.install".into(), vec![]);
     let cancel = Cancel::default();
+    let java_use = crate::java::managed::process::JavaRetention::new(
+        db.clone(),
+        paths.java_runtimes().clone(),
+    )
+    .begin(&cancel)
+    .await
+    .unwrap();
     cancel.cancel();
     let context = InstallContext {
         paths: &paths,
         db,
         catalog: &catalog,
         modloader_java_runtimes: &[],
+        java_use: &java_use,
         op: &op,
         cancel: &cancel,
     };
@@ -200,6 +217,7 @@ async fn cancelled_installation_returns_typed_error_without_creating_workspace()
         .unwrap_err();
 
     assert!(error.is_cancelled());
+    java_use.finish(true);
     assert!(matches!(
         error,
         InitError::Download(crate::instance::download::error::DownloadError::Cancelled)
@@ -211,6 +229,13 @@ async fn cancelled_installation_returns_typed_error_without_creating_workspace()
 #[async_std::test]
 async fn database_read_failure_keeps_source_error_and_cleans_new_generation() {
     let (_temp, paths, db, catalog) = empty_installation().await;
+    let java_use = crate::java::managed::process::JavaRetention::new(
+        db.clone(),
+        paths.java_runtimes().clone(),
+    )
+    .begin(&Cancel::new())
+    .await
+    .unwrap();
     // Fail the owner/storage read before outputs or metadata requests. No
     // network, assets downloads or Java processes are needed.
     db.pool.close().await;
@@ -222,6 +247,7 @@ async fn database_read_failure_keeps_source_error_and_cleans_new_generation() {
         db,
         catalog: &catalog,
         modloader_java_runtimes: &[],
+        java_use: &java_use,
         op: &op,
         cancel: &cancel,
     };
@@ -231,6 +257,7 @@ async fn database_read_failure_keeps_source_error_and_cleans_new_generation() {
         .unwrap_err();
 
     assert!(!error.is_cancelled());
+    java_use.finish(true);
     assert!(matches!(
         error,
         InitError::Db(crate::data::db::DbError::Db(sqlx::Error::PoolClosed))
