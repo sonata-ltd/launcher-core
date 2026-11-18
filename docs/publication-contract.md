@@ -17,18 +17,23 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
 
 ## Add-only установка контента
 
-1. При удержании activity lease и блокировок launcher/store записывается
-   `preparing`. До этого не проверяется/не импортируется CAS контента.
+1. При удержании activity lease и lifetime ownership блокировок launcher/store
+   получается shared CAS admission; затем записывается `preparing`. До этого не
+   проверяется/не импортируется CAS контента. Отмена ожидания не создаёт подготовку.
 2. Lookup объекта и его lease выполняются одной SQL-транзакцией **до** чтения
    кешированных байтов. Registration/adoption и lease также атомарны. Пока hash
-   нового импорта неизвестен, `preparing` защищает весь store: будущему GC нельзя
-   игнорировать окно filesystem import → SQL registration.
+   нового импорта неизвестен, живое окно filesystem import → SQL registration
+   защищено store-wide admission до completion/discard, включая клоны workers.
+   Оставшийся после crash `preparing` должен блокировать будущий GC всего store;
+   его durable retention gate пока не реализован.
 3. Копии и downloads готовятся в приватном `.sonata-content-*` вне `mods`;
    полный PID marker атомарно публикуется до полезных файлов. Имена провайдера
    находятся в отдельном `files`, не рядом с marker. Проверяются хеши и snapshot.
    Отмена/ошибка до intent удаляет только `preparing` и его leases. Panic/exit
    может оставить их до следующего старта. Startup cleanup разрешён только для
-   соответствующего canonical store root под блокировкой самого store.
+   соответствующего canonical store root под exclusive CAS maintenance и
+   инициируется под lifetime ownership lock. Cleanup-задача держит exclusive
+   capability до окончания SQL даже после drop bootstrap-future.
 4. Одна SQL-транзакция переводит `preparing → publishing`, сохраняет версионированный
    список файлов и leases. После этого отмена не прерывает публикацию.
 5. Новые конечные файлы публикуются no-clobber. Между файлами процесс может
@@ -36,7 +41,12 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
 6. После всех файлов одна SQL-транзакция создаёт bindings/provenance, переводит
    `publishing → completed` и освобождает leases. История журнала затем удаляется.
    Startup recovery повторяет только `publishing`; уже совпавшие файлы принимаются
-   как external, отсутствующие создаются проверенными копиями CAS.
+    как external, отсутствующие создаются проверенными копиями CAS.
+
+Recovery держит shared admission от чтения журнала до SQL completion, с клоном
+в copy/verify/publish worker. Барьер и его границы описаны в
+[retention-contract.md](retention-contract.md): exclusive capability сама по себе
+не разрешает сборку оставшихся preparations/journals или опубликованных объектов.
 
 После переноса root ключ старой подготовки намеренно не используется для очистки
 другого root: такая запись остаётся консервативным блокером. Ключ — идентичность

@@ -119,17 +119,22 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 
 Продолжение P08 зафиксировано коммитами `0e97c9a` (durable preparation/leases),
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
-partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup)
-и `0493299` (полный атомарный/no-clobber PID marker). Последний полный Linux
-fmt/check/test/build прошёл: **321 passed, 0 failed, 1 ignored**. Проверены
-реальный process exit внутри CAS import и cleanup content staging до recovery,
-сохранение published/live/legacy данных, отмена/unwind, links и marker collision.
+partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
+`0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
+Последний полный Linux fmt/check/test/build прошёл: **337 passed, 0 failed,
+1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
+content/runtime blob операции, включая import → SQL lease, recovery/completion
+и URL index publication. Проверены aliases, реальные независимые процессы,
+release после process exit/последнего клона, дубликат Unix descriptor, отмена до
+preparing и удержание guard workers/SQL cleanup после drop caller/bootstrap.
+Предыдущие process-exit/scratch/links/unwind/marker fixtures также прошли.
 Это не закрытие всего P08: D07, D08, S05 и S06 остаются частичными. Scratch cleanup
-реализована; GC опубликованного CAS и runtime generations — нет. Следующая работа:
-координация import/registration/readers, полный каталог roots и durable pins
-живых game/installer JVM по retention-contract.md; затем portability/bytes
-identity. Произвольный concurrent GC опубликованных объектов запрещён до
-проверки окна import/lease и полноты roots.
+и admission внутренних CAS flows реализованы; GC опубликованного CAS и runtime
+generations — нет. Следующая работа: fail-closed durable preparations/roots gate,
+полный каталог БД/roots и durable pins живых game/installer JVM по
+retention-contract.md; затем portability/bytes identity и подключение оставшихся
+stores. Exclusive capability не доказывает отсутствие roots. Публичные low-level
+raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 Power-loss durability не обещается. Windows/macOS, живые API и GUI/manual flows
 не проверены. Исходное локальное изменение Cargo.lock не включено в коммиты.
 
