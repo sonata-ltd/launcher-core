@@ -301,6 +301,32 @@ Ignore и прежние Prism/proc-macro-error2 warnings сохранены; н
 появились. Assets/managed Java, реальные JVM, detached descendants, Windows/macOS,
 GUI/manual и power-cut ещё не подтверждены. Process-crash — не power-loss гарантия.
 
+### Legacy library path portability
+
+`a69c75a`: startup attach → owned root-aware path upgrade → generation → blob GC.
+Migration удерживает library maintenance и SQLite BEGIN IMMEDIATE до commit после
+drop caller. Меняются только path columns обоих legacy snapshots: absolute paths
+под admitted canonical/configured root становятся безопасными relative placements.
+Missing file не мешает доказанному root ownership; escaping ancestor, traversal,
+external или неизвестный старый root не переписывается. JSON профиля, files,
+roles/positions/links и database identity не меняются. Retry идемпотентен, errors
+откладывают upgrade. Никакой schema/version migration или guessing прежнего root.
+
+Новые root-aware legacy writers сохраняют relative placements; outside/unsafe
+paths отвергаются до transport. Legacy launch использует `linked_libs_at`, который
+разрешает relative paths относительно текущего library root и проверяет hash/path.
+Старый `linked_libs` deprecated, возвращает raw snapshot (включая relative paths),
+не executable-path capability и не pin. Admission/pin — ответственность caller.
+
+Полный Linux fmt/check/test/build: **424 passed, 0 failed, 1 ignored**. Семь новых
+regressions проверяют bytes/roles/positions/associations/JSON/identity, idempotence,
+relocation, missing/external/unsafe paths, canonical alias и escaping ancestors,
+relative writer/early rejection, drop caller и invalid reader input; прежний
+workspace portability test также прошёл. Логи:
+`/tmp/opencode/core-library-paths-verified-{check,test,build}.log`.
+Managed Java SQL paths ещё не мигрированы. Historical catalogue DB paths не
+переносятся автоматически: missing/replaced DB по-прежнему откладывает GC.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots

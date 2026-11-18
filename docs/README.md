@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **417 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **424 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -153,8 +153,11 @@ drop caller/SQL locks, повторная age проверка и stale/live/unk
 generations — roots; live/unknown/future preparations и pending/unknown quarantine
 блокируют область. 18 новых blob tests и прежние content/generation regressions
 прошли, включая startup integration, четыре process-exit границы и drop caller
-во время blocking intent. Следующая работа: portability legacy paths и контракты
-assets/managed Java. Exclusive capability не доказывает отсутствие roots. Публичные low-level
+во время blocking intent. `a69c75a` добавляет root-aware portability legacy library
+snapshots и writers, production legacy launch разрешает relative paths через
+linked_libs_at. Семь новых regressions прошли; external/unknown/unsafe paths не
+угадываются и не переписываются. Следующая работа: контракты assets/managed Java.
+Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.
 Power-loss durability не обещается. Windows/macOS, живые API и GUI/manual flows
