@@ -36,8 +36,8 @@ impl DbAssetStore {
     }
 
     /// Minecraft's SHA-1 layout is a placement, not the authoritative byte store.
-    /// No published asset bytes are collected until the asset roots/pins gate is
-    /// implemented; SQL rows and aliases alone must never authorize collection.
+    /// Collection requires the complete owner/SQL/index/placement roots gate,
+    /// never SQL rows or aliases alone. Callers do not retain a raw CAS path.
     async fn bytes(
         &self,
         items: Vec<AssetInfo>,
@@ -45,6 +45,7 @@ impl DbAssetStore {
     ) -> Result<HashSet<String>, DbError> {
         let objects = self.objects.clone();
         let cancel = self.cancel.clone();
+        super::retention::attach(self.db.clone(), objects.clone(), cancel.clone()).await?;
         let root = files::child(&objects, Path::new(".sonata-cas"))
             .map_err(|error| DbError::InvalidInput(error.to_string()))?;
         let access = ObjectStore::new(root)
@@ -75,7 +76,7 @@ impl DbAssetStore {
     }
 }
 
-fn bytes_error(error: io::Error) -> DbError {
+pub(super) fn bytes_error(error: io::Error) -> DbError {
     DbError::InvalidInput(format!("asset byte store: {error}"))
 }
 

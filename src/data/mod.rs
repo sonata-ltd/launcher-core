@@ -86,10 +86,6 @@ impl GlobalState {
                     tracing::info!(removed, "cleaned up partial downloads");
                 }
                 crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
-                crate::instance::download::assets::AssetsData::sweep_imports(
-                    paths.assets().clone(),
-                )
-                .await;
                 let blobs = paths.libraries().join("blobs");
                 task::spawn_blocking(move || {
                     let store = crate::utils::object_store::ObjectStore::new(blobs);
@@ -113,6 +109,11 @@ impl GlobalState {
             .unwrap_or_else(|| format!("sqlite://{}", paths.cache_db().display()));
         let db = Arc::new(Database::init(&db_url).await?);
         crate::instance::init::retention::initialize(db.clone(), paths.clone()).await?;
+        crate::instance::download::assets::AssetsData::initialize(
+            db.clone(),
+            paths.assets().clone(),
+        )
+        .await?;
 
         let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
         let operations = Arc::new(OperationRegistry::new(bus.clone()));

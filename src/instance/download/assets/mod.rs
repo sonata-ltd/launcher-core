@@ -27,6 +27,7 @@ use crate::{
 };
 
 mod parse;
+mod retention;
 mod storage;
 
 const STAGE_TYPE: OperationStage = OperationStage::DownloadAssets;
@@ -84,6 +85,16 @@ pub struct AssetsOutcome {
 pub struct AssetsData;
 
 impl AssetsData {
+    pub(crate) async fn initialize(db: Arc<Database>, assets: PathBuf) -> Result<(), DbError> {
+        retention::attach(db, assets.join("objects"), Cancellation::new()).await?;
+        Self::sweep_imports(assets.clone()).await;
+        match retention::collect(assets, std::time::Duration::from_secs(7 * 86400)).await {
+            Ok(removed) => tracing::debug!(removed, "asset CAS maintenance completed"),
+            Err(error) => tracing::debug!(%error, "asset CAS retention gate deferred"),
+        }
+        Ok(())
+    }
+
     /// Scratch-only startup maintenance. Published SHA-1 placements, objects,
     /// aliases and SQL metadata are deliberately not collected here.
     pub(crate) async fn sweep_imports(assets: PathBuf) {
