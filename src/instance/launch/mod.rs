@@ -4,9 +4,9 @@ use thiserror::Error;
 
 pub mod args;
 pub mod arguments;
-pub mod natives;
+pub(crate) mod natives;
 pub(crate) mod prepare;
-pub mod resolved;
+pub(crate) mod resolved;
 pub mod traits;
 
 #[derive(Debug, Error)]

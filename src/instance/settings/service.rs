@@ -19,7 +19,7 @@ pub struct SettingsService {
 }
 
 impl SettingsService {
-    pub fn new(db: Arc<Database>) -> Self {
+    pub(crate) fn new(db: Arc<Database>) -> Self {
         Self {
             storage: Arc::new(DbInstanceSettingsStore::new(db)),
             updates: Default::default(),

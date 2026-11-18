@@ -54,7 +54,7 @@ pub struct ManagedJavaService {
 }
 
 impl ManagedJavaService {
-    pub fn new(root: PathBuf) -> Self {
+    pub(crate) fn new(root: PathBuf) -> Self {
         let operations = Arc::new(crate::data::registry::operation::OperationRegistry::new(
             crate::bus::EventBus::new(16),
         ));

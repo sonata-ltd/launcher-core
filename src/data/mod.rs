@@ -1,9 +1,7 @@
 //! Database, configuration and layout infrastructure. Application composition
-//! lives in crate::app; old data imports remain compatibility aliases until P11.
+//! lives in crate::app; mutation-capable infrastructure is internal.
 pub mod config;
-pub mod db;
+pub(crate) mod db;
 pub mod layout;
-pub mod registry;
-pub mod state;
-
-pub use crate::app::{AppError, GlobalDataStateResult, GlobalState, LauncherServices};
+pub(crate) mod registry;
+pub(crate) mod state;

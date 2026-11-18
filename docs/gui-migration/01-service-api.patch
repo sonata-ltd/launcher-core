@@ -1,0 +1,375 @@
+diff --git a/examples/progress_transitions.rs b/examples/progress_transitions.rs
+index 55772a0..f7875f7 100644
+--- a/examples/progress_transitions.rs
++++ b/examples/progress_transitions.rs
+@@ -34,7 +34,7 @@ use iced_luminate::{
+     Element, Luminate, Theme,
+     descriptor::{Button, Card, Pager},
+ };
+-use sonata_launcher_core::data::registry::operation::message::stage::OperationStage;
++use sonata_launcher_core::operations::message::stage::OperationStage;
+ use std::time::{Duration, Instant};
+ 
+ fn main() -> iced::Result {
+diff --git a/src/bridge/mod.rs b/src/bridge/mod.rs
+index bc14633..12f4ce3 100644
+--- a/src/bridge/mod.rs
++++ b/src/bridge/mod.rs
+@@ -41,12 +41,12 @@ use iced_page_router::{Key, Registry, Shared};
+ use sonata_launcher_core::{
+     Config, GlobalState,
+     bus::{EventBus, event::CoreEvent},
+-    data::registry::operation::message::{
++    instance::model::{InstanceId, InstanceRecord},
++    java::model::JavaEvent,
++    operations::message::{
+         OperationMessage,
+         event::{OperationEvent, OperationUpdate},
+     },
+-    instance::model::{InstanceId, InstanceRecord},
+-    java::model::JavaEvent,
+ };
+ 
+ use crate::{
+@@ -384,16 +384,19 @@ fn java_stream(handle: &JavaBusHandle) -> BoxStream<'static, ()> {
+ 
+ // Lifecycle transitions are never sampled, even during a burst of file events.
+ fn is_sampled_progress(update: &OperationUpdate) -> bool {
+-    matches!(update, OperationUpdate::Progress {
+-        status: sonata_launcher_core::data::registry::operation::message::status::LifeCycle::InProgress,
+-        ..
+-    })
++    matches!(
++        update,
++        OperationUpdate::Progress {
++            status: sonata_launcher_core::operations::message::status::LifeCycle::InProgress,
++            ..
++        }
++    )
+ }
+ 
+ #[cfg(test)]
+ mod progress_sampling_tests {
+     use super::*;
+-    use sonata_launcher_core::data::registry::operation::message::{
++    use sonata_launcher_core::operations::message::{
+         stage::OperationStage,
+         status::{LifeCycle, Progress},
+     };
+diff --git a/src/bridge/output_tests.rs b/src/bridge/output_tests.rs
+index 6d36fa0..8b88b86 100644
+--- a/src/bridge/output_tests.rs
++++ b/src/bridge/output_tests.rs
+@@ -1,5 +1,5 @@
+ use super::*;
+-use sonata_launcher_core::data::registry::operation::message::{
++use sonata_launcher_core::operations::message::{
+     event::OperationStart,
+     output::{OutputLine, ProcessorOutput},
+     stage::OperationStage,
+diff --git a/src/bridge/processor_output.rs b/src/bridge/processor_output.rs
+index 3364a41..dd8ba97 100644
+--- a/src/bridge/processor_output.rs
++++ b/src/bridge/processor_output.rs
+@@ -1,8 +1,6 @@
+ use std::time::Instant;
+ 
+-use sonata_launcher_core::data::registry::operation::message::{
+-    output::ProcessorOutput, stage::OperationStage,
+-};
++use sonata_launcher_core::operations::message::{output::ProcessorOutput, stage::OperationStage};
+ 
+ use crate::components::{
+     log_output::LogOutputState,
+diff --git a/src/components/processor_output/model.rs b/src/components/processor_output/model.rs
+index 5a26ff7..fc5f3a4 100644
+--- a/src/components/processor_output/model.rs
++++ b/src/components/processor_output/model.rs
+@@ -1,6 +1,4 @@
+-use sonata_launcher_core::data::registry::operation::message::output::{
+-    OutputLine, ProcessorOutput,
+-};
++use sonata_launcher_core::operations::message::output::{OutputLine, ProcessorOutput};
+ 
+ pub(super) const MAX_LINES: usize = 6;
+ 
+diff --git a/src/components/processor_output/tests.rs b/src/components/processor_output/tests.rs
+index b28b2a1..fdc13cb 100644
+--- a/src/components/processor_output/tests.rs
++++ b/src/components/processor_output/tests.rs
+@@ -1,5 +1,5 @@
+ use super::{ProcessorOutputState, UpdateEffect};
+-use sonata_launcher_core::data::registry::operation::message::{
++use sonata_launcher_core::operations::message::{
+     output::{OutputLine, ProcessorOutput},
+     stage::OperationStage,
+ };
+diff --git a/src/components/progress_display/mod.rs b/src/components/progress_display/mod.rs
+index c99af66..9246c50 100644
+--- a/src/components/progress_display/mod.rs
++++ b/src/components/progress_display/mod.rs
+@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
+ 
+ use iced::{Subscription, futures::stream};
+ use iced_texture_cache::TextureCache;
+-use sonata_launcher_core::data::registry::operation::message::{
++use sonata_launcher_core::operations::message::{
+     OperationId, OperationMessage,
+     event::{OperationEvent, OperationUpdate},
+     stage::OperationStage,
+diff --git a/src/components/progress_display/tests.rs b/src/components/progress_display/tests.rs
+index 16f5aa7..e7a128d 100644
+--- a/src/components/progress_display/tests.rs
++++ b/src/components/progress_display/tests.rs
+@@ -5,7 +5,7 @@ use iced::widget::{Id, button, container, text_input};
+ use iced::{Color, Event, Rectangle, Size, window};
+ use iced_luminate::{Luminate, Theme};
+ use iced_texture_cache::TextureCache;
+-use sonata_launcher_core::data::registry::operation::message::stage::OperationStage;
++use sonata_launcher_core::operations::message::stage::OperationStage;
+ use std::time::{Duration, Instant};
+ 
+ #[derive(Default)]
+diff --git a/src/components/progress_display/view.rs b/src/components/progress_display/view.rs
+index ead438a..f227a2e 100644
+--- a/src/components/progress_display/view.rs
++++ b/src/components/progress_display/view.rs
+@@ -22,7 +22,7 @@ use iced_luminate::{
+     widget::animated_text::{SizeLayout, animated_text},
+ };
+ use iced_texture_cache::{PixelSnap, cached};
+-use sonata_launcher_core::data::registry::operation::message::stage::OperationStage;
++use sonata_launcher_core::operations::message::stage::OperationStage;
+ 
+ use crate::{
+     assets::icons::handles::CHECK_CIRCLE,
+@@ -535,6 +535,12 @@ fn title(kind: OperationStage, state: &StageState) -> &'static str {
+ 
+         (S::DownloadContent, _) => "Download Content",
+         (S::PublishContent, _) => "Install Content",
++        (S::InstallJava, St::Running { .. }) => "Installing Java",
++        (S::InstallJava, St::Done(_)) => "Java Installed",
++        (S::InstallJava, _) => "Install Java",
++        (S::ValidateJava, St::Running { .. }) => "Validating Java",
++        (S::ValidateJava, St::Done(_)) => "Java Validated",
++        (S::ValidateJava, _) => "Validate Java",
+         (S::DownloadLibs, St::Running { .. }) => "Downloading Libraries",
+         (S::DownloadLibs, St::Done(_)) => "Libraries Downloaded",
+         (S::DownloadLibs, _) => "Download Libraries",
+@@ -606,6 +612,33 @@ fn show_alt(state: &StageState, now: Instant) -> bool {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn managed_java_stages_have_pending_running_and_completed_labels() {
++        let running = StageState::Running {
++            since: Instant::now(),
++            progress: None,
++        };
++        for (stage, pending, active, done) in [
++            (
++                OperationStage::InstallJava,
++                "Install Java",
++                "Installing Java",
++                "Java Installed",
++            ),
++            (
++                OperationStage::ValidateJava,
++                "Validate Java",
++                "Validating Java",
++                "Java Validated",
++            ),
++        ] {
++            assert_eq!(title(stage, &StageState::Pending), pending);
++            assert_eq!(title(stage, &running), active);
++            assert_eq!(title(stage, &StageState::Done(Duration::ZERO)), done);
++            assert_eq!(title(stage, &StageState::Failed), pending);
++        }
++    }
++
+     #[test]
+     fn a_stage_that_just_started_is_drawn_as_pending() {
+         let since = Instant::now();
+diff --git a/src/pages/playground/processor_output.rs b/src/pages/playground/processor_output.rs
+index 27c57b5..19ec08a 100644
+--- a/src/pages/playground/processor_output.rs
++++ b/src/pages/playground/processor_output.rs
+@@ -9,7 +9,7 @@ use iced_luminate::{
+     descriptor::{Button, ButtonHierarchy},
+ };
+ use iced_page_router::{Action, Page, Registry};
+-use sonata_launcher_core::data::registry::operation::message::{
++use sonata_launcher_core::operations::message::{
+     output::{OutputLine, ProcessorOutput},
+     stage::OperationStage,
+ };
+diff --git a/src/pages/playground/progress.rs b/src/pages/playground/progress.rs
+index 9cbadd0..d49c63e 100644
+--- a/src/pages/playground/progress.rs
++++ b/src/pages/playground/progress.rs
+@@ -10,7 +10,7 @@ use iced_luminate::{
+ };
+ use iced_page_router::{Action, Page, Registry, Shared};
+ use iced_texture_cache::TextureCache;
+-use sonata_launcher_core::data::registry::operation::message::stage::OperationStage;
++use sonata_launcher_core::operations::message::stage::OperationStage;
+ 
+ use crate::{
+     bridge::{self, Ops},
+diff --git a/src/rendering/tests.rs b/src/rendering/tests.rs
+index bd6194e..13a8c22 100644
+--- a/src/rendering/tests.rs
++++ b/src/rendering/tests.rs
+@@ -676,7 +676,7 @@ fn layout_request_deduplication_does_not_retry_a_compositor_refusal() {
+ fn progress_display_animates_between_application_updates_after_pager_arrival() {
+     use crate::components::progress_display::{Stage, StageState, view::ProgressDisplay};
+     use iced::advanced::clipboard;
+-    use sonata_launcher_core::data::registry::operation::message::stage::OperationStage;
++    use sonata_launcher_core::operations::message::stage::OperationStage;
+     use std::time::{Duration, Instant};
+     let kit = Luminate::with_theme(Theme::LIGHT);
+     let native = FakeWindow::new(564, 500, 1.0);
+diff --git a/src/windows/create_instance/pages/create.rs b/src/windows/create_instance/pages/create.rs
+index 0d31092..94f71c5 100644
+--- a/src/windows/create_instance/pages/create.rs
++++ b/src/windows/create_instance/pages/create.rs
+@@ -8,7 +8,7 @@ use iced_luminate::{
+ };
+ use iced_page_router::Shared;
+ use sonata_launcher_core::{
+-    data::registry::operation::message::stage::OperationStage, instance::model::InstanceId,
++    instance::model::InstanceId, operations::message::stage::OperationStage,
+ };
+ 
+ use crate::{
+diff --git a/src/windows/create_instance/performance.rs b/src/windows/create_instance/performance.rs
+index 0d9c67b..554282a 100644
+--- a/src/windows/create_instance/performance.rs
++++ b/src/windows/create_instance/performance.rs
+@@ -314,7 +314,7 @@ fn measure() {
+ fn measure_progress_transitions() {
+     use crate::components::progress_display::{Stage, StageState, view::ProgressDisplay};
+     use iced_luminate::descriptor::{Card, Pager};
+-    use sonata_launcher_core::data::registry::operation::message::stage::OperationStage;
++    use sonata_launcher_core::operations::message::stage::OperationStage;
+ 
+     assert!(!cfg!(debug_assertions), "use --release for measurements");
+     Luminate::load_fonts();
+diff --git a/src/windows/create_instance/tests.rs b/src/windows/create_instance/tests.rs
+index 133fe54..48f294c 100644
+--- a/src/windows/create_instance/tests.rs
++++ b/src/windows/create_instance/tests.rs
+@@ -2,23 +2,17 @@ use super::*;
+ use iced::futures::StreamExt;
+ use sonata_launcher_core::{
+     Config,
+-    data::{db::Database, state},
+     version::{catalog::CatalogSource, provider::VersionSource, provider::prism::PrismSource},
+ };
+ 
+ async fn fixture() -> (tempfile::TempDir, CreateInstance) {
+     let dir = tempfile::tempdir().unwrap();
+     let database_url = format!("sqlite://{}", dir.path().join("cache.db").display());
+-    let database = Database::init(&database_url).await.unwrap();
+-    // Avoid Java probing: this fixture exercises creation, not discovery.
+-    state::set_flag(&database, state::JAVA_DISCOVERY_DONE)
+-        .await
+-        .unwrap();
+-    database.pool.close().await;
+     let core = Arc::new(
+         GlobalState::new(Config {
+             root_override: Some(dir.path().into()),
+             database_url: Some(database_url),
++            discover_java_on_startup: false,
+             ..Config::init()
+         })
+         .await
+@@ -41,7 +35,7 @@ fn snapshot() -> CatalogSnapshot {
+             br#"{
+         "formatVersion":1,"name":"Minecraft","uid":"net.minecraft",
+         "versions":[{"recommended":true,"releaseTime":"2026-01-01T00:00:00Z",
+-            "sha256":"fixture","type":"release","version":"1.21.4"}]
++            "sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"release","version":"1.21.4"}]
+     }"#,
+         )
+         .unwrap();
+@@ -203,7 +197,7 @@ fn a_new_create_dialog_does_not_build_progress_from_the_previous_installation()
+         Size,
+         advanced::{layout, widget::Tree},
+     };
+-    use sonata_launcher_core::data::registry::operation::message::{
++    use sonata_launcher_core::operations::message::{
+         OperationMessage,
+         event::{OperationEvent, OperationStart},
+         stage::OperationStage,
+diff --git a/src/windows/create_instance/version_picker.rs b/src/windows/create_instance/version_picker.rs
+index 298f12d..87efe4c 100644
+--- a/src/windows/create_instance/version_picker.rs
++++ b/src/windows/create_instance/version_picker.rs
+@@ -183,9 +183,9 @@ mod tests {
+         let raw = br#"{
+             "formatVersion": 1, "name": "Minecraft", "uid": "net.minecraft",
+             "versions": [
+-                {"recommended":false,"releaseTime":"2025-01-01T00:00:00Z","sha256":"a","type":"release","version":"1.9"},
+-                {"recommended":false,"releaseTime":"2026-01-01T00:00:00Z","sha256":"b","type":"release","version":"1.10"},
+-                {"recommended":true,"releaseTime":"2026-02-01T00:00:00Z","sha256":"c","type":"snapshot","version":"26w01a"}
++                {"recommended":false,"releaseTime":"2025-01-01T00:00:00Z","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","type":"release","version":"1.9"},
++                {"recommended":false,"releaseTime":"2026-01-01T00:00:00Z","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","type":"release","version":"1.10"},
++                {"recommended":true,"releaseTime":"2026-02-01T00:00:00Z","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","type":"snapshot","version":"26w01a"}
+             ]
+         }"#;
+         // Use a timestamp obtained from the parsed core type to avoid a direct
+diff --git a/src/windows/java_runtime_selection/managed/tests.rs b/src/windows/java_runtime_selection/managed/tests.rs
+index 9b3ff74..0093993 100644
+--- a/src/windows/java_runtime_selection/managed/tests.rs
++++ b/src/windows/java_runtime_selection/managed/tests.rs
+@@ -30,20 +30,11 @@ fn snapshot(stage: ManagedJavaStage) -> ManagedJavaSnapshot {
+ async fn core() -> (tempfile::TempDir, Arc<GlobalState>) {
+     let dir = tempfile::tempdir().unwrap();
+     let database_url = format!("sqlite://{}", dir.path().join("cache.db").display());
+-    let db = sonata_launcher_core::data::db::Database::init(&database_url)
+-        .await
+-        .unwrap();
+-    sonata_launcher_core::data::state::set_flag(
+-        &db,
+-        sonata_launcher_core::data::state::JAVA_DISCOVERY_DONE,
+-    )
+-    .await
+-    .unwrap();
+-    db.pool.close().await;
+     let core = Arc::new(
+         GlobalState::new(sonata_launcher_core::Config {
+             root_override: Some(dir.path().into()),
+             database_url: Some(database_url),
++            discover_java_on_startup: false,
+             ..sonata_launcher_core::Config::init()
+         })
+         .await
+diff --git a/src/windows/java_runtime_selection/tests.rs b/src/windows/java_runtime_selection/tests.rs
+index fcffebe..316490f 100644
+--- a/src/windows/java_runtime_selection/tests.rs
++++ b/src/windows/java_runtime_selection/tests.rs
+@@ -188,21 +188,14 @@ fn runtime_window_size_stays_fixed_during_loading_catalog_progress_and_details()
+ }
+ 
+ async fn selection_window() -> (tempfile::TempDir, Luminate, JavaRuntimeSelection) {
+-    use sonata_launcher_core::{
+-        Config,
+-        data::{db::Database, state},
+-    };
++    use sonata_launcher_core::Config;
+     let dir = tempfile::tempdir().unwrap();
+     let database_url = format!("sqlite://{}", dir.path().join("cache.db").display());
+-    let database = Database::init(&database_url).await.unwrap();
+-    state::set_flag(&database, state::JAVA_DISCOVERY_DONE)
+-        .await
+-        .unwrap();
+-    database.pool.close().await;
+     let core = Arc::new(
+         GlobalState::new(Config {
+             root_override: Some(dir.path().into()),
+             database_url: Some(database_url),
++            discover_java_on_startup: false,
+             ..Config::init()
+         })
+         .await

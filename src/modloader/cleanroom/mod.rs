@@ -11,7 +11,8 @@ use crate::utils::download::transfer::Cancel;
 mod package;
 mod releases;
 
-pub use releases::{get_releases, import_archive, register, CleanroomRelease};
+pub use releases::CleanroomRelease;
+pub(crate) use releases::{get_releases, import_archive, register};
 
 pub(crate) struct PrepareRequest {
     pub(crate) loader_version: String,

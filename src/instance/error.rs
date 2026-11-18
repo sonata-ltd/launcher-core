@@ -1,9 +1,14 @@
+// Error DTOs stay nameable even though lifecycle implementations are private.
+pub use super::{
+    download::{
+        artifacts::error::ArtifactError, assets::AssetSyncError, error::DownloadError,
+        manifest::ManifestError, sync::SyncError,
+    },
+    init::error::InitError,
+};
 use crate::{
     data::db::DbError,
-    instance::{
-        download::error::DownloadError, init::error::InitError, launch::LaunchError,
-        model::InstanceId,
-    },
+    instance::{launch::LaunchError, model::InstanceId},
     java::error::JavaError,
     modloader::error::ModloaderError,
     utils::files::FileError,

@@ -25,7 +25,7 @@ use crate::{
     version::catalog::VersionCatalog,
 };
 
-pub struct LauncherServices {
+struct LauncherServices {
     content: Arc<crate::instance::content::service::InstanceContentService>,
     java: Arc<JavaService>,
     versions: Arc<VersionCatalog>,
@@ -35,12 +35,12 @@ pub struct LauncherServices {
 }
 
 pub struct GlobalState {
-    pub db: Arc<Database>,
+    pub(crate) db: Arc<Database>,
     pub bus: EventBus,
     pub config: Config,
     pub paths: Arc<LauncherPaths>,
-    pub operations: Arc<OperationRegistry>,
-    pub services: LauncherServices,
+    pub(crate) operations: Arc<OperationRegistry>,
+    services: LauncherServices,
 }
 
 #[derive(Error, Debug)]
@@ -57,9 +57,12 @@ pub enum AppError {
     Database(#[from] DbError),
 }
 
-pub type GlobalDataStateResult<T> = std::result::Result<T, AppError>;
-
 impl GlobalState {
+    /// Atomic active/completed read-only view. Subscribe first, then reconcile;
+    /// repeat after overflow. Session IDs are not durable installation IDs.
+    pub fn operations(&self) -> crate::operations::OperationReconciliation {
+        self.operations.reconcile()
+    }
     pub fn content(&self) -> Arc<crate::instance::content::service::InstanceContentService> {
         self.services.content.clone()
     }
@@ -163,7 +166,7 @@ impl GlobalState {
         // The first-run Java search. In the background: `GlobalState::new`
         // is awaited before the GUI opens its window, and probing a hung
         // candidate takes seconds.
-        {
+        if config.discover_java_on_startup {
             let java = Arc::clone(&services.java);
             let instances = Arc::clone(&services.instances);
 
@@ -245,7 +248,7 @@ impl GlobalState {
     /// Seal worker admission and await cooperative cancellation, commits and
     /// cleanup. Running games are not killed implicitly: stop them explicitly
     /// or await their exit. This does not close shared DB pools underneath users.
-    pub async fn shutdown(&self) -> Vec<crate::utils::jobs::supervisor::TaskResult> {
+    pub async fn shutdown(&self) -> Vec<crate::operations::TaskResult> {
         self.operations.tasks.shutdown().await
     }
 
@@ -271,6 +274,28 @@ mod tests {
     use super::*;
 
     #[async_std::test]
+    async fn disabling_startup_discovery_does_not_persist_a_done_flag() {
+        assert!(Config::init().discover_java_on_startup);
+        let root = tempfile::tempdir().unwrap();
+        let core = GlobalState::new(Config {
+            root_override: Some(root.path().into()),
+            discover_java_on_startup: false,
+            ..Config::init()
+        })
+        .await
+        .unwrap();
+        core.shutdown().await;
+        assert!(
+            !crate::data::state::get_flag(&core.db, crate::data::state::JAVA_DISCOVERY_DONE)
+                .await
+                .unwrap()
+        );
+        // The explicit host action is still available, not replaced by the
+        // startup policy. Constructing its future does not probe the host.
+        drop(core.rediscover_java());
+    }
+
+    #[async_std::test]
     async fn failed_database_bootstrap_does_not_start_background_maintenance() {
         let root = tempfile::tempdir().unwrap();
         let sentinel = root.path().join("libraries/unknown.part");
@@ -289,9 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn data_compatibility_alias_has_the_same_application_type_without_owning_composition() {
+    fn root_export_has_the_same_application_type_without_data_owning_composition() {
         let application: Option<GlobalState> = None;
-        let _: Option<crate::data::GlobalState> = application;
+        let _: Option<crate::GlobalState> = application;
         assert!(!include_str!("data/mod.rs").contains("task::spawn"));
     }
 }

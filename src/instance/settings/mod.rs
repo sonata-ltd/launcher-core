@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod service;
-pub mod storage;
+pub(crate) mod storage;
 
 pub const DEFAULT_MEMORY_MIN: i64 = 512;
 pub const DEFAULT_MEMORY_MAX: i64 = 4096;

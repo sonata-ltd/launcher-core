@@ -9,7 +9,7 @@ use futures::{
 
 use sonata_launcher_core::{
     bus::{event::CoreEvent, EventBus},
-    data::registry::operation::message::{
+    operations::message::{
         event::{OperationEvent, OperationUpdate},
         status::Progress,
         OperationMessage,

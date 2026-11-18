@@ -35,7 +35,7 @@ struct Entry {
 }
 
 #[derive(Clone)]
-pub struct RunningInstances {
+pub(crate) struct RunningInstances {
     tasks: crate::utils::jobs::supervisor::Tasks,
     inner: Arc<Mutex<HashMap<InstanceId, Entry>>>,
     bus: EventBus,
@@ -116,7 +116,7 @@ impl RunningInstances {
     }
 }
 
-pub struct Reservation {
+pub(crate) struct Reservation {
     id: InstanceId,
     owner: Option<RunningInstances>,
     ticket: Option<crate::utils::jobs::supervisor::Ticket>,

@@ -1,10 +1,9 @@
 use std::path::PathBuf;
 
 use sonata_launcher_core::{
-    data::GlobalState,
     instance::settings::SettingsPatch,
     java::model::{JavaSource, NewJavaRuntime},
-    Config,
+    Config, GlobalState,
 };
 
 mod parse;
@@ -112,23 +111,16 @@ async fn dispatch(
             url,
             majors,
         } => {
-            sonata_launcher_core::modloader::cleanroom::import_archive(
-                &state.modloaders().repository,
-                version.into(),
-                url.into(),
-                majors,
-            )
-            .await?;
+            state
+                .modloaders()
+                .import_cleanroom_archive(version.into(), url.into(), majors)
+                .await?;
             println!("Cleanroom release registered from archive");
         }
         Command::RegisterCleanroom(descriptor) => {
             let bytes = async_std::fs::read(descriptor).await?;
             let release = serde_json::from_slice(&bytes)?;
-            sonata_launcher_core::modloader::cleanroom::register(
-                &state.modloaders().repository,
-                release,
-            )
-            .await?;
+            state.modloaders().register_cleanroom(release).await?;
             println!("Cleanroom release registered");
         }
         Command::SetJava { instance, java } => {

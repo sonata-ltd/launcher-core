@@ -9,6 +9,9 @@ pub struct Config {
     /// Supplied by the host application; the core never reads credentials from
     /// process environment during bootstrap.
     pub curseforge_api_key: Option<String>,
+    /// Host policy for automatic first-run discovery. Explicit rediscovery stays
+    /// available; disabling startup discovery does not alter persisted flags.
+    pub discover_java_on_startup: bool,
 
     pub meta_provider: MetaProvider,
 }
@@ -32,6 +35,7 @@ impl Config {
             dirs: DirOverrides::default(),
             database_url: None,
             curseforge_api_key: None,
+            discover_java_on_startup: true,
 
             meta_provider: MetaProvider::Prism,
         }

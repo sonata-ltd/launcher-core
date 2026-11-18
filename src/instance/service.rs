@@ -57,7 +57,7 @@ impl InstanceService {
     pub(crate) fn tasks(&self) -> crate::utils::jobs::supervisor::Tasks {
         self.operations.tasks.clone()
     }
-    pub fn new(
+    pub(crate) fn new(
         db: Arc<Database>,
         settings: Arc<SettingsService>,
         java_service: Arc<JavaService>,

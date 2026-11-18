@@ -29,7 +29,7 @@ pub struct OptionsService {
 }
 
 impl OptionsService {
-    pub fn new(
+    pub(crate) fn new(
         db: Arc<Database>,
         instances: Arc<InstanceRegistry>,
         settings: Arc<SettingsService>,

@@ -58,10 +58,26 @@ pub struct LoaderVersionSummary {
 }
 
 pub struct ModloaderCatalog {
-    pub repository: super::repository::Repository,
+    pub(crate) repository: super::repository::Repository,
 }
 
 impl ModloaderCatalog {
+    pub async fn register_cleanroom(
+        &self,
+        release: super::cleanroom::CleanroomRelease,
+    ) -> Result<()> {
+        super::cleanroom::register(&self.repository, release).await
+    }
+
+    pub async fn import_cleanroom_archive(
+        &self,
+        version: String,
+        url: String,
+        majors: Vec<u32>,
+    ) -> Result<()> {
+        super::cleanroom::import_archive(&self.repository, version, url, majors).await
+    }
+
     pub fn new(cache: std::path::PathBuf) -> Self {
         Self {
             repository: super::repository::Repository::new(cache),

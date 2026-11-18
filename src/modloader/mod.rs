@@ -1,13 +1,12 @@
-pub mod archive;
+pub(crate) mod archive;
 pub mod catalog;
 pub mod cleanroom;
-pub mod components;
+pub(crate) mod components;
 pub mod error;
-pub mod fabric_quilt;
-pub mod forge;
-pub mod jobs;
+pub(crate) mod fabric_quilt;
+pub(crate) mod forge;
 pub mod model;
-pub mod profile;
-pub mod repository;
+pub(crate) mod profile;
+pub(crate) mod repository;
 #[cfg(test)]
 mod tests;

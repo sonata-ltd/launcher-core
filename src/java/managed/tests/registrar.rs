@@ -171,7 +171,7 @@ async fn legacy_validation_call_shape_delegates_from_owning_service_module() {
     let java = JavaService::new(db, crate::bus::EventBus::new(16), dir.path().into());
     let id = Uuid::new_v4();
     assert_eq!(
-        java.managed.validate(id, &java).await.unwrap_err().code,
+        java.validate_managed(id).await.unwrap_err().code,
         "not_found"
     );
 }

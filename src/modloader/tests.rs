@@ -6,15 +6,13 @@ use crate::{
     utils::files,
 };
 
-use super::{
-    catalog::ModloaderCatalog, components, jobs::InstallJobs, model::*, repository::Repository,
-};
+use super::{catalog::ModloaderCatalog, components, model::*, repository::Repository};
 use serde_json::json;
 use std::{collections::HashMap, path::PathBuf};
 
 #[test]
 fn install_job_reservation_and_cancel_are_core_owned() {
-    let jobs = InstallJobs::default();
+    let jobs = crate::instance::install_jobs::InstallJobs::default();
     let job = jobs.begin(1.into()).unwrap();
     assert!(jobs.begin(2.into()).is_err());
     jobs.cancel(1.into());

@@ -157,7 +157,7 @@ pub struct InstanceContentService {
 }
 
 impl InstanceContentService {
-    pub async fn new(
+    pub(crate) async fn new(
         db: Arc<Database>,
         paths: Arc<LauncherPaths>,
         instances: Arc<InstanceService>,

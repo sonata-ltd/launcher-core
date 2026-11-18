@@ -29,7 +29,7 @@ pub struct JavaService {
 }
 
 impl JavaService {
-    pub fn new(db: Arc<Database>, bus: EventBus, own_runtimes: PathBuf) -> Self {
+    pub(crate) fn new(db: Arc<Database>, bus: EventBus, own_runtimes: PathBuf) -> Self {
         let operations = Arc::new(crate::data::registry::operation::OperationRegistry::new(
             bus.clone(),
         ));
@@ -296,25 +296,5 @@ impl super::managed::registrar::RuntimeRegistrar for ManagedRegistrar {
 
     fn validation_committed(&self, _runtime: &JavaRuntime) {
         self.bus.publish(JavaEvent::ListChanged);
-    }
-}
-
-// Compatibility belongs to the owning service, not to the managed domain.
-// Keep the former public call shape until the P11 consumer migration is complete.
-impl super::managed::ManagedJavaService {
-    #[deprecated(note = "Use JavaService::validate_managed or validate_with a RuntimeRegistrar")]
-    pub async fn validate(
-        self: &Arc<Self>,
-        id: uuid::Uuid,
-        java: &JavaService,
-    ) -> super::managed::Result<Arc<JavaRuntime>> {
-        self.validate_with(
-            id,
-            Arc::new(ManagedRegistrar {
-                registry: java.registry.clone(),
-                bus: java.bus.clone(),
-            }),
-        )
-        .await
     }
 }
