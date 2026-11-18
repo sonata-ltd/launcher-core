@@ -421,6 +421,43 @@ escaping FS/executable, record identity/unsafe homes и preexisting destination.
 Это Linux synthetic executable/process-crash evidence, не реальные JVM/descendants,
 Windows/macOS, power-loss или GUI/manual evidence.
 
+### Managed Java SQL placement portability
+
+`2c38a4b`: root-aware DbJavaStore/JavaService хранит managed exec/home placements
+relative под `managed/` текущего явно настроенного Java root. JavaRuntime для
+consumer возвращает checked absolute paths текущего root (canonical alias
+разрешается); snapshot/path сам по себе не pin. Старый unrooted DbJavaStore
+сохраняется для compatibility/external storage, но relative managed rows читать
+не может: необходим root-aware reader, а не запуск относительного executable.
+
+Owned SQL upgrade под canonical `.managed` maintenance/BEGIN IMMEDIATE меняет
+только proven internal managed exec/home pair. Source managed недостаточен для
+ownership внешнего пути: old-root/outside/escaping/unsafe/non-Unicode/mixed пары
+не угадываются. Manual/discovered rows остаются внешними. Missing file допустим
+при доказанном root prefix. Уникальный exec-path conflict сохраняет обе исходные
+identity: rows/FK не сливаются, provenance/source/version/arch/vendor/major, bytes
+и DB identity не меняются. Root-aware writes отвергают unsafe/outside pairs до
+SQL; bulk input failure откатывает всю transaction. Legacy absolute/relative
+representations учитываются при bulk dedup, reader разрешает только безопасную
+managed pair. Это root/path доказательство, не complete retention catalogue.
+
+Startup пробует JavaService.initialize до consumers/discovery; contention/error
+откладывает migration, не разрешает guessing или collection. Discovery повторяет
+initialize, флаг устанавливается только после успеха. Caller drop не освобождает
+SQL/admission owned task до commit. Уже выданные старые snapshots автоматически
+не переписываются; после relocation consumer должен перечитать root-aware store.
+Low-level SQL/registry API не является admission capability (P11 narrowing открыт).
+
+Полный Linux fmt/check/test/build: **474 passed, 0 failed, 1 ignored**, 13 новых
+tests: IDs/metadata/FK/identity/bytes, relocation, missing/external/old root,
+conflicting pairs, aliases/escaping ancestors, bulk dedup, unsafe/non-Unicode
+input/rollback и reader, drop caller с реальным SQL probe, contention/retry,
+production service и process exit до/после commit. Логи
+`/tmp/opencode/core-managed-paths-verified-{check,test,build}.log`.
+Archive identity, published-home ownership/retention/process pins/GC ещё открыты.
+Historical catalogue DB paths не переносятся автоматически; platform/real JVM/
+GUI/manual/power-loss не объявлены проверенными.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
