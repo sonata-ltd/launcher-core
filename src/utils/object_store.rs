@@ -17,6 +17,7 @@ const IMPORT_PREFIX: &str = "import-";
 
 mod access;
 pub(crate) mod catalog;
+pub(crate) mod collection;
 pub(crate) use access::{StoreAccess, StoreMaintenance};
 
 pub(crate) struct ObjectStore {
