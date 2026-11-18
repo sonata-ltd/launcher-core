@@ -1024,6 +1024,51 @@ async fn abandoning_conflict_keeps_files_and_releases_only_the_selected_operatio
 }
 
 #[async_std::test]
+async fn abandoned_caller_keeps_abandon_commit_owned_and_shutdown_waits() {
+    let fixture = fixture_with_database(true).await;
+    let (id, _) = prepared(&fixture).await;
+    let target = fixture.root.join("mods/mod.jar");
+    std::fs::write(&target, b"local changes").unwrap();
+    let service = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    // Block the durable journal delete while the caller disappears.
+    let mut lock = fixture.db.pool.acquire().await.unwrap();
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let operation = id.to_string();
+    let mut caller = Box::pin(service.abandon_recovery(fixture.id, &operation));
+    assert!(futures::poll!(caller.as_mut()).is_pending());
+    drop(caller);
+    assert!(fixture
+        .instances
+        .activity()
+        .reserve_content_change(fixture.id)
+        .is_err());
+    let mut shutdown = Box::pin(fixture.operations.tasks.shutdown());
+    assert!(futures::poll!(shutdown.as_mut()).is_pending());
+    sqlx::query("ROLLBACK").execute(&mut *lock).await.unwrap();
+    drop(lock);
+    shutdown.await;
+    assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    assert_eq!(std::fs::read(target).unwrap(), b"local changes");
+    assert!(matches!(
+        service.abandon_recovery(fixture.id, &operation).await,
+        Err(super::error::ContentError::Task(
+            crate::operations::TaskError::ShuttingDown
+        ))
+    ));
+}
+
+#[async_std::test]
 async fn database_enforces_publication_journal_state_transitions() {
     let fixture = fixture().await;
     let (id, files) = prepared(&fixture).await;

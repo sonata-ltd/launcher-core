@@ -96,7 +96,7 @@ unknown code → Inspect, без догадок из text. Recovery records не
 Runtime selection/settings messages удерживают shared UiError projection с enum
 kind, diagnostic chain и Arc typed source. Строковые локальные ошибки не получают
 сфабрикованный source. Остальные исторические GUI string adapters не объявлены
-типизированными этой задачей; content flow мигрируется в следующем patch.
+типизированными этой задачей; recovery flow мигрируется в patch 05.
 
 Linux core fmt/check/test/build: **570 library + 2 CLI + 2 integration + 18
 doctests passed**, 1 ignored. GUI: **232 passed**, 7 ignored. Логи:
@@ -104,5 +104,31 @@ doctests passed**, 1 ignored. GUI: **232 passed**, 7 ignored. Логи:
 `/tmp/opencode/core-p11-reports-gui-{check,test,build}.log`.
 Fresh replay fmt/check проверен; live API/manual/platform не проверены.
 
-Content recovery — следующий patch.
+## 05 — Content recovery без включения каталога Mods
+
+`05-content-recovery.patch` делает recovery-панель доступной на странице Mods,
+сохраняя disabled catalog. Load/Poll читают только local pending recovery;
+автоматического provider search нет. Retry вызывает public service API после
+устранения конфликта. Abandon требует подтверждения и удаляет только выбранный
+publishing journal/его leases, сохраняя все файлы. Core SQL commit принадлежит
+owned Tasks worker: caller drop не освобождает activity guard до commit, shutdown
+ждёт завершения и не abort-ит worker.
+
+Instance-bound reducer защищает callbacks generation/single-flight/busy gates;
+stale/duplicate results не заменяют accepted state. Failed action сохраняет pending
+IDs и UiError с typed ContentError source; successful polling не стирает diagnostic.
+Следующее явное action очищает прежнюю ошибку. Confirmation имеет явный Back.
+
+Шесть GUI regressions покрывают reducer, public adapter, rejected abandon/files,
+shutdown admission, actual page Load/Poll/render/confirmation и headless labels.
+Page test подаёт controlled callbacks; adapter не создаёт journals через raw SQL.
+Реальные conflict/retry/selected journal/leases/files и caller-drop SQL lock
+проверяются core integration tests. Это не ручная native UI проверка.
+
+Linux core fmt/check/test/build: **571 library + 2 CLI + 2 integration + 18
+doctests passed**, 1 ignored. GUI: **238 passed**, 7 ignored. Логи:
+`/tmp/opencode/core-p11-recovery-{check,test,build}.log` и
+`/tmp/opencode/core-p11-recovery-gui-{check,test,build}.log`.
+Fresh replay fmt/check проверен; full replay — отдельная задача P11-V01.
+
 Это compile/test evidence, не ручной launch/install и не Windows/macOS PASS.
