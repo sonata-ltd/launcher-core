@@ -351,6 +351,40 @@ cancellable admission, escaping links, drop caller в blocking worker, process e
 после import до SQL и replay без duplicates, production sync repair без HTTP.
 Логи `/tmp/opencode/core-assets-cas-verified-{check,test,build}.log`.
 
+### Conservative asset CAS collection
+
+`534b79d` добавляет startup attach → scratch sweep → private CAS collection (7 дней).
+Writer attach предшествует bytes; complete append-only catalogue имеет те же
+immutable DB identities и historical/unknown/ephemeral fail-closed правила, что
+content/runtime. Старый CAS без catalogue никогда не объявляется completely owned.
+Owned collector удерживает canonical CAS maintenance и все owner SQLite
+BEGIN IMMEDIATE до окончания blocking scan/plan/unlink/intent cleanup после drop
+caller; replay каждый раз строит новый snapshot, повторяет roots/age gate.
+
+Roots — консервативный superset: hashes всех asset SQL cache rows всех owners,
+всех regular asset indexes и всех canonical Mojang SHA-1 placements. Даже corrupt
+placement сохраняет предназначенный checksum для repair. Aliases не roots/proof.
+Unknown/future index/object fields, layouts, pending import scratch, links,
+corrupt metadata и unavailable/replaced DB откладывают всю private CAS область.
+Virtual/resource layouts пока unknown, также откладывают GC.
+
+Collector удаляет только verified old unrooted SHA-256 objects и matching aliases,
+через общий Collection. SQL rows/identity, indexes и Mojang/virtual placements не
+меняются и не удаляются. Minecraft читает изолированные SHA-1 copies, не CAS:
+game retention pin для **этого ограниченного collector** не требуется. Import/cache
+worker держит CAS admission до окончания copies/import; ещё не импортированный
+network download не читает CAS и импортирует только после admission. Без ownership
+migration исторических placements нельзя включить их GC или выводить отсутствие
+roots только из одного профиля. Поэтому более агрессивный asset cleanup остаётся
+открытым, а DB cache roots намеренно over-retain.
+
+Полный Linux fmt/check/test/build: **445 passed, 0 failed, 1 ignored**; 12 новых
+asset retention tests и все прежние regressions. Four process-exit boundaries,
+new SQL/index/placement roots и fresh reimport age на replay, drop caller на
+snapshot/blocking intent с SQL probe, multiple/missing/replaced DB, unknown owners,
+metadata/layouts, canonical aliases, links, future bytes и startup integration.
+Логи `/tmp/opencode/core-assets-gc-verified-{check,test,build}.log`.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
