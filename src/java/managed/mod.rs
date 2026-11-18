@@ -1,6 +1,7 @@
 mod bytes;
 mod catalog;
 mod extract;
+pub(crate) mod gc;
 pub mod model;
 mod ownership;
 pub(crate) mod process;

@@ -89,6 +89,7 @@ impl Snapshot {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn inspect(root: PathBuf) -> Result<(usize, usize)> {
     async_std::task::spawn(async move {
         let snapshot = snapshot(&root).await?;

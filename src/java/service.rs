@@ -47,8 +47,9 @@ impl JavaService {
         }
     }
 
-    /// Upgrades only proven internal managed SQL paths; external Java stays
-    /// external. This migration does not collect bytes or assert catalogue roots.
+    /// Upgrades proven internal SQL paths, then attempts conservative published
+    /// home/archive GC. External Java stays external; an incomplete roots gate
+    /// defers collection rather than treating migration as ownership proof.
     pub async fn initialize(&self) -> JavaResult<()> {
         let mut initialized = self.paths_initialized.lock().await;
         if !*initialized {
@@ -62,10 +63,18 @@ impl JavaService {
                 unresolved = report.unresolved,
                 "managed Java SQL path upgrade"
             );
-            // Diagnostic gate only: no Java home/archive deletion is enabled.
-            match super::managed::retention::inspect(self.own_runtimes.clone()).await {
+            match super::managed::gc::collect(
+                self.own_runtimes.clone(),
+                std::time::Duration::from_secs(7 * 24 * 60 * 60),
+            )
+            .await
+            {
                 Ok((homes, archives)) => {
-                    tracing::debug!(homes, archives, "managed Java retention roots inspected")
+                    tracing::debug!(
+                        homes,
+                        archives,
+                        "managed Java published retention completed"
+                    )
                 }
                 Err(error) => {
                     tracing::debug!(error = %error.diagnostic(), "managed Java retention gate deferred")
