@@ -121,14 +121,15 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **510 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **526 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
 release после process exit/последнего клона, дубликат Unix descriptor, отмена до
 preparing и удержание guard workers/SQL cleanup после drop caller/bootstrap.
 Предыдущие process-exit/scratch/links/unwind/marker fixtures также прошли.
-Это не закрытие всего P08: D07, D08, S05 и S06 остаются частичными. Scratch cleanup
+Это не закрытие всего P08: D08, S05 и S06 остаются частичными. D07 имеет проверенный
+общий byte identity contract. Scratch cleanup
 и admission внутренних CAS flows реализованы. `aef7a11` добавляет content CAS GC:
 complete append-only каталог persistent DB identities до imports, fail-closed
 preparing/journal/binding/lease gate, SQLite write-locks до unlink/metadata
@@ -191,6 +192,15 @@ discovery и validation/Forge children. Broad operation и direct child имею
 независимые durable records: confirmed child exit не отпускает outer reads/commit,
 outer completion не подтверждает unknown child. Game удерживает Java и libraries.
 13 новых regressions и полный Linux прогон прошли; published Java GC ещё выключен.
+На следующей точке `d364886` включён startup managed home/archive GC (7 дней):
+catalogued dead-owned unrooted homes → replayable quarantine → новый archive
+snapshot. Все owners/SQL/operations и surviving homes сохраняют source archives;
+pending quarantine блокирует archives. Replay перепроверяет roots/pins/age,
+restoration не заменяет existing home. Owned worker держит оба maintenance и DB
+locks до cleanup/pool close после caller drop. 16 новых regressions, десять
+subprocess deletion boundaries и startup integration прошли. Historical/unknown
+ownership и asset SHA-1/virtual placements консервативно сохраняются, более
+агрессивный GC не реализован. Следующий пакет — P09 registrar/recovery/history/shutdown.
 Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.

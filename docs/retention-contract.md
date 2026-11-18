@@ -556,6 +556,47 @@ cancel/drop и validation caller drop между child exit и durable Ready com
 Published home/archive GC пока выключен; real JVM/descendants, Windows/macOS,
 GUI/manual, external unscoped callers и power-loss не объявлены PASS.
 
+### Managed Java published-home and archive collection
+
+`d364886`: JavaService startup после SQL portability upgrade пытается выполнить
+home GC и затем archive GC с минимальным возрастом 7 дней. Весь collector owned:
+caller drop не освобождает `.managed` → archive maintenance → все catalogue DB
+BEGIN IMMEDIATE locks во время blocking scan/deletion. Snapshot::close удерживает
+оба barriers до закрытия DB pools. Недоступный/incomplete gate откладывает cleanup,
+не объявляет старые SQL paths или operation absence proof отсутствия roots.
+
+Home eligibility требует matching independent home marker, catalogued DB identity,
+dead original publisher PID, old created time и возраст всех regular outputs,
+отсутствие всех SQL/operation roots и live/unknown process pins. Unknown/future
+layouts/metadata, links/special outputs и pending scratch откладывают область.
+Deletion: `.managed/.sonata-java-gc/homes/<uuid>.json` intent → generation rename
+в quarantine → outputs → owner marker → empty directory → intent cleanup.
+Replay заново получает snapshot, roots/pins/age и original identity. Новые roots
+возвращают surviving quarantine без overwrite; новые outputs сохраняют quarantine.
+Replaced homes, unowned partial outputs и identity mismatch не удаляются.
+
+Archive GC получает новый snapshot после home cleanup. Все SQL registrations,
+operation home/archive identities и surviving homes удерживают source archives;
+pending home quarantine откладывает archives. Общий Collection использует
+`.managed/bytes/.sonata-gc`, перечитывает actual SHA-256/SHA-1/size перед unlink,
+удаляет только matching alias и завершает intent после bytes completion. Aliases
+не roots; corrupt canonical bytes не удаляются и не перезаписываются. Новый root
+или свежий reimport при replay отменяет/откладывает старое deletion permission.
+SQL IDs/DB identities/FK/provenance collector не меняет.
+
+16 новых regressions и прежние Java retention tests прошли. Десять actual
+subprocess exits: home intent/rename/outputs/marker/directory/intent cleanup,
+archive intent/unlink/alias/intent cleanup. Проверены multiple DB/operation roots,
+live/age/pins/admission, missing DB, unknown/future layouts/scratch, restoration,
+fresh outputs/reimport, replacement/partial quarantine, aliases/links, corrupt
+bytes и production startup. Caller-drop tests подтверждают оба barriers и SQL
+write-lock через независимый connection. Expanded Java: **129 passed, 1 ignored**;
+полный Linux fmt/check/test/build: **526 passed, 0 failed, 1 ignored**, прежние
+warnings. Логи `/tmp/opencode/core-java-gc-verified-{check,test,build}.log`.
+Historical/unknown ownership не восстанавливается; asset SHA-1/virtual placements
+не собираются. Real JVM/descendants, external unscoped APIs, Windows/macOS,
+GUI/manual и power-loss не объявлены PASS. API/consumer audit остаётся P11.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
