@@ -37,6 +37,23 @@ struct Job {
     snapshot: ContentJobSnapshot,
     cancel: Cancel,
     created: Instant,
+    completed: Option<Instant>,
+}
+
+impl Job {
+    fn retained_at(&self, now: Instant) -> bool {
+        self.snapshot.active()
+            || self.completed.is_none_or(|completed| {
+                now.saturating_duration_since(completed) < Duration::from_secs(3600)
+            })
+    }
+
+    fn finish(&mut self, phase: ContentPhase, error: Option<String>) {
+        self.snapshot.phase = phase;
+        self.snapshot.error = error;
+        self.completed = Some(Instant::now());
+        self.snapshot.finished_at = Some(chrono::Utc::now());
+    }
 }
 
 /// Add-only content publication with forward recovery after a process crash.
@@ -394,9 +411,7 @@ impl InstanceContentService {
                 .jobs
                 .lock()
                 .map_err(|_| ContentError::Invalid("Job lock poisoned".into()))?;
-            jobs.retain(|_, job| {
-                job.snapshot.active() || job.created.elapsed() < Duration::from_secs(3600)
-            });
+            jobs.retain(|_, job| job.retained_at(Instant::now()));
             if jobs.len() >= 128 {
                 return Err(ContentError::Invalid(
                     "История установок заполнена; перезапустите лаунчер".into(),
@@ -413,9 +428,11 @@ impl InstanceContentService {
                         completed_files: 0,
                         total_files: plan.releases.len(),
                         error: None,
+                        finished_at: None,
                     },
                     cancel: cancel.clone(),
                     created: Instant::now(),
+                    completed: None,
                 },
             );
         }
@@ -452,7 +469,7 @@ impl InstanceContentService {
             }
             if let Ok(mut jobs) = service.jobs.lock() {
                 if let Some(job) = jobs.get_mut(&id) {
-                    job.snapshot.phase = if error.is_none() {
+                    let phase = if error.is_none() {
                         ContentPhase::Completed
                     } else if cancel.check().is_err()
                         && job.snapshot.phase == ContentPhase::Downloading
@@ -461,7 +478,7 @@ impl InstanceContentService {
                     } else {
                         ContentPhase::Failed
                     };
-                    job.snapshot.error = error.as_ref().map(|error| error.to_string());
+                    job.finish(phase, error.as_ref().map(|error| error.to_string()));
                 }
             }
             let cancelled = service
@@ -635,12 +652,57 @@ impl InstanceContentService {
     }
 
     pub fn latest_job(&self, instance: InstanceId) -> Option<ContentJobSnapshot> {
-        self.jobs
-            .lock()
-            .ok()?
-            .values()
+        let mut jobs = self.jobs.lock().ok()?;
+        jobs.retain(|_, job| job.retained_at(Instant::now()));
+        jobs.values()
             .filter(|job| job.snapshot.instance_id == instance)
             .max_by_key(|job| job.created)
             .map(|job| job.snapshot.clone())
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    fn job(created: Instant) -> Job {
+        let operations =
+            crate::data::registry::operation::OperationRegistry::new(crate::bus::EventBus::new(1));
+        let operation = operations.begin("fixture".into(), vec![]);
+        Job {
+            snapshot: ContentJobSnapshot {
+                operation_id: operation.id(),
+                id: Uuid::new_v4(),
+                instance_id: 1.into(),
+                phase: ContentPhase::Downloading,
+                completed_files: 0,
+                total_files: 1,
+                error: None,
+                finished_at: None,
+            },
+            created,
+            cancel: Cancel::default(),
+            completed: None,
+        }
+    }
+
+    #[test]
+    fn long_installation_has_full_completion_ttl_for_every_terminal_phase() {
+        for phase in [
+            ContentPhase::Completed,
+            ContentPhase::Failed,
+            ContentPhase::Cancelled,
+        ] {
+            let now = Instant::now();
+            let mut job = job(now - Duration::from_secs(7200));
+            assert!(job.retained_at(now));
+            assert!(job.snapshot.finished_at.is_none());
+            job.finish(phase, Some("fixture".into()));
+            let completed = job.completed.unwrap();
+            assert!(job.snapshot.finished_at.is_some());
+            assert!(job.retained_at(completed + Duration::from_secs(3599)));
+            assert!(!job.retained_at(completed + Duration::from_secs(3600)));
+            assert!(job.created < completed);
+        }
     }
 }

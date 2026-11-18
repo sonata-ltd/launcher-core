@@ -38,6 +38,7 @@ pub struct ContentJobSnapshot {
     pub completed_files: usize,
     pub total_files: usize,
     pub error: Option<String>,
+    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl ContentJobSnapshot {
