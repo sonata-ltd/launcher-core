@@ -59,5 +59,28 @@ requests идемпотентны, routing/window creation на время close
 в graceful shutdown. News имеет собственный GUI lifetime и не объявляется частью
 core Tasks. Native close с настоящей игрой вручную пока не проверен.
 
-Reconciliation/diagnostic/recovery flows — следующие patches.
+## 03 — Typed correlation и reconciliation
+
+`03-operation-reconciliation.patch`: core snapshots несут `OperationSubject`,
+заданный до Start. Names не используются для domain policy. Instance-install
+slot не принимает content/managed/чужой instance job и исключает operations,
+наблюдавшиеся до GUI begin. Generation token не даёт старому callback закрыть
+новый run. Подписка создаётся до initial reconciliation signal; `recv()` явно
+сообщает overflow. App читает актуальный `operations()` при обработке сигнала
+и lifecycle/progress событий, а не применяет устаревший queued snapshot.
+
+Active/completed восстанавливаются без caller; pruned terminal показывается как
+неизвестный result, не success. Stage cache identities и доступный processor
+output сохраняются. Lost output и длительности не выдумываются: восстановленный
+completed stage показывает `Done (timing unavailable)`. Failed/cancelled running
+stage имеет terminal status в core snapshot. Это один install presentation slot,
+не dashboard всех одновременных jobs. Raw snapshots/history не retention pins.
+
+Linux core fmt/check/test/build: **569 library + 2 CLI + 2 integration + 18
+doctests passed**, 1 ignored. GUI: **229 passed**, 7 ignored. Логи:
+`/tmp/opencode/core-p11-operations-{check,test,build}.log` и
+`/tmp/opencode/core-p11-operations-gui-{check,test,build}.log`.
+Fresh replay fmt/check проверен; native/manual/platform evidence отсутствует.
+
+Diagnostic/recovery flows — следующие patches.
 Это compile/test evidence, не ручной launch/install и не Windows/macOS PASS.

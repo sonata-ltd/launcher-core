@@ -11,6 +11,8 @@ use crate::data::registry::operation::message::{
 pub struct OperationSnapshot {
     pub id: OperationId,
     pub name: String,
+    #[serde(default)]
+    pub subject: Option<super::subject::OperationSubject>,
 
     pub stage: Option<OperationStage>,
     pub stages: Vec<StageSnapshot>,
@@ -82,6 +84,15 @@ impl OperationSnapshot {
             }
             OperationEvent::Update(OperationUpdate::Output(_)) => {}
             OperationEvent::Finish(finish) => {
+                for entry in &mut self.stages {
+                    if matches!(entry.status, StageStatus::Running) {
+                        entry.status = match finish.outcome {
+                            Outcome::Failed => StageStatus::Failed,
+                            Outcome::Cancelled => StageStatus::Cancelled,
+                            Outcome::Completed => continue,
+                        };
+                    }
+                }
                 self.status = match finish.outcome {
                     Outcome::Completed => LifeCycle::Completed,
                     Outcome::Failed => LifeCycle::Failed,

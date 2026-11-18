@@ -528,12 +528,16 @@ impl InstanceContentService {
         use crate::data::registry::operation::message::stage::OperationStage;
         let operation = self
             .operations
-            .begin(
+            .begin_for(
                 format!("instance.content.install:{}", instance.get()),
                 vec![
                     OperationStage::DownloadContent,
                     OperationStage::PublishContent,
                 ],
+                crate::operations::OperationSubject::ContentInstall {
+                    instance,
+                    installation: id,
+                },
             )
             .owned_worker();
         let operation_id = operation.id();

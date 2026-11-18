@@ -1,0 +1,998 @@
+diff --git a/src/bridge/mod.rs b/src/bridge/mod.rs
+index 86fe613..c69fb60 100644
+--- a/src/bridge/mod.rs
++++ b/src/bridge/mod.rs
+@@ -24,6 +24,7 @@
+ //!    points at the wrong line.
+ 
+ use std::{
++    collections::HashSet,
+     hash::{Hash, Hasher},
+     sync::Arc,
+     time::{Duration, Instant},
+@@ -38,13 +39,16 @@ use iced::{
+ };
+ 
+ use iced_page_router::{Key, Registry, Shared};
++use sonata_launcher_core::operations::{
++    OperationReconciliation, OperationSnapshot, OperationSubject, message::status::Outcome,
++};
+ use sonata_launcher_core::{
+     GlobalState,
+     bus::{EventBus, event::CoreEvent},
+     instance::model::{InstanceId, InstanceRecord},
+     java::model::JavaEvent,
+     operations::message::{
+-        OperationMessage,
++        OperationId, OperationMessage,
+         event::{OperationEvent, OperationUpdate},
+     },
+ };
+@@ -89,26 +93,26 @@ impl Key for InstanceList {
+     type Value = Instances;
+ }
+ 
+-/// The one operation the launcher is running, if any.
+-///
+-/// One and not many on purpose: bus events carry an `OperationId` and nothing
+-/// else. `OperationStart` has only a stage list, and the operation name given
+-/// to `OperationRegistry::begin` never leaves the core — it lives in
+-/// `OperationSnapshot`, which the bus does not publish. So there is no way to
+-/// tell from the stream alone which instance an event belongs to. The instance
+-/// id here comes from the click that started the work, not from the bus.
++/// One instance-install presentation slot. Other operation domains cannot
++/// claim it, even when their Start arrives first. Snapshots own correlation.
+ #[derive(Default)]
+ pub struct Ops {
+     pub running: Option<Running>,
+     pub last: Option<Finished>,
++    generation: u64,
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct RunGeneration(u64);
++
+ pub struct Operation;
+ impl Key for Operation {
+     type Value = Ops;
+ }
+ 
+ pub struct Running {
++    generation: RunGeneration,
++    excluded: HashSet<OperationId>,
+     pub instance: InstanceId,
+     pub what: &'static str,
+     pub stages: Stages,
+@@ -117,6 +121,8 @@ pub struct Running {
+ 
+ #[allow(dead_code)]
+ pub struct Finished {
++    generation: RunGeneration,
++    excluded: HashSet<OperationId>,
+     pub instance: InstanceId,
+     pub what: &'static str,
+     pub result: Result<(), String>,
+@@ -151,32 +157,154 @@ impl Ops {
+     }
+ 
+     /// Called by the page that starts the work, before spawning the task.
+-    pub fn begin(&mut self, instance: InstanceId, what: &'static str) {
++    pub fn begin(
++        &mut self,
++        instance: InstanceId,
++        what: &'static str,
++        baseline: &OperationReconciliation,
++    ) -> RunGeneration {
++        self.generation = self
++            .generation
++            .checked_add(1)
++            .expect("UI generation exhausted");
++        let generation = RunGeneration(self.generation);
+         self.last = None;
+         self.running = Some(Running {
++            generation,
++            excluded: baseline
++                .active
++                .iter()
++                .map(|s| s.id)
++                .chain(baseline.completed.iter().map(|r| r.snapshot.id))
++                .collect(),
+             instance,
+             what,
+             stages: Stages::default(),
+             output: ProcessorOutputViewState::default(),
+         });
++        generation
+     }
+ 
+-    /// Operation updates. Note that `OperationEvent::Finish` does **not** close the
+-    /// operation here: it carries no error text (`OperationFinish` has a
+-    /// `// TODO: Error` where the error should be), and its ordering against
+-    /// the task's own completion is not defined. `finish` closes it.
+-    ///
+-    /// That undefined ordering cuts both ways: the bus is drained by a
+-    /// subscription that can lag behind the task, so the last stage's
+-    /// `Completed` often arrives *after* `finish` has moved the run into
+-    /// `last`. Both slots are fed; `Stages::apply` drops whatever is not its
+-    /// own operation, so a late event cannot leak into a newer run.
++    pub fn reconcile(&mut self, view: &OperationReconciliation) {
++        let now = Instant::now();
++        self.reconcile_last(view, now);
++        if self.running.is_none() {
++            // Recover an install started before subscribing or while its caller
++            // was gone. Do not invent a subject from display names/stage kinds.
++            let active = view
++                .active
++                .iter()
++                .filter(|s| matches!(s.subject, Some(OperationSubject::InstanceInstall { .. })))
++                .max_by_key(|s| s.id);
++            let snapshot = active.or_else(|| {
++                if self.last.is_some() {
++                    return None;
++                }
++                view.completed
++                    .iter()
++                    .filter(|r| {
++                        matches!(
++                            r.snapshot.subject,
++                            Some(OperationSubject::InstanceInstall { .. })
++                        )
++                    })
++                    .max_by_key(|r| r.finished_at)
++                    .map(|r| &r.snapshot)
++            });
++            if let Some(snapshot) = snapshot {
++                let Some(OperationSubject::InstanceInstall { instance }) = snapshot.subject else {
++                    unreachable!()
++                };
++                self.begin(
++                    instance,
++                    "install",
++                    &OperationReconciliation {
++                        active: vec![],
++                        completed: vec![],
++                    },
++                );
++                self.running
++                    .as_mut()
++                    .unwrap()
++                    .stages
++                    .reconcile(snapshot, now);
++            } else {
++                return;
++            }
++        }
++        let run = self.running.as_mut().unwrap();
++        let matches = |snapshot: &OperationSnapshot| {
++            if let Some(id) = run.stages.operation_id() {
++                return snapshot.id == id;
++            }
++            snapshot.subject
++                == Some(OperationSubject::InstanceInstall {
++                    instance: run.instance,
++                })
++                && !run.excluded.contains(&snapshot.id)
++        };
++        let snapshot = view
++            .active
++            .iter()
++            .chain(view.completed.iter().map(|r| &r.snapshot))
++            .filter(|s| matches(s))
++            .max_by_key(|s| s.id);
++        if let Some(snapshot) = snapshot {
++            run.stages.reconcile(snapshot, now);
++            if let Some(result) = view.completed.iter().find(|r| r.snapshot.id == snapshot.id) {
++                let outcome = match result.outcome {
++                    Outcome::Completed => Ok(()),
++                    Outcome::Failed => {
++                        Err("Installation failed; detailed result may be unavailable".into())
++                    }
++                    Outcome::Cancelled => Err("Cancelled".into()),
++                };
++                let generation = run.generation;
++                self.finish(generation, outcome);
++            }
++        } else if run.stages.operation_id().is_some() {
++            let generation = run.generation;
++            self.finish(
++                generation,
++                Err("Operation is no longer retained; result unavailable".into()),
++            );
++        }
++        self.reconcile_last(view, now);
++    }
++
++    fn reconcile_last(&mut self, view: &OperationReconciliation, now: Instant) {
++        if let Some(last) = self.last.as_mut() {
++            let snapshot = view
++                .active
++                .iter()
++                .chain(view.completed.iter().map(|r| &r.snapshot))
++                .filter(|s| {
++                    if let Some(id) = last.stages.operation_id() {
++                        s.id == id
++                    } else {
++                        s.subject
++                            == Some(OperationSubject::InstanceInstall {
++                                instance: last.instance,
++                            })
++                            && !last.excluded.contains(&s.id)
++                    }
++                })
++                .max_by_key(|s| s.id);
++            if let Some(snapshot) = snapshot {
++                last.stages.reconcile(snapshot, now);
++            }
++        }
++    }
++
++    /// Accept only already-correlated events. Reconciliation closes terminal
++    /// operations independently of caller lifetime; live events retain timing
++    /// and output that the bounded snapshot intentionally does not contain.
+     pub fn apply(&mut self, msg: &OperationMessage) {
+         let now = Instant::now();
+ 
+         if let Some(run) = self.running.as_mut() {
+-            run.stages.apply(msg, now);
+             if run.stages.operation_id() == Some(msg.operation_id) {
++                run.stages.apply(msg, now);
+                 if let OperationEvent::Update(OperationUpdate::Output(output)) = &msg.data {
+                     run.output.apply(output, now);
+                 }
+@@ -184,8 +312,8 @@ impl Ops {
+         }
+ 
+         if let Some(last) = self.last.as_mut() {
+-            last.stages.apply(msg, now);
+             if last.stages.operation_id() == Some(msg.operation_id) {
++                last.stages.apply(msg, now);
+                 if let OperationEvent::Update(OperationUpdate::Output(output)) = &msg.data {
+                     last.output.apply(output, now);
+                 }
+@@ -193,20 +321,26 @@ impl Ops {
+         }
+     }
+ 
+-    /// Called by whoever aborted the task. An aborted future never reaches
+-    /// its own `finish`, so this is the only place the run gets closed; if
+-    /// the task did get there first, there is nothing left to cancel.
+-    pub fn cancel(&mut self) {
+-        if let Some(run) = self.running.as_mut() {
+-            run.stages.cancel();
+-            self.finish(Err("Cancelled".to_string()));
++    /// Late caller results enrich their own terminal slot, never a newer run.
++    pub fn finish(&mut self, generation: RunGeneration, result: Result<(), String>) {
++        if !self
++            .running
++            .as_ref()
++            .is_some_and(|run| run.generation == generation)
++        {
++            if let Some(last) = self
++                .last
++                .as_mut()
++                .filter(|last| last.generation == generation)
++            {
++                last.result = result;
++            }
++            return;
+         }
+-    }
+-
+-    /// Called from inside the task itself — see rule 2.
+-    pub fn finish(&mut self, result: Result<(), String>) {
+         if let Some(run) = self.running.take() {
+             self.last = Some(Finished {
++                generation,
++                excluded: run.excluded,
+                 instance: run.instance,
+                 what: run.what,
+                 result,
+@@ -309,7 +443,13 @@ pub async fn reload(core: Arc<GlobalState>, into: Shared<Instances>) {
+ /// so the stream is sampled. Stage transitions are never dropped.
+ const TICK: Duration = Duration::from_millis(50);
+ 
+-pub fn events(bus: &EventBus) -> Subscription<CoreEvent> {
++#[derive(Debug, Clone)]
++pub enum ObserverEvent {
++    Core(CoreEvent),
++    Reconcile,
++}
++
++pub fn events(bus: &EventBus) -> Subscription<ObserverEvent> {
+     Subscription::run_with(BusHandle(bus.clone()), stream)
+ }
+ 
+@@ -327,37 +467,44 @@ impl Hash for BusHandle {
+     }
+ }
+ 
+-fn stream(handle: &BusHandle) -> BoxStream<'static, CoreEvent> {
+-    // Boxed on purpose: `run_with` wants `S: 'static`, and an `impl Stream`
+-    // return would capture the `&BusHandle` lifetime under edition 2024.
+-    handle
+-        .0
+-        .subscribe()
+-        .scan(
+-            Instant::now()
+-                .checked_sub(TICK)
+-                .unwrap_or_else(Instant::now),
+-            |last, event| {
+-                let keep = match &event {
+-                    CoreEvent::Operation(msg) => match &msg.data {
+-                        OperationEvent::Update(update) => !is_sampled_progress(update),
+-                        _ => true,
+-                    },
+-                    _ => true,
+-                };
+-
+-                let now = Instant::now();
+-                let pass = keep || now.duration_since(*last) >= TICK;
+-
+-                if pass {
+-                    *last = now;
++fn stream(handle: &BusHandle) -> BoxStream<'static, ObserverEvent> {
++    // Subscribe synchronously before yielding the initial reconciliation signal.
++    // The UI reads a fresh view when handling the signal, not a stale queued DTO.
++    let receiver = handle.0.subscribe();
++    iced::futures::stream::unfold(
++        (receiver, true, Instant::now() - TICK),
++        |(mut receiver, initial, mut last)| async move {
++            if initial {
++                return Some((ObserverEvent::Reconcile, (receiver, false, last)));
++            }
++            loop {
++                match receiver.recv().await {
++                    Err(sonata_launcher_core::bus::RecvError::Overflowed(_)) => {
++                        return Some((ObserverEvent::Reconcile, (receiver, false, last)));
++                    }
++                    Err(sonata_launcher_core::bus::RecvError::Closed) => return None,
++                    Ok(event) => {
++                        let keep = match &event {
++                            CoreEvent::Operation(msg) => match &msg.data {
++                                OperationEvent::Update(update) => !is_sampled_progress(update),
++                                _ => true,
++                            },
++                            _ => true,
++                        };
++
++                        let now = Instant::now();
++                        let pass = keep || now.duration_since(last) >= TICK;
++
++                        if pass {
++                            last = now;
++                            return Some((ObserverEvent::Core(event), (receiver, false, last)));
++                        }
++                    }
+                 }
+-
+-                future::ready(Some(pass.then_some(event)))
+-            },
+-        )
+-        .filter_map(future::ready)
+-        .boxed()
++            }
++        },
++    )
++    .boxed()
+ }
+ 
+ pub fn java_changes(bus: &EventBus) -> Subscription<()> {
+@@ -423,5 +570,7 @@ mod progress_sampling_tests {
+     }
+ }
+ 
++#[cfg(test)]
++pub(crate) mod operation_tests;
+ #[cfg(test)]
+ mod output_tests;
+diff --git a/src/bridge/operation_tests.rs b/src/bridge/operation_tests.rs
+new file mode 100644
+index 0000000..0fe44f2
+--- /dev/null
++++ b/src/bridge/operation_tests.rs
+@@ -0,0 +1,224 @@
++use super::*;
++use sonata_launcher_core::operations::{
++    OperationResult,
++    message::{
++        stage::{OperationStage, StageSnapshot, StageStatus},
++        status::{LifeCycle, Progress},
++    },
++};
++
++pub fn empty() -> OperationReconciliation {
++    OperationReconciliation {
++        active: vec![],
++        completed: vec![],
++    }
++}
++pub fn snapshot(id: u32, instance: i64, stages: &[OperationStage]) -> OperationSnapshot {
++    OperationSnapshot {
++        id: serde_json::from_value(serde_json::json!(id)).unwrap(),
++        name: "not parsed".into(),
++        subject: Some(OperationSubject::InstanceInstall {
++            instance: instance.into(),
++        }),
++        stage: None,
++        stages: stages
++            .iter()
++            .map(|stage| StageSnapshot {
++                stage: *stage,
++                status: StageStatus::Pending,
++                progress: Progress::Indeterminable,
++                reason: None,
++            })
++            .collect(),
++        status: LifeCycle::Started,
++        progress: Progress::Indeterminable,
++        message: None,
++    }
++}
++pub fn active(snapshot: OperationSnapshot) -> OperationReconciliation {
++    OperationReconciliation {
++        active: vec![snapshot],
++        completed: vec![],
++    }
++}
++fn completed(mut snapshot: OperationSnapshot, outcome: Outcome) -> OperationReconciliation {
++    snapshot.status = LifeCycle::Completed;
++    OperationReconciliation {
++        active: vec![],
++        completed: vec![OperationResult {
++            snapshot,
++            outcome,
++            finished_at: chrono::Utc::now(),
++        }],
++    }
++}
++
++#[test]
++fn unrelated_domains_and_old_same_instance_cannot_claim_pending_install() {
++    let mut ops = Ops::default();
++    let old = snapshot(1, 7, &[]);
++    ops.begin(
++        7.into(),
++        "install",
++        &completed(old.clone(), Outcome::Completed),
++    );
++    for subject in [
++        None,
++        Some(OperationSubject::ContentInstall {
++            instance: 7.into(),
++            installation: Default::default(),
++        }),
++        Some(OperationSubject::ManagedInstall {
++            installation: Default::default(),
++        }),
++        Some(OperationSubject::ManagedValidation {
++            installation: Default::default(),
++        }),
++        Some(OperationSubject::InstanceInstall { instance: 8.into() }),
++    ] {
++        let mut foreign = snapshot(2, 7, &[]);
++        foreign.subject = subject;
++        ops.reconcile(&active(foreign));
++        assert!(
++            ops.running
++                .as_ref()
++                .unwrap()
++                .stages
++                .operation_id()
++                .is_none()
++        );
++    }
++    ops.reconcile(&completed(old, Outcome::Completed));
++    assert!(ops.is_busy());
++    ops.reconcile(&active(snapshot(3, 7, &[])));
++    assert_eq!(
++        ops.running.as_ref().unwrap().stages.operation_id(),
++        Some(snapshot(3, 7, &[]).id)
++    );
++}
++
++#[test]
++fn initial_and_overflow_views_restore_active_and_terminal_without_caller() {
++    let mut ops = Ops::default();
++    let mut s = snapshot(9, 7, &[OperationStage::FetchManifest]);
++    s.stages[0].status = StageStatus::Running;
++    ops.reconcile(&active(s.clone()));
++    let texture = ops.running.as_ref().unwrap().stages.items()[0]
++        .icon_texture
++        .id();
++    s.stages[0].status = StageStatus::Completed;
++    ops.reconcile(&completed(s.clone(), Outcome::Completed));
++    assert!(!ops.is_busy());
++    assert!(ops.last.as_ref().unwrap().result.is_ok());
++    assert_eq!(
++        ops.last.as_ref().unwrap().stages.items()[0]
++            .icon_texture
++            .id(),
++        texture
++    );
++    assert!(matches!(
++        ops.last.as_ref().unwrap().stages.items()[0].state,
++        crate::components::progress_display::StageState::DoneUnknown
++    ));
++    assert!(ops.last.as_ref().unwrap().output.log.lines().is_empty());
++    let mut resubscribed = Ops::default();
++    resubscribed.reconcile(&completed(s, Outcome::Cancelled));
++    assert_eq!(resubscribed.last.unwrap().result.unwrap_err(), "Cancelled");
++}
++
++#[test]
++fn stale_callback_cannot_finish_new_run_and_callback_before_start_can_bind_later() {
++    let mut ops = Ops::default();
++    let first = ops.begin(7.into(), "install", &empty());
++    ops.finish(first, Ok(()));
++    ops.reconcile(&completed(
++        snapshot(1, 7, &[OperationStage::FetchManifest]),
++        Outcome::Completed,
++    ));
++    assert_eq!(ops.last.as_ref().unwrap().stages.items().len(), 1);
++    let next = ops.begin(8.into(), "install", &empty());
++    ops.finish(first, Err("late".into()));
++    assert_eq!(ops.running.as_ref().unwrap().generation, next);
++    ops.finish(next, Ok(()));
++    ops.finish(first, Err("older".into()));
++    assert!(ops.last.unwrap().result.is_ok());
++}
++
++#[test]
++fn pruned_terminal_is_not_success_or_forever_busy() {
++    let mut ops = Ops::default();
++    ops.reconcile(&active(snapshot(1, 7, &[])));
++    ops.reconcile(&empty());
++    assert!(!ops.is_busy());
++    assert!(
++        ops.last
++            .unwrap()
++            .result
++            .unwrap_err()
++            .contains("unavailable")
++    );
++}
++
++#[test]
++fn authoritative_snapshot_wins_over_queued_progress_and_preserves_output() {
++    use sonata_launcher_core::operations::message::output::{OutputLine, ProcessorOutput};
++    let mut ops = Ops::default();
++    let mut s = snapshot(1, 7, &[OperationStage::RunModloaderProcessors]);
++    ops.reconcile(&active(s.clone()));
++    ops.apply(&OperationMessage {
++        operation_id: s.id,
++        data: OperationEvent::Update(OperationUpdate::Output(ProcessorOutput {
++            stage: OperationStage::RunModloaderProcessors,
++            processor_index: 0,
++            revision: 1,
++            lines: vec![OutputLine {
++                id: 1,
++                text: "observed".into(),
++            }],
++        })),
++    });
++    s.stages[0].status = StageStatus::Completed;
++    let terminal = completed(s.clone(), Outcome::Completed);
++    ops.reconcile(&terminal);
++    ops.apply(&OperationMessage {
++        operation_id: s.id,
++        data: OperationEvent::Update(OperationUpdate::Progress {
++            stage: OperationStage::RunModloaderProcessors,
++            status: LifeCycle::InProgress,
++            progress: Progress::Indeterminable,
++            target: None,
++        }),
++    });
++    ops.reconcile(&terminal);
++    assert!(matches!(
++        ops.last.as_ref().unwrap().stages.items()[0].state,
++        crate::components::progress_display::StageState::DoneUnknown
++    ));
++    assert_eq!(ops.last.as_ref().unwrap().output.log.lines(), ["observed"]);
++}
++
++#[async_std::test]
++async fn stream_subscribes_before_initial_signal_and_reports_overflow() {
++    let bus = EventBus::new(1);
++    let mut events = stream(&BusHandle(bus.clone()));
++    assert!(matches!(
++        events.next().await,
++        Some(ObserverEvent::Reconcile)
++    ));
++    for _ in 0..3 {
++        bus.publish(OperationMessage {
++            operation_id: snapshot(1, 7, &[]).id,
++            data: OperationEvent::Start(
++                sonata_launcher_core::operations::message::event::OperationStart { stages: vec![] },
++            ),
++        });
++    }
++    assert!(matches!(
++        events.next().await,
++        Some(ObserverEvent::Reconcile)
++    ));
++    assert!(matches!(
++        events.next().await,
++        Some(ObserverEvent::Core(CoreEvent::Operation(_)))
++    ));
++}
+diff --git a/src/bridge/output_tests.rs b/src/bridge/output_tests.rs
+index 8b88b86..6c942d7 100644
+--- a/src/bridge/output_tests.rs
++++ b/src/bridge/output_tests.rs
+@@ -1,3 +1,4 @@
++use super::operation_tests::{active, empty, snapshot};
+ use super::*;
+ use sonata_launcher_core::operations::message::{
+     event::OperationStart,
+@@ -38,7 +39,12 @@ fn output(id: u32, processor_index: usize, revision: u64, text: &str) -> Operati
+ 
+ fn ops() -> Ops {
+     let mut ops = Ops::default();
+-    ops.begin(InstanceId::from(1), "Install");
++    ops.begin(InstanceId::from(1), "Install", &empty());
++    ops.reconcile(&active(snapshot(
++        1,
++        1,
++        &[OperationStage::RunModloaderProcessors],
++    )));
+     ops.apply(&start(1));
+     ops
+ }
+@@ -69,10 +75,15 @@ fn stale_revision_cannot_change_text_or_start_a_fade() {
+ fn late_output_updates_finished_operation_and_new_begin_discards_old_output() {
+     let mut ops = ops();
+     ops.apply(&output(1, 0, 1, "first"));
+-    ops.finish(Ok(()));
++    ops.finish(ops.running.as_ref().unwrap().generation, Ok(()));
+     ops.apply(&output(1, 0, 2, "last"));
+     assert_eq!(ops.last.as_ref().unwrap().output.log.lines(), ["last"]);
+-    ops.begin(InstanceId::from(2), "Install");
++    ops.begin(InstanceId::from(2), "Install", &empty());
++    ops.reconcile(&active(snapshot(
++        2,
++        2,
++        &[OperationStage::RunModloaderProcessors],
++    )));
+     ops.apply(&start(2));
+     ops.apply(&output(1, 0, 3, "too late"));
+     assert!(ops.running.as_ref().unwrap().output.log.lines().is_empty());
+@@ -109,7 +120,7 @@ fn finished_operation_fade_is_also_ticked() {
+     ops.apply(&output(1, 0, 1, "old"));
+     ops.apply(&output(1, 1, 2, "new"));
+     assert!(ops.running.as_ref().unwrap().output.log.is_transitioning());
+-    ops.finish(Ok(()));
++    ops.finish(ops.running.as_ref().unwrap().generation, Ok(()));
+     ops.tick_output(Instant::now() + Duration::from_secs(1));
+     assert!(!ops.last.as_ref().unwrap().output.log.is_transitioning());
+     assert_eq!(ops.last.as_ref().unwrap().output.log.lines(), ["new"]);
+diff --git a/src/components/progress_display/mod.rs b/src/components/progress_display/mod.rs
+index 9246c50..7147e76 100644
+--- a/src/components/progress_display/mod.rs
++++ b/src/components/progress_display/mod.rs
+@@ -8,6 +8,7 @@ use sonata_launcher_core::operations::message::{
+     stage::OperationStage,
+     status::{Outcome, Progress},
+ };
++use sonata_launcher_core::operations::{OperationSnapshot, message::stage::StageStatus};
+ 
+ mod activity;
+ mod animate;
+@@ -25,6 +26,8 @@ pub enum StageState {
+         progress: Option<(usize, usize)>,
+     },
+     Done(Duration),
++    /// Completion recovered without a measured duration.
++    DoneUnknown,
+     Failed,
+     Cancelled,
+     Skipped(Option<String>),
+@@ -64,6 +67,58 @@ impl Stages {
+         &self.items
+     }
+ 
++    /// Authoritative lifecycle recovery. Keep cache identities and locally
++    /// observed durations; a snapshot cannot replay timing or processor logs.
++    pub fn reconcile(&mut self, snapshot: &OperationSnapshot, now: Instant) {
++        if self.id.is_some_and(|id| id != snapshot.id) {
++            return;
++        }
++        self.id = Some(snapshot.id);
++        let mut old = std::mem::take(&mut self.items);
++        self.items = snapshot
++            .stages
++            .iter()
++            .map(|entry| {
++                let mut item = old
++                    .iter()
++                    .position(|item| item.kind == entry.stage)
++                    .map(|index| old.remove(index))
++                    .unwrap_or_else(|| Stage {
++                        kind: entry.stage,
++                        state: StageState::Pending,
++                        last_progress: None,
++                        icon_texture: TextureCache::new(),
++                        bar_texture: TextureCache::new(),
++                    });
++                let progress = match entry.progress {
++                    Progress::Determinable { current, total } => Some((current, total)),
++                    Progress::Indeterminable => None,
++                };
++                if progress.is_some() {
++                    item.last_progress = progress;
++                }
++                item.state = match entry.status {
++                    StageStatus::Pending => StageState::Pending,
++                    StageStatus::Running => StageState::Running {
++                        since: match item.state {
++                            StageState::Running { since, .. } => since,
++                            _ => now,
++                        },
++                        progress,
++                    },
++                    StageStatus::Completed => match item.state {
++                        StageState::Done(duration) => StageState::Done(duration),
++                        _ => StageState::DoneUnknown,
++                    },
++                    StageStatus::Skipped => StageState::Skipped(entry.reason.clone()),
++                    StageStatus::Failed => StageState::Failed,
++                    StageStatus::Cancelled => StageState::Cancelled,
++                };
++                item
++            })
++            .collect();
++    }
++
+     pub fn apply(&mut self, msg: &OperationMessage, now: Instant) {
+         // Preserve replayable inputs as well as readable diagnostics.
+         #[cfg(feature = "runtime-profile")]
+@@ -104,6 +159,12 @@ impl Stages {
+                     return;
+                 };
+ 
++                // A queued pre-reconciliation progress message cannot reopen
++                // a terminal stage or erase its locally observed duration.
++                if !matches!(item.state, StageState::Pending | StageState::Running { .. }) {
++                    return;
++                }
++
+                 let since = match item.state {
+                     StageState::Running { since, .. } => since,
+                     _ => now,
+diff --git a/src/components/progress_display/view.rs b/src/components/progress_display/view.rs
+index f227a2e..79abf6a 100644
+--- a/src/components/progress_display/view.rs
++++ b/src/components/progress_display/view.rs
+@@ -158,6 +158,7 @@ impl<'s> ProgressDisplay<'s> {
+                     matches!(
+                         stage.state,
+                         StageState::Done(_)
++                            | StageState::DoneUnknown
+                             | StageState::Skipped(_)
+                             | StageState::Failed
+                             | StageState::Cancelled
+@@ -274,14 +275,17 @@ fn stage_row<'a, Message: 'a>(
+ 
+     let (size, weight) = match *state {
+         StageState::Running { .. } => (TextSize::Lg, Weight::Medium),
+-        StageState::Done(_) => (TextSize::Md, Weight::Medium),
++        StageState::Done(_) | StageState::DoneUnknown => (TextSize::Md, Weight::Medium),
+         StageState::Pending
+         | StageState::Skipped(_)
+         | StageState::Failed
+         | StageState::Cancelled => (TextSize::Md, Weight::Normal),
+     };
+ 
+-    let done = matches!(state, StageState::Done(_) | StageState::Skipped(_));
++    let done = matches!(
++        state,
++        StageState::Done(_) | StageState::DoneUnknown | StageState::Skipped(_)
++    );
+ 
+     let icon_anim = kit.motion().to_set(
+         key!(stage.kind as u8).with(&(scope, stage.icon_texture.id())),
+@@ -383,6 +387,7 @@ fn stage_row<'a, Message: 'a>(
+             palette.text_tertiary,
+         ),
+         StageState::Done(took) => (format!("Done in {}", elapsed(*took)), palette.text_tertiary),
++        StageState::DoneUnknown => ("Done (timing unavailable)".into(), palette.text_tertiary),
+         StageState::Failed => ("Failed".to_string(), palette.red.s600),
+         StageState::Cancelled => ("Cancelled".to_string(), palette.text_tertiary),
+         StageState::Skipped(_) => ("Skipped".to_string(), palette.text_tertiary),
+@@ -530,35 +535,35 @@ fn title(kind: OperationStage, state: &StageState) -> &'static str {
+ 
+     match (kind, state) {
+         (S::FetchManifest, St::Running { .. }) => "Fetching Manifest",
+-        (S::FetchManifest, St::Done(_)) => "Manifest Fetched",
++        (S::FetchManifest, St::Done(_) | St::DoneUnknown) => "Manifest Fetched",
+         (S::FetchManifest, _) => "Fetch Manifest",
+ 
+         (S::DownloadContent, _) => "Download Content",
+         (S::PublishContent, _) => "Install Content",
+         (S::InstallJava, St::Running { .. }) => "Installing Java",
+-        (S::InstallJava, St::Done(_)) => "Java Installed",
++        (S::InstallJava, St::Done(_) | St::DoneUnknown) => "Java Installed",
+         (S::InstallJava, _) => "Install Java",
+         (S::ValidateJava, St::Running { .. }) => "Validating Java",
+-        (S::ValidateJava, St::Done(_)) => "Java Validated",
++        (S::ValidateJava, St::Done(_) | St::DoneUnknown) => "Java Validated",
+         (S::ValidateJava, _) => "Validate Java",
+         (S::DownloadLibs, St::Running { .. }) => "Downloading Libraries",
+-        (S::DownloadLibs, St::Done(_)) => "Libraries Downloaded",
++        (S::DownloadLibs, St::Done(_) | St::DoneUnknown) => "Libraries Downloaded",
+         (S::DownloadLibs, _) => "Download Libraries",
+ 
+         (S::DownloadAssets, St::Running { .. }) => "Downloading Assets",
+-        (S::DownloadAssets, St::Done(_)) => "Assets Downloaded",
++        (S::DownloadAssets, St::Done(_) | St::DoneUnknown) => "Assets Downloaded",
+         (S::DownloadAssets, _) => "Download Assets",
+ 
+         (S::VerifyFiles, St::Running { .. }) => "Verifying Files",
+-        (S::VerifyFiles, St::Done(_)) => "Files Verified",
++        (S::VerifyFiles, St::Done(_) | St::DoneUnknown) => "Files Verified",
+         (S::VerifyFiles, _) => "Verify Files",
+ 
+         (S::RunModloaderProcessors, St::Running { .. }) => "Running Processors",
+-        (S::RunModloaderProcessors, St::Done(_)) => "Processors Completed",
++        (S::RunModloaderProcessors, St::Done(_) | St::DoneUnknown) => "Processors Completed",
+         (S::RunModloaderProcessors, _) => "Run Processors",
+ 
+         (S::ScanInstances, St::Running { .. }) => "Scanning Instances",
+-        (S::ScanInstances, St::Done(_)) => "Instances Scanned",
++        (S::ScanInstances, St::Done(_) | St::DoneUnknown) => "Instances Scanned",
+         (S::ScanInstances, _) => "Scan Instances",
+     }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index b4894c4..84dfaf3 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -145,7 +145,7 @@ enum Message {
+     Navigate(usize),
+     RouteUpdate(RouteMessage),
+ 
+-    Core(CoreEvent),
++    Core(bridge::ObserverEvent),
+     Synced,
+     NewsChanged,
+     Tick,
+@@ -336,12 +336,36 @@ impl App {
+                 return self.router.update(msg).map(Message::RouteUpdate);
+             }
+ 
+-            Message::Core(CoreEvent::Operation(msg)) => self.ops.write().apply(&msg),
+-            Message::Core(CoreEvent::Instance(_)) => {
++            Message::Core(bridge::ObserverEvent::Reconcile) => {
++                self.ops.write().reconcile(&self.core.operations());
++                self.runs.write().sync(self.core.instances().running());
++            }
++            Message::Core(bridge::ObserverEvent::Core(CoreEvent::Operation(msg))) => {
++                let mut ops = self.ops.write();
++                if matches!(
++                    &msg.data,
++                    sonata_launcher_core::operations::message::event::OperationEvent::Update(
++                        sonata_launcher_core::operations::message::event::OperationUpdate::Output(
++                            _
++                        )
++                    )
++                ) {
++                    ops.reconcile(&self.core.operations());
++                    ops.apply(&msg);
++                    return Task::none();
++                }
++                ops.apply(&msg);
++                // Authoritative state follows queued events, including stale
++                // progress buffered before an overflow. Output is not replayed.
++                ops.reconcile(&self.core.operations());
++            }
++            Message::Core(bridge::ObserverEvent::Core(CoreEvent::Instance(_))) => {
+                 let snapshot = self.core.instances().running();
+                 self.runs.write().sync(snapshot);
+             }
+-            Message::Core(CoreEvent::Java(event)) => self.on_java_event(event),
++            Message::Core(bridge::ObserverEvent::Core(CoreEvent::Java(event))) => {
++                self.on_java_event(event)
++            }
+             Message::Core(_) => {}
+ 
+             Message::Synced | Message::NewsChanged | Message::Tick => {}
+diff --git a/src/windows/create_instance/mod.rs b/src/windows/create_instance/mod.rs
+index 7cf0ac2..e382d7f 100644
+--- a/src/windows/create_instance/mod.rs
++++ b/src/windows/create_instance/mod.rs
+@@ -323,15 +323,15 @@ impl CreateInstance {
+         F: FnOnce(Arc<GlobalState>, InstanceId) -> Fut + Send + 'static,
+         Fut: Future<Output = Result<(), String>> + Send + 'static,
+     {
+-        {
++        let generation = {
+             let mut ops = self.create_page.ops.write();
+ 
+             if ops.is_busy() {
+                 return Task::none();
+             }
+ 
+-            ops.begin(id, what);
+-        }
++            ops.begin(id, what, &self.core.operations())
++        };
+ 
+         let core = Arc::clone(&self.core);
+         let ops = self.create_page.ops.clone();
+@@ -347,7 +347,7 @@ impl CreateInstance {
+ 
+             // Written here rather than returned, per rule 2 in `bridge`: the page
+             // may already be gone, and this is the only record of the outcome.
+-            ops.write().finish(result);
++            ops.write().finish(generation, result);
+ 
+             if installed {
+                 bridge::reload(core, instances).await;
+diff --git a/src/windows/create_instance/tests.rs b/src/windows/create_instance/tests.rs
+index 48f294c..463cb60 100644
+--- a/src/windows/create_instance/tests.rs
++++ b/src/windows/create_instance/tests.rs
+@@ -251,9 +251,24 @@ fn a_new_create_dialog_does_not_build_progress_from_the_previous_installation()
+         };
+         {
+             let mut ops = window.create_page.ops.write();
+-            ops.begin(6.into(), "install");
++            let generation = ops.begin(
++                6.into(),
++                "install",
++                &crate::bridge::operation_tests::empty(),
++            );
++            ops.reconcile(&crate::bridge::operation_tests::active(
++                crate::bridge::operation_tests::snapshot(
++                    1,
++                    6,
++                    &[
++                        OperationStage::FetchManifest,
++                        OperationStage::DownloadLibs,
++                        OperationStage::DownloadAssets,
++                    ],
++                ),
++            ));
+             ops.apply(&start);
+-            ops.finish(Ok(()));
++            ops.finish(generation, Ok(()));
+         }
+         assert_eq!(
+             presentation(&window),
+@@ -266,17 +281,33 @@ fn a_new_create_dialog_does_not_build_progress_from_the_previous_installation()
+             empty,
+             "even after submission, another instance's results must stay hidden"
+         );
+-        {
++        let generation = {
+             let mut ops = window.create_page.ops.write();
+-            ops.begin(7.into(), "install");
++            let generation = ops.begin(
++                7.into(),
++                "install",
++                &crate::bridge::operation_tests::empty(),
++            );
++            ops.reconcile(&crate::bridge::operation_tests::active(
++                crate::bridge::operation_tests::snapshot(
++                    1,
++                    7,
++                    &[
++                        OperationStage::FetchManifest,
++                        OperationStage::DownloadLibs,
++                        OperationStage::DownloadAssets,
++                    ],
++                ),
++            ));
+             ops.apply(&start);
+-        }
++            generation
++        };
+         let running = presentation(&window);
+         assert!(
+             running.1 == ["Fetch Manifest", "Download Libraries", "Download Assets"],
+             "the dialog must display its own stages"
+         );
+-        window.create_page.ops.write().finish(Ok(()));
++        window.create_page.ops.write().finish(generation, Ok(()));
+         assert_eq!(
+             presentation(&window),
+             running,

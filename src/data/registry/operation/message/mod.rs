@@ -9,7 +9,7 @@ pub mod stage;
 pub mod status;
 pub mod target;
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct OperationId(u32);
 
 impl OperationId {

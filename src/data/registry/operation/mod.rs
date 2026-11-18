@@ -23,6 +23,8 @@ use crate::{
 pub mod handle;
 pub mod message;
 pub mod snapshot;
+pub mod subject;
+use subject::OperationSubject;
 
 /// Session-local common job identity. Domain UUIDs remain durable installation
 /// identities and are deliberately not persisted as event-stream identities.
@@ -76,11 +78,30 @@ impl OperationRegistry {
     }
 
     pub fn begin(&self, name: String, stages: Vec<OperationStage>) -> OperationHandle {
+        self.begin_with_subject(name, stages, None)
+    }
+
+    pub(crate) fn begin_for(
+        &self,
+        name: String,
+        stages: Vec<OperationStage>,
+        subject: OperationSubject,
+    ) -> OperationHandle {
+        self.begin_with_subject(name, stages, Some(subject))
+    }
+
+    fn begin_with_subject(
+        &self,
+        name: String,
+        stages: Vec<OperationStage>,
+        subject: Option<OperationSubject>,
+    ) -> OperationHandle {
         let id = OperationId::new(self.next_id.fetch_add(1, Ordering::Relaxed));
 
         let snapshot = OperationSnapshot {
             id,
             name,
+            subject,
             stage: None,
             stages: Vec::new(),
             status: LifeCycle::Started,

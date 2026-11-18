@@ -209,9 +209,10 @@ impl InstanceService {
 
         let op = self
             .operations
-            .begin(
+            .begin_for(
                 "instance.install".into(),
                 instance::init::install::resolve_install_sequence(&loader),
+                crate::operations::OperationSubject::InstanceInstall { instance: id },
             )
             .owned_worker();
 

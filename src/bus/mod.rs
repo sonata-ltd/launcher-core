@@ -1,3 +1,4 @@
+pub use async_broadcast::RecvError;
 use async_broadcast::{InactiveReceiver, Receiver, Sender, TrySendError};
 
 use crate::bus::event::CoreEvent;

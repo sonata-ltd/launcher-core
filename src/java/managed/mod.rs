@@ -214,9 +214,10 @@ impl ManagedJavaService {
         let id = Uuid::new_v4();
         let job = self
             .operations
-            .begin(
+            .begin_for(
                 format!("java.managed.install:{id}"),
                 vec![crate::data::registry::operation::message::stage::OperationStage::InstallJava],
+                crate::operations::OperationSubject::ManagedInstall { installation: id },
             )
             .owned_worker();
         let operation = ownership::operation(&self.root, id)?;
@@ -385,11 +386,12 @@ impl ManagedJavaService {
         };
         let job = self
             .operations
-            .begin(
+            .begin_for(
                 format!("java.managed.validate:{id}"),
                 vec![
                     crate::data::registry::operation::message::stage::OperationStage::ValidateJava,
                 ],
+                crate::operations::OperationSubject::ManagedValidation { installation: id },
             )
             .owned_worker();
         self.entries
