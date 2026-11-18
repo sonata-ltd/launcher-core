@@ -86,6 +86,9 @@ impl InstanceContentService {
         let maintenance = store.try_maintenance()?;
         let cleanup_db = db.clone();
         async_std::task::spawn(async move {
+            // Do not admit an uncatalogued new writer to a previously complete
+            // store. Unknown/ephemeral DBs durably disable GC inside attach.
+            super::retention::attach(&cleanup_db, &maintenance).await?;
             #[cfg(test)]
             if let Some(operation) = storage::preparation_checkpoint(&cleanup_db).await? {
                 super::install::checkpoints::wait(operation, "cleanup").await;
@@ -122,6 +125,22 @@ impl InstanceContentService {
         {
             tracing::warn!(%error, "could not migrate registered hardlinks");
         }
+        let collection_store = store.clone();
+        async_std::task::spawn(async move {
+            match super::retention::collect(
+                collection_store,
+                std::time::Duration::from_secs(7 * 24 * 60 * 60),
+            )
+            .await
+            {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "collected unreferenced content objects")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::debug!(%error, "content collection deferred"),
+            }
+        })
+        .await;
         Ok(Self {
             operations,
             catalog: ContentCatalog::new(curseforge_key),

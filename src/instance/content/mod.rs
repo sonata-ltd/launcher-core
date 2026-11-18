@@ -8,6 +8,7 @@ mod journal;
 pub mod model;
 pub mod recovery;
 pub mod resolve;
+mod retention;
 pub mod scan_policy;
 pub mod service;
 mod staging;

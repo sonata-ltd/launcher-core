@@ -16,9 +16,10 @@ use crate::utils::{
 const IMPORT_PREFIX: &str = "import-";
 
 mod access;
+pub(crate) mod catalog;
 pub(crate) use access::{StoreAccess, StoreMaintenance};
 
-pub struct ObjectStore {
+pub(crate) struct ObjectStore {
     root: PathBuf,
 }
 
@@ -154,7 +155,7 @@ mod tests {
 /// A verified bytes snapshot, not a retention pin. A caller using its raw path
 /// after this helper returns must retain operation admission (internal flows do)
 /// or establish a durable root before a future collector may be enabled.
-pub struct StoredObject {
+pub(crate) struct StoredObject {
     pub digests: FileDigests,
     pub path: PathBuf,
 }
@@ -207,6 +208,7 @@ impl ObjectStore {
 
     /// Synchronous admission is fail-fast (`WouldBlock` during maintenance).
     /// The returned snapshot does not extend this call's admission lifetime.
+    #[cfg(test)]
     pub fn import_file(
         &self,
         source: &Path,

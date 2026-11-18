@@ -1,6 +1,53 @@
 use super::*;
 
 #[async_std::test]
+async fn retention_upgrade_adds_stable_immutable_database_identity_without_touching_content() {
+    let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= 14)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO content_objects(sha256,size_bytes,store_state) VALUES(?,3,'ready')")
+        .bind(format!("{:064x}", 1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0015_retention_identity.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let identity: String = sqlx::query_scalar("SELECT identity FROM retention_identity")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(crate::utils::files::hash_valid(&identity, 32));
+    assert!(
+        sqlx::query("UPDATE retention_identity SET identity=lower(hex(randomblob(16)))")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(sqlx::query("DELETE FROM retention_identity")
+        .execute(&pool)
+        .await
+        .is_err());
+    let unchanged: String = sqlx::query_scalar("SELECT identity FROM retention_identity")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(identity, unchanged);
+    let state: String = sqlx::query_scalar("SELECT store_state FROM content_objects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "ready");
+}
+
+#[async_std::test]
 async fn preparation_upgrade_preserves_pending_journals_and_restricts_new_states() {
     let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
     for migration in sqlx::migrate!("./migrations")

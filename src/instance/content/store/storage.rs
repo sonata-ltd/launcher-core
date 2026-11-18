@@ -1,10 +1,14 @@
 //! SQL идентичностей и leases общего хранилища. Нет HTTP и обхода диска.
-use crate::{
-    data::db::Database,
-    instance::content::{error::Result, store::StoredObject},
-};
+use crate::{data::db::Database, instance::content::error::Result};
 
-pub async fn register(db: &Database, object: &StoredObject) -> Result<i64> {
+#[cfg(test)]
+use crate::instance::content::store::StoredObject;
+
+#[cfg(test)]
+pub(in crate::instance::content) async fn register(
+    db: &Database,
+    object: &StoredObject,
+) -> Result<i64> {
     let id = sqlx::query_scalar(
         "INSERT INTO content_objects(sha256,size_bytes,sha1,sha512,store_state) VALUES(?,?,?,?,'ready')
          ON CONFLICT(sha256) DO UPDATE SET sha1=excluded.sha1,sha512=excluded.sha512,store_state='ready'
@@ -17,7 +21,7 @@ pub async fn register(db: &Database, object: &StoredObject) -> Result<i64> {
 
 /// Возвращается только идентичность объекта, не произвольный путь из БД.
 /// Реальный файл вычисляется ObjectStore и проверяется перед использованием.
-pub async fn cached_hash(
+pub(in crate::instance::content) async fn cached_hash(
     db: &Database,
     sha1: Option<&str>,
     sha512: Option<&str>,

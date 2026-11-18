@@ -35,11 +35,15 @@ impl Deref for StoreAccess {
 }
 
 pub(crate) struct StoreMaintenance {
+    root: std::path::PathBuf,
     root_key: Vec<u8>,
     _lock: StoreLock,
 }
 
 impl StoreMaintenance {
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
     pub(crate) fn root_key(&self) -> &[u8] {
         &self.root_key
     }
@@ -98,6 +102,7 @@ impl ObjectStore {
         let (store, file) = self.access_file()?;
         file.try_lock().map_err(lock_error)?;
         Ok(StoreMaintenance {
+            root: store.root.clone(),
             root_key: store.root_key()?,
             _lock: StoreLock(file),
         })

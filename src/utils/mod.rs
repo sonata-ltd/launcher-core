@@ -9,7 +9,7 @@ pub mod cancellation;
 pub mod download;
 pub mod files;
 pub mod maven;
-pub mod object_store;
+pub(crate) mod object_store;
 pub(crate) mod platform;
 pub(crate) mod process;
 pub mod url;
