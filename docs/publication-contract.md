@@ -23,7 +23,9 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
    кешированных байтов. Registration/adoption и lease также атомарны. Пока hash
    нового импорта неизвестен, `preparing` защищает весь store: будущему GC нельзя
    игнорировать окно filesystem import → SQL registration.
-3. Копии готовятся в приватном staging вне `mods`; проверяются хеши и snapshot.
+3. Копии и downloads готовятся в приватном `.sonata-content-*` вне `mods`;
+   полный PID marker атомарно публикуется до полезных файлов. Имена провайдера
+   находятся в отдельном `files`, не рядом с marker. Проверяются хеши и snapshot.
    Отмена/ошибка до intent удаляет только `preparing` и его leases. Panic/exit
    может оставить их до следующего старта. Startup cleanup разрешён только для
    соответствующего canonical store root под блокировкой самого store.
@@ -43,18 +45,27 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
 ## Другие подсистемы
 
 - Immutable CAS синхронизирует файл перед persist; aliases — проверяемые hints.
-  Директории после persist/rename не синхронизируются.
+  Директории после persist/rename не синхронизируются. Каждый новый импорт имеет
+  приватный `staging/import-*` с атомарно опубликованным PID marker. Cleanup
+  удаляет только staging подтверждённо завершившегося owner, никогда published
+  objects/aliases/старые плоские staging-файлы.
 - Runtime install публикует профиль только после проверки поколения; старый
   профиль сохраняется при обычной ошибке до SQL publish. Это также не power-loss
   транзакция. Retention старых поколений требует отдельного ownership-контракта.
 - Managed Java имеет собственный persistent journal и recovery; данный документ
   не расширяет его гарантии до power-loss durability.
-- Оба downloader создают `<partial>.sonata-owner` до самого partial. Нормальное
+- Оба downloader атомарно публикуют полный `<partial>.sonata-owner` через
+  no-clobber до самого partial. Недописанный числовой префикс PID не выдаётся
+  за владельца, существующий marker сохраняется. Нормальное
   завершение/отмена/unwind убирает marker, process exit оставляет его. Sweeper
   требует валидный PID и подтверждение его отсутствия; age — дополнительный
   порог, не основание считать активную загрузку брошенной. Неизвестные/старые
   partials без marker, ссылки, живой или повторно использованный PID сохраняются.
-  GC CAS, runtime generations и content staging этим не реализован.
+  Content staging также очищается только при подтверждённо завершившемся PID.
+  Recovery читает CAS, а не staging: его очистка не освобождает journal leases.
+  GC опубликованного CAS/runtime generations этим не реализован. Области и
+  обязательные gates будущего collector описаны в
+  [retention-contract.md](retention-contract.md).
 
 ## Проверки
 
@@ -64,8 +75,14 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
 файла, SQL completion и journal cleanup. Для staging/intent используется реальный
 `install::execute`; остальные checkpoint fixtures вызывают те же storage/copy/
 publish helpers. Повтор recovery не дублирует bindings.
+Для реальных staging/intent checkpoints также проверены ownership markers,
+удаление брошенного content staging на старте и успешный recovery без него.
 `process_exit_followed_by_a_user_edit_keeps_the_journal_and_user_bytes` проверяет
 сохранение изменённого файла и leases после рестарта.
+`process_exit_allows_import_staging_cleanup_without_collecting_bytes_or_live_owners`
+завершает другой процесс внутри реального CAS import после копирования/до
+публикации. Cleanup удаляет только его scratch и сохраняет живой импорт,
+старый unmarked файл и опубликованный объект с alias.
 
 Это **не power-cut эксперимент**. Эти проверки выполнены на Linux; Windows/macOS
 runtime, сетевые файловые системы и падение внутри syscall/SQLite commit не

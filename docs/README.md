@@ -11,6 +11,7 @@
 - `baseline-manifest.json` и `source-status.txt`: исторические материалы снимка; в этой рабочей копии отсутствуют.
 - [TASKS.md](TASKS.md): полный реестр замечаний с пакетами реализации.
 - [publication-contract.md](publication-contract.md): порядок FS/SQL и явные границы process-crash гарантии; power-loss durability не обещается.
+- [retention-contract.md](retention-contract.md): реализованная scratch cleanup и обязательные roots/admission/process gates будущего GC опубликованных данных.
 - [check.sh](check.sh): воспроизводимый запуск проверок без GUI Cargo patches.
 - `verify-baseline.py`: историческая проверка снимка; в этой рабочей копии отсутствует.
 
@@ -118,11 +119,17 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 
 Продолжение P08 зафиксировано коммитами `0e97c9a` (durable preparation/leases),
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
-partials). После них на Linux прошли полные fmt/check/test/build: **311 passed,
-0 failed, 1 ignored**. Это не закрытие всего P08: D07, D08, S05 и S06 остаются
-частичными. Следующая работа — roots/retention для CAS, поколений и content
-staging с учётом preparations и живых JVM; затем оставшаяся portability/bytes
-identity. Произвольный concurrent GC запрещён до проверки окна import/lease.
+partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup)
+и `0493299` (полный атомарный/no-clobber PID marker). Последний полный Linux
+fmt/check/test/build прошёл: **321 passed, 0 failed, 1 ignored**. Проверены
+реальный process exit внутри CAS import и cleanup content staging до recovery,
+сохранение published/live/legacy данных, отмена/unwind, links и marker collision.
+Это не закрытие всего P08: D07, D08, S05 и S06 остаются частичными. Scratch cleanup
+реализована; GC опубликованного CAS и runtime generations — нет. Следующая работа:
+координация import/registration/readers, полный каталог roots и durable pins
+живых game/installer JVM по retention-contract.md; затем portability/bytes
+identity. Произвольный concurrent GC опубликованных объектов запрещён до
+проверки окна import/lease и полноты roots.
 Power-loss durability не обещается. Windows/macOS, живые API и GUI/manual flows
 не проверены. Исходное локальное изменение Cargo.lock не включено в коммиты.
 
