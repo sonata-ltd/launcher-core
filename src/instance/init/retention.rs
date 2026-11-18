@@ -59,10 +59,18 @@ pub(crate) async fn attach(
 pub(crate) async fn initialize(db: Arc<Database>, paths: Arc<LauncherPaths>) -> Result<()> {
     attach(db, paths.libraries().clone(), Cancellation::new()).await?;
     // Unknown historical ownership and live/unknown pins conservatively defer.
-    // Blob collection is not enabled by generation ownership alone.
-    match super::generation_gc::collect(paths, std::time::Duration::from_secs(7 * 86400)).await {
+    match super::generation_gc::collect(paths.clone(), std::time::Duration::from_secs(7 * 86400))
+        .await
+    {
         Ok(removed) => tracing::debug!(removed, "runtime generation maintenance completed"),
-        Err(error) => tracing::debug!(%error, "runtime retention gate deferred"),
+        Err(error) => {
+            tracing::debug!(%error, "runtime retention gate deferred");
+            return Ok(());
+        }
+    }
+    match super::blob_gc::collect(paths, std::time::Duration::from_secs(7 * 86400)).await {
+        Ok(removed) => tracing::debug!(removed, "runtime blob maintenance completed"),
+        Err(error) => tracing::debug!(%error, "runtime blob retention gate deferred"),
     }
     Ok(())
 }

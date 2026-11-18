@@ -1,3 +1,4 @@
+mod blob_gc;
 pub mod error;
 mod generation_gc;
 pub mod install;

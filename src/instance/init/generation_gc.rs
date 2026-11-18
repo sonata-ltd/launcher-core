@@ -405,5 +405,118 @@ fn checkpoint(_root: &Path, _phase: &'static str) {
     async_std::task::block_on(tests::checkpoint(_root, _phase));
 }
 
+/// A complete blob snapshot cannot guess unmaterialized inputs of a surviving
+/// preparation. Unknown legacy directories, generations and quarantine block
+/// this collector rather than interpreting a partial filesystem scan as roots.
+pub(super) fn blob_roots(
+    root: &Path,
+    owners: &HashSet<String>,
+    hashes: &mut HashSet<String>,
+) -> io::Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if ![
+            "blobs",
+            "instances",
+            ".sonata-runtime-gc",
+            ".sonata-processes",
+            ".sonata-roots.json",
+            ".sonata-access.lock",
+        ]
+        .iter()
+        .any(|known| entry.file_name() == *known)
+        {
+            return Err(io::Error::other(
+                "unknown library ownership blocks runtime blob collection",
+            ));
+        }
+    }
+    let queue = root.join(QUEUE);
+    if directory(queue.parent().unwrap())? {
+        for entry in fs::read_dir(queue.parent().unwrap())? {
+            if entry?.file_name() != "generations" {
+                return Err(io::Error::other("unknown runtime quarantine"));
+            }
+        }
+        if directory(&queue)? && fs::read_dir(&queue)?.next().is_some() {
+            return Err(io::Error::other(
+                "pending generation deletion keeps runtime blobs",
+            ));
+        }
+    }
+    let instances = root.join("instances");
+    if !directory(&instances)? {
+        return Ok(());
+    }
+    for instance in fs::read_dir(instances)? {
+        let instance = instance?;
+        if !instance.file_type()?.is_dir() {
+            return Err(io::Error::other("unknown library instance ownership"));
+        }
+        let name = instance.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| io::Error::other("unknown library instance name"))?;
+        if name
+            .parse::<i64>()
+            .map_or(true, |id| id.to_string() != name)
+        {
+            return Err(io::Error::other("noncanonical library instance ownership"));
+        }
+        for entry in fs::read_dir(instance.path())? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                return Err(io::Error::other("unknown generation ownership"));
+            }
+            let path = entry.path();
+            let owner = record(&path)?;
+            if path != root.join(owner.relative())
+                || !owner
+                    .database
+                    .as_ref()
+                    .is_some_and(|identity| owners.contains(identity))
+                || process::may_be_alive(owner.pid)
+                || !process_pin::allows_cleanup(&path)?
+                || !known_tree(&path)?
+                || !old_tree(&path, Duration::ZERO)?
+                || UNIX_EPOCH
+                    .checked_add(Duration::from_secs(owner.created))
+                    .and_then(|time| time.elapsed().ok())
+                    .is_none()
+            {
+                return Err(io::Error::other(
+                    "live or unknown generation preparation keeps runtime blobs",
+                ));
+            }
+            let mut directories = Vec::new();
+            for name in ["maven", "work"] {
+                let directory_path = path.join(name);
+                if directory(&directory_path)? {
+                    directories.push(directory_path);
+                }
+            }
+            let mut inspected = 0usize;
+            while let Some(directory) = directories.pop() {
+                for entry in fs::read_dir(directory)? {
+                    let entry = entry?;
+                    inspected += 1;
+                    if inspected > 1_000_000 {
+                        return Err(io::Error::other("generation roots scan exceeds bound"));
+                    }
+                    let kind = entry.file_type()?;
+                    if kind.is_dir() {
+                        directories.push(entry.path());
+                    } else if kind.is_file() {
+                        hashes.insert(files::sha1_file(&entry.path())?);
+                    } else {
+                        return Err(io::Error::other("unknown generation file type"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
