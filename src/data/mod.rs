@@ -86,6 +86,10 @@ impl GlobalState {
                     tracing::info!(removed, "cleaned up partial downloads");
                 }
                 crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
+                crate::instance::download::assets::AssetsData::sweep_imports(
+                    paths.assets().clone(),
+                )
+                .await;
                 let blobs = paths.libraries().join("blobs");
                 task::spawn_blocking(move || {
                     let store = crate::utils::object_store::ObjectStore::new(blobs);

@@ -84,6 +84,26 @@ pub struct AssetsOutcome {
 pub struct AssetsData;
 
 impl AssetsData {
+    /// Scratch-only startup maintenance. Published SHA-1 placements, objects,
+    /// aliases and SQL metadata are deliberately not collected here.
+    pub(crate) async fn sweep_imports(assets: PathBuf) {
+        async_std::task::spawn_blocking(move || {
+            let result = crate::utils::files::child(&assets, Path::new("objects/.sonata-cas"))
+                .map_err(std::io::Error::other)
+                .and_then(|root| {
+                    crate::utils::object_store::ObjectStore::new(root).sweep_staging()
+                });
+            match result {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "cleaned up abandoned asset imports")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not sweep asset import staging"),
+            }
+        })
+        .await;
+    }
+
     pub async fn sync(
         manifest: &serde_json::Value,
         paths: &LauncherPaths,
@@ -117,7 +137,9 @@ impl AssetsData {
                 STAGE_TYPE,
                 cancel,
             )
-            .await?;
+            .await;
+        cancel.check().map_err(SyncError::from)?;
+        let outcome = outcome?;
 
         op.complete_stage(StageResult {
             status: Outcome::Completed,
@@ -162,14 +184,21 @@ mod tests {
         let wanted = parse::extract_assets(&json!({"objects": {"item": {"hash": hash}}})).unwrap();
         let path = wanted[0].object_path(temp.path());
         let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
-        let store = DbAssetStore::new(db, temp.path().to_owned(), Cancellation::new());
-        store.register(&wanted).await.unwrap();
+        let store = DbAssetStore::new(db.clone(), temp.path().to_owned(), Cancellation::new());
+        sqlx::query("INSERT INTO assets(name,hash,url) VALUES('item',?,'unused')")
+            .bind(&hash)
+            .execute(&db.pool)
+            .await
+            .unwrap();
         assert!(store.cached(&wanted).await.unwrap().is_empty());
 
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"original").unwrap();
         assert!(store.cached(&wanted).await.unwrap().contains(&hash));
         std::fs::write(&path, b"modified").unwrap();
-        assert!(store.cached(&wanted).await.unwrap().is_empty());
+        // A SQL row still isn't a hit. The new CAS can repair a placement only
+        // after verifying the hinted bytes independently of the row/alias.
+        assert!(store.cached(&wanted).await.unwrap().contains(&hash));
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
     }
 }
