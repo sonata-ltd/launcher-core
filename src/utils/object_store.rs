@@ -286,6 +286,29 @@ impl ObjectStore {
             .join(sha1.to_ascii_lowercase()))
     }
 
+    /// Lookup by authoritative byte identity still requires a fresh verification.
+    /// The returned snapshot does not retain this method's admission lifetime.
+    pub(crate) fn find_sha256(
+        &self,
+        sha256: &str,
+        cancel: &Cancellation,
+    ) -> io::Result<Option<StoredObject>> {
+        cancel.check().map_err(io::Error::from)?;
+        let _access = self.try_access()?;
+        let path = self.path_for(sha256)?;
+        let relative = path.strip_prefix(&self.root).map_err(io::Error::other)?;
+        let path = crate::utils::files::child(&self.root, relative).map_err(io::Error::other)?;
+        let (digests, _) = match digest_file(&path, cancel, |_| {}) {
+            Ok(hashes) => hashes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(digests
+            .sha256
+            .eq_ignore_ascii_case(sha256)
+            .then_some(StoredObject { digests, path }))
+    }
+
     /// Always verifies bytes: an alias (or a database row) is not a cache hit.
     pub(crate) fn find_sha1(
         &self,

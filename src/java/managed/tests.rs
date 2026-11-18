@@ -3,6 +3,8 @@ use futures::io::Cursor;
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
+#[path = "tests/bytes.rs"]
+mod bytes_tests;
 #[path = "tests/ownership.rs"]
 mod ownership_tests;
 pub(super) use ownership_tests::{
@@ -269,6 +271,12 @@ fn tar_fixture(path: &Path) {
     tar.into_inner().unwrap().finish().unwrap();
 }
 
+fn pin_archive(mut package: ManagedJavaPackage, archive: &Path) -> ManagedJavaPackage {
+    package.sha256 = crate::utils::files::sha256_file(archive).unwrap();
+    package.size = std::fs::metadata(archive).unwrap().len();
+    package
+}
+
 #[test]
 fn tar_extraction_finds_java_and_preserves_executable_permission() {
     let dir = tempfile::tempdir().unwrap();
@@ -403,7 +411,7 @@ async fn installation_waits_for_explicit_validation_and_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let service = ManagedJavaService::new(dir.path().into());
     service.initialize().await.unwrap();
-    let package = package();
+    let mut package = package();
     let id = insert(
         &service,
         record(package.clone(), ManagedJavaStage::Downloading),
@@ -411,6 +419,11 @@ async fn installation_waits_for_explicit_validation_and_survives_restart() {
     create_staging(&service, id);
     let archive = service.staging(id).join("archive.part");
     tar_fixture(&archive);
+    package = pin_archive(package, &archive);
+    service.update(id, |rec| {
+        rec.snapshot.package = package.clone();
+        rec.snapshot.total_bytes = Some(package.size);
+    });
     service
         .install_archive(
             id,

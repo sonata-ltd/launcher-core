@@ -40,7 +40,7 @@ pub(in crate::java::managed) async fn async_checkpoint(root: &Path, phase: &'sta
     }
 }
 
-fn blocking_hook(
+pub(super) fn blocking_hook(
     root: &Path,
     phase: &'static str,
 ) -> (async_channel::Receiver<()>, std::sync::mpsc::Sender<()>) {
@@ -382,20 +382,23 @@ async fn managed_operation_crash_writer() {
     let service = ManagedJavaService::new(root.clone());
     service.initialize().await.unwrap();
     let _admission = ownership::access(&root).await.unwrap();
-    let rec = record(package(), ManagedJavaStage::Downloading);
+    let source = root.join("fixture.tar.gz");
+    tar_fixture(&source);
+    let package = pin_archive(package(), &source);
+    let rec = record(package.clone(), ManagedJavaStage::Downloading);
     let id = insert(&service, rec);
     let _operation = ownership::operation(&root, id).unwrap();
     service.persist(id).await.unwrap();
     create_staging(&service, id);
     let archive = service.staging(id).join("archive.part");
-    tar_fixture(&archive);
+    fs::copy(source, &archive).unwrap();
     service
         .install_archive(
             id,
-            &package(),
+            &package,
             &Cancellation::new(),
             archive,
-            package().sha256,
+            package.sha256.clone(),
         )
         .await
         .unwrap();
@@ -404,7 +407,13 @@ async fn managed_operation_crash_writer() {
 
 #[async_std::test]
 async fn process_exit_before_and_after_managed_publication_replays_only_dead_owned_staging() {
-    for phase in ["created", "staging", "published", "cleanup"] {
+    for phase in [
+        "created",
+        "staging",
+        "archive-imported",
+        "published",
+        "cleanup",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().to_owned();
         let phase_arg = phase.to_owned();
@@ -436,7 +445,7 @@ async fn process_exit_before_and_after_managed_publication_replays_only_dead_own
             snapshot.stage,
             if phase == "created" {
                 ManagedJavaStage::Downloading
-            } else if phase == "staging" {
+            } else if ["staging", "archive-imported"].contains(&phase) {
                 ManagedJavaStage::Failed
             } else {
                 ManagedJavaStage::AwaitingValidation
@@ -571,14 +580,16 @@ async fn managed_publication_never_replaces_a_preexisting_destination() {
     let dir = tempfile::tempdir().unwrap();
     let service = ManagedJavaService::new(dir.path().into());
     service.initialize().await.unwrap();
-    let package = package();
+    let source = dir.path().join("fixture.tar.gz");
+    tar_fixture(&source);
+    let package = pin_archive(package(), &source);
     let id = insert(
         &service,
         record(package.clone(), ManagedJavaStage::Downloading),
     );
     create_staging(&service, id);
     let archive = service.staging(id).join("archive.part");
-    tar_fixture(&archive);
+    fs::copy(source, &archive).unwrap();
     let destination = dir
         .path()
         .join("managed")

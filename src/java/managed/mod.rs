@@ -1,3 +1,4 @@
+mod bytes;
 mod catalog;
 mod extract;
 pub mod model;
@@ -367,6 +368,14 @@ impl ManagedJavaService {
         let owner = self.owner(id)?;
         let staging =
             task::spawn_blocking(move || ownership::create_staging(&root, id, &owner)).await?;
+        if let Some(archive) = bytes::cached(&self.root, package, cancel).await? {
+            self.update(id, |record| record.snapshot.downloaded_bytes = package.size);
+            self.stage(id, ManagedJavaStage::VerifyingChecksum, cancel)
+                .await?;
+            return self
+                .install_verified_archive(id, package, cancel, archive)
+                .await;
+        }
         let archive = staging.join("archive.part");
         let digest = transfer::download(package, &archive, cancel, |bytes| {
             self.update(id, |record| record.snapshot.downloaded_bytes = bytes);
@@ -384,7 +393,6 @@ impl ManagedJavaService {
         archive: PathBuf,
         digest: String,
     ) -> Result<()> {
-        let staging = self.staging(id);
         self.stage(id, ManagedJavaStage::VerifyingChecksum, cancel)
             .await?;
         if digest != package.sha256 {
@@ -396,13 +404,33 @@ impl ManagedJavaService {
                 ),
             ));
         }
+        let archive = bytes::import(&self.root, archive, package, cancel).await?;
+        self.install_verified_archive(id, package, cancel, archive)
+            .await
+    }
+
+    async fn install_verified_archive(
+        &self,
+        id: Uuid,
+        package: &ManagedJavaPackage,
+        cancel: &Cancellation,
+        archive: bytes::Archive,
+    ) -> Result<()> {
+        let staging = self.staging(id);
         self.stage(id, ManagedJavaStage::Extracting, cancel).await?;
         let destination = staging.join("contents");
         let worker_cancel = cancel.clone();
         let worker_destination = destination.clone();
         let format = package.format;
+        #[cfg(test)]
+        let checkpoint_root = self.root.clone();
         let home = task::spawn_blocking(move || {
-            extract::extract(&archive, &worker_destination, format, &worker_cancel)
+            // Move the whole capability, not only its path (precise closure
+            // capture must not leave admission in a cancellable caller future).
+            let archive = archive;
+            #[cfg(test)]
+            tests::ownership_checkpoint(&checkpoint_root, "extracting");
+            extract::extract(&archive.path, &worker_destination, format, &worker_cancel)
         })
         .await?;
         cancel.check()?;
@@ -548,6 +576,8 @@ impl ManagedJavaService {
             let directory = crate::utils::files::child(&root, Path::new(".managed/operations"))
                 .map_err(storage)?;
             std::fs::create_dir_all(&directory).map_err(storage)?;
+            let archive_root = crate::utils::files::child(&root, Path::new(".managed/bytes")).map_err(storage)?;
+            crate::utils::object_store::ObjectStore::new(archive_root).sweep_staging().map_err(storage)?;
             let mut records = Vec::new();
             for entry in std::fs::read_dir(&directory).map_err(storage)? {
                 let path = entry.map_err(storage)?.path();
