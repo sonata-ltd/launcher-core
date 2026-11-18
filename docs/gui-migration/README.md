@@ -20,6 +20,16 @@ offline и выполняет fmt/check/test/build. Последующие cargo
 не меняется, ручной merge нужен только в новой копии. Внешние Luminate overrides
 передаются аргументом, runner их не создаёт и не меняет.
 
+## Итоговый Linux replay (P11-V01)
+
+Полный fresh replay **01–05**, без `--checks`: resolve/fmt/check/test/build PASS,
+**238 passed, 0 failed, 7 ignored**. Core fmt/check/test/build: **571 library +
+2 CLI + 2 integration + 18 doctests passed**, 1 ignored. Проверенный core code —
+`9594de6`. Исходные GUI files/status и local core lock сохранены; source patches
+содержат только Rust files в `src/`/`examples/`, без dependency switch/baseline.
+[Команды, patch hashes, logs и ограничения](linux-verification.md).
+P11-V02/manual/platform и весь P08/P11 не объявлены blanket PASS.
+
 ## 01 — Закрытый service API
 
 `01-service-api.patch`: observer imports `operations::message`, managed Java
@@ -129,6 +139,6 @@ Linux core fmt/check/test/build: **571 library + 2 CLI + 2 integration + 18
 doctests passed**, 1 ignored. GUI: **238 passed**, 7 ignored. Логи:
 `/tmp/opencode/core-p11-recovery-{check,test,build}.log` и
 `/tmp/opencode/core-p11-recovery-gui-{check,test,build}.log`.
-Fresh replay fmt/check проверен; full replay — отдельная задача P11-V01.
+Fresh replay fmt/check и итоговый full replay P11-V01 проверены.
 
 Это compile/test evidence, не ручной launch/install и не Windows/macOS PASS.

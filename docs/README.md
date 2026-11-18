@@ -1,17 +1,20 @@
-# Подготовка полного рефакторинга ядра
+# Рефакторинг ядра: контракты и проверка
 
-Дата: 18 ноября 2026. Основание: [архитектурный аудит](core-architecture-audit-2026-11-17.md).
+Актуализировано: 19 ноября 2026. Основание: [архитектурный аудит](core-architecture-audit-2026-11-17.md).
 
 ## Рабочая копия и исходная точка
 
-Рабочий каталог: [core-refactor](../../core-refactor/Cargo.toml). Это самостоятельный Git-репозиторий на ветке `refactor/all-audit-findings`, содержащий снимок **текущего рабочего дерева** `/home/quartix/Projects/launcher/core`, включая незакоммиченный контент и SQLx metadata. История оригинального репозитория не клонировалась; его HEAD записан в manifest. Снимок — первая локальная контрольная точка копии: `69ca8df619b4`.
+Рабочий каталог: [core-refactor](../Cargo.toml). Это самостоятельный Git-репозиторий на ветке `refactor/all-audit-findings`, созданный из снимка **тогдашнего рабочего дерева** `/home/quartix/Projects/launcher/core`, включая незакоммиченный контент и SQLx metadata. История оригинального репозитория не клонировалась; его HEAD был записан в историческом manifest. Снимок — первая локальная контрольная точка копии: `69ca8df619b4`.
 
 Скопировано 227 файлов, SHA-256 каждого проверен. Все 178 Rust-файлов совпали с инвентарём аудита. Скопированы Cargo.toml/Cargo.lock, src, migrations, .sqlx, .cargo, README/LICENSE/.gitignore и local_docs. Не копировались runtime/build данные: target, dev.db, .env с credentials, logs, .crush и исходный .git. Для тестов использовать временные БД/каталоги; рабочие данные launcher не нужны.
 
 - `baseline-manifest.json` и `source-status.txt`: исторические материалы снимка; в этой рабочей копии отсутствуют.
 - [TASKS.md](TASKS.md): полный реестр замечаний с пакетами реализации.
 - [publication-contract.md](publication-contract.md): порядок FS/SQL и явные границы process-crash гарантии; power-loss durability не обещается.
-- [retention-contract.md](retention-contract.md): реализованная scratch cleanup и обязательные roots/admission/process gates будущего GC опубликованных данных.
+- [retention-contract.md](retention-contract.md): scratch cleanup, conservative published GC и обязательные roots/admission/process/age gates.
+- [consumer-contract.md](consumer-contract.md): service API, observer reconciliation, typed diagnostics, recovery и shutdown.
+- [gui-migration/README.md](gui-migration/README.md): source-only GUI patches 01–05 и изолированный runner.
+- [gui-migration/linux-verification.md](gui-migration/linux-verification.md): итоговые Linux evidence и непроверенные критерии.
 - [check.sh](check.sh): воспроизводимый запуск проверок без GUI Cargo patches.
 - `verify-baseline.py`: историческая проверка снимка; в этой рабочей копии отсутствует.
 
@@ -34,10 +37,10 @@ bash docs/check.sh build
 
 ## Правила выполнения
 
-1. Один связный пакет — несколько небольших Conventional Commits в копии. Перед переносами модулей сначала зафиксировать поведение тестами. Не смешивать функциональное исправление, массовый rename и schema migration в одном коммите.
+1. Одна задача — один Conventional Commit в копии, вместе с её tests/patch/evidence. Перед переносами модулей сначала зафиксировать поведение тестами. Не смешивать функциональное исправление, массовый rename и schema migration в одном коммите.
 2. Каждый пункт TASKS должен получить проверку, реализацию и ссылку на commit/тест. Замечания аудита включают риски и рекомендации: сначала подтвердить актуальность, затем исправить дефект или явно определить и проверить контракт. Нельзя считать любой переезд файла устранением архитектурной проблемы.
 3. Не редактировать применённые миграции 0001–0008. Новые constraints/форматы вводить следующими миграциями с upgrade fixtures. Journal версии 0 читать до перехода на версию 1; unknown schema возвращает диагностику конкретной операции.
-4. До сужения pub API сохранить compile fixtures потребителей GUI/CLI. При переносах предусмотреть временные deprecated re-exports; старые импорты внутри ядра перевести сразу. Удалять compatibility API только после миграции реальных потребителей.
+4. До сужения pub API проверить потребителей GUI/CLI. A07 удалил compatibility API после inventory и проверки реального GUI в изолированной копии; numbered patches воспроизводят миграцию, исходный GUI не переключён. Не возвращать low-level exports ради обхода service-инвариантов.
 5. Temporary paths и отдельная memory/file SQLite; no-clobber не заменять overwrite. После подготовки recovery intent отмена не должна оставлять неопределённый commit.
 6. Для каждого пакета: fmt, релевантные regression tests и cargo check. На границах этапов: полный test/build; дополнительно Windows/macOS CI и ручная проверка UI для изменившихся контрактов. Blocked проверка никогда не считается PASS.
 
@@ -117,11 +120,55 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 
 ## Текущее состояние
 
+**P11-V01: полный Linux verification выполнен**, но весь P08/P11 не объявлен
+завершённым. Проверенный core code — `9594de6`; последующее обновление V01 меняет
+документацию. Core fmt/check/test/build: **571 library + 2 CLI + 2 integration +
+18 doctests passed**, 0 failed, 1 ignored. Fresh GUI replay patches 01–05:
+resolve/fmt/check/test/build PASS, **238 passed, 0 failed, 7 ignored**.
+[Evidence, команды и ограничения](gui-migration/linux-verification.md).
+
+- **P08:** все четыре byte domains используют общий ObjectStore и actual SHA-256,
+  но физические namespaces раздельны. Startup collectors для content CAS,
+  runtime generations/blobs, private asset CAS и managed homes/archives требуют
+  complete owners/SQL/operation roots, process pins, age и повторяемое deletion
+  intent/replay. Historical/unknown ownership, missing/replaced DB и corrupt/future
+  metadata откладывают collection; Mojang SHA-1/virtual placements не собираются.
+- **P09:** owned RuntimeRegistrar, record-local managed recovery diagnostics,
+  common session JobId/Outcome, atomic active/completed reconciliation и bounded
+  completion history. Shared Tasks закрывает admission, сигнализирует отмену и
+  ждёт owned publishing/cleanup; running games не убиваются автоматически.
+- **P10:** composition принадлежит `app`, host credentials передаются через Config,
+  actual instances resource имеет lifetime lock, paths разрешаются без eager home
+  fallback. Typed runtime sources отделены от durable diagnostics; CLI parsing/help
+  выполняются до dotenv/config/bootstrap.
+- **P11 A07/G01–G04:** low-level SQL/registry/install/recovery capabilities и shims
+  закрыты, external positive consumer и 18 negative rustdoc contracts проверены.
+  Изолированный GUI принимает credentials, ждёт normal-close shutdown, восстанавливает
+  операции по typed subjects, сохраняет managed reports и предоставляет confirmed
+  content recovery. Mods catalog остаётся отключённым; recovery не запускает поиск.
+
+Остаются частичными **B02, B06, D08, S05, S06**: historical hardlinks/provenance,
+недостающие dependency metadata, ownership/placement migration и более агрессивный
+GC не угадываются автоматически. **P11-V02 открыт:** Windows/macOS, manual isolated
+launch/install/content, реальные JVM/descendants, live providers, external concurrent
+FS/DB replacement и power-loss не получили runtime evidence. Abnormal GUI process
+termination не превращается в cooperative close. Исторические string UI adapters
+вне Java runtime/settings и content recovery не объявлены полностью мигрированными.
+
+Исходный GUI и его dependency/lockfile не изменены этой миграцией. В финальном replay
+проверено сохранение 173 исходных GUI файлов и его Git status. Локальный core
+`Cargo.lock` сохранён вне коммитов; автоматического переключения launcher и push нет.
+
+## История реализации P08/P09
+
+Ниже сохранены evidence отдельных commits. Числа tests и фразы «следующая работа»
+относятся к соответствующей исторической точке, не к итоговому состоянию выше.
+
 Продолжение P08 зафиксировано коммитами `0e97c9a` (durable preparation/leases),
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **533 passed, 0 failed,
+На checkpoint Q05 полный Linux fmt/check/test/build прошёл: **533 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -221,6 +268,6 @@ Power-loss durability не обещается. Windows/macOS, живые API и 
 
 Файловая проверка относится к существующим предкам на момент проверки. Защита от одновременной замены каталогов и проверка на Windows остаются открытыми. Ранее созданные hardlink-размещения потребуют миграции. Размещение, которое recovery создало заново, записывается как copy. Совпадающий файл, найденный на месте при восстановлении, учитывается как внешний. Его способ размещения по содержимому определить нельзя.
 
-Восстановление изолировано по экземплярам. Ядро читает журналы старого формата и записывает новые с версией 1. Если откатиться на старую версию ядра, она не сможет восстановить операцию, которую новая версия оставила незавершённой. Публичные методы ядра показывают незавершённые операции и допускают повтор после устранения конфликта. Интерфейс управления конфликтами ещё предстоит подключить.
+Восстановление изолировано по экземплярам. Ядро читает журналы старого формата и записывает новые с версией 1. Если откатиться на старую версию ядра, она не сможет восстановить операцию, которую новая версия оставила незавершённой. Публичные методы ядра показывают незавершённые операции и допускают повтор после устранения конфликта. P11-G04 подключил этот API к изолированному GUI: confirmed abandon сохраняет файлы, Retry не требует прямой правки SQL.
 
 Запуск по установленному профилю проверяет основной номер версии Java и известную архитектуру до файловых операций. Каталоги исключают недоступные релизы из подбора. Все запросы при составлении плана входят в общий лимит. Точный файл CurseForge подтверждается в пределах четырёх страниц списка с фильтром по загрузчику и версии Minecraft. Основание для фильтра описано в [REST-документации CurseForge](https://docs.curseforge.com/rest-api/#get-mod-files).

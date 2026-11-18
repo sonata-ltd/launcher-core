@@ -24,8 +24,8 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
    кешированных байтов. Registration/adoption и lease также атомарны. Пока hash
    нового импорта неизвестен, живое окно filesystem import → SQL registration
    защищено store-wide admission до completion/discard, включая клоны workers.
-   Оставшийся после crash `preparing` должен блокировать будущий GC всего store;
-   его durable retention gate пока не реализован.
+   Оставшийся после crash `preparing` блокирует GC всего store; durable gate
+   реализован через complete owner catalogue/SQL roots, см. retention contract.
 3. Копии и downloads готовятся в приватном `.sonata-content-*` вне `mods`;
    полный PID marker атомарно публикуется до полезных файлов. Имена провайдера
    находятся в отдельном `files`, не рядом с marker. Проверяются хеши и snapshot.
@@ -41,7 +41,7 @@ entries. `atomic_write` и `publish_new` обещают атомарную ви�
 6. После всех файлов одна SQL-транзакция создаёт bindings/provenance, переводит
    `publishing → completed` и освобождает leases. История журнала затем удаляется.
    Startup recovery повторяет только `publishing`; уже совпавшие файлы принимаются
-    как external, отсутствующие создаются проверенными копиями CAS.
+   как external, отсутствующие создаются проверенными копиями CAS.
 
 Recovery держит shared admission от чтения журнала до SQL completion, с клоном
 в copy/verify/publish worker. Барьер и его границы описаны в
@@ -52,6 +52,33 @@ Recovery держит shared admission от чтения журнала до SQL
 другого root: такая запись остаётся консервативным блокером. Ключ — идентичность
 ресурса блокировки, не путь к байтам и не семантическая идентичность объекта.
 
+## Прикладное разрешение конфликта и shutdown
+
+- `core.content().pending_recovery(instance)` показывает IDs pending operations,
+  не удаляя journal/files. Наличие pending journal продолжает блокировать
+  конфликтующие launch/reinstall/content сценарии даже без in-memory job.
+- `retry_recovery(instance)` повторяет recovery после того, как пользователь
+  сохранил/переместил конфликтующий файл. Ошибка сохраняет journal/leases/bytes;
+  совпавший существующий файл принимается как external, без угадывания provenance.
+- `abandon_recovery(instance, operation)` проверяет instance/operation/state и
+  удаляет только выбранный publishing journal и его leases. Файловых изменений
+  нет; неизвестный ID или другой instance не становятся успешным abandon.
+  SQL delete принадлежит owned Tasks worker с activity guard до завершения commit:
+  drop caller не прерывает уже допущенное изменение, shutdown его ждёт.
+- Изолированный GUI patch 05 требует confirmation перед abandon. Load/Poll
+  доступны при disabled Mods catalog и не вызывают provider search. Stale/duplicate
+  callbacks не заменяют state; successful polling сохраняет typed diagnostic
+  последнего failed action до следующего action.
+- Host normal close ждёт `core.shutdown()` без abort/timeout. Shutdown закрывает
+  admission и ждёт publishing/cleanup, но не посылает играм автоматический kill.
+  Explicit `Stop games` — отдельное действие пользователя. Это не гарантия
+  graceful shutdown при renderer/process crash.
+
+Регрессии B05/P11-G04 проверяют conflict retry, owner mismatch, сохранение files
+и leases, caller-drop SQL lock/shutdown и GUI reducer/adapter/page/headless wiring.
+Итоговые [Linux evidence](gui-migration/linux-verification.md) не заменяют manual
+native interaction или power-cut испытания.
+
 ## Другие подсистемы
 
 - Immutable CAS синхронизирует файл перед persist; aliases — проверяемые hints.
@@ -61,7 +88,8 @@ Recovery держит shared admission от чтения журнала до SQL
   objects/aliases/старые плоские staging-файлы.
 - Runtime install публикует профиль только после проверки поколения; старый
   профиль сохраняется при обычной ошибке до SQL publish. Это также не power-loss
-  транзакция. Retention старых поколений требует отдельного ownership-контракта.
+   транзакция. Retention старых поколений использует отдельный ownership/process
+   roots/age контракт и quarantine/replay, описанный в retention contract.
 - Managed Java имеет собственный persistent journal и recovery; данный документ
   не расширяет его гарантии до power-loss durability.
 - Оба downloader атомарно публикуют полный `<partial>.sonata-owner` через
@@ -73,8 +101,8 @@ Recovery держит shared admission от чтения журнала до SQL
   partials без marker, ссылки, живой или повторно использованный PID сохраняются.
   Content staging также очищается только при подтверждённо завершившемся PID.
   Recovery читает CAS, а не staging: его очистка не освобождает journal leases.
-  GC опубликованного CAS/runtime generations этим не реализован. Области и
-  обязательные gates будущего collector описаны в
+   Одной scratch cleanup недостаточно для GC опубликованного CAS/runtime generations.
+   Реализованные collectors и обязательные gates описаны в
   [retention-contract.md](retention-contract.md).
 
 ## Проверки

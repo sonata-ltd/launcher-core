@@ -1,8 +1,40 @@
 # Контракт удержания данных P08
 
+## Актуальная область (19 ноября 2026)
+
+Startup published GC включён консервативно, **не** для всех исторических данных:
+
+| Область | Обязательные roots/gates | Что сохраняется |
+|---|---|---|
+| Content CAS | Complete owner catalogue, все DB bindings/leases/preparing/publishing journals, shared/exclusive admission, 7 дней, deletion intent/replay | Disabled/pinned/missing/unstable bindings; unknown owners/journals, missing/replaced DB и corrupt bytes блокируют collection |
+| Runtime generations/blobs | Complete library owners, current/legacy profiles, surviving generations, broad game/direct-child pins, age и quarantine/replay | Historical/unknown generations и live/unknown pins; URL/digest aliases не доказывают roots |
+| Private asset CAS | Complete owners/SQL/index/placement snapshot, import admission, age и replay | Mojang SHA-1 objects, SQL/virtual/resource projections не удаляются; unknown layouts откладывают CAS GC |
+| Managed homes/archives | Complete managed owners, все SQL registrations/operation records/home archive roots, independent process pins, age и replay | Unknown/external homes, corrupt/future records, pending quarantine; archive snapshot строится заново после home GC |
+
+Все four byte domains используют `utils::object_store` и actual SHA-256 identity,
+но физические namespaces и semantic roots раздельны. Admission/DB guards передаются
+owned workers через blocking work, SQL completion и cleanup после caller drop.
+Replay снова получает актуальные gates, не использует старый snapshot как permission.
+Возраст сам по себе не доказывает abandonment; process exit owner не подтверждает
+exit живого/неизвестного child.
+
+A07 закрыл low-level SQL/registry/store/install/recovery exports. Read-only
+`GlobalState::operations()` и DTO paths/history не дают retention pin, а typed
+OperationSubject — correlation, не ownership. Managed report diagnostic не разрешает
+удалить исключённый record. Confirmed content abandon удаляет journal/leases без
+изменения файлов; его commit удерживает activity guard и принадлежит Tasks.
+См. [consumer contract](consumer-contract.md) и [publication contract](publication-contract.md).
+
+Historical/unknown ownership и catalogue DB paths не мигрируются автоматически.
+Более агрессивный SHA-1/virtual placement GC, arbitrary external FS/SQL writers,
+real JVM/descendants и Windows/macOS остаются вне подтверждённого контракта;
+power-loss не обещается. [Итоговые Linux evidence](gui-migration/linux-verification.md):
+571 library tests и все CLI/integration/doctests; GUI full replay 238 tests.
+Ниже сохранена история staged implementation с evidence соответствующих commits.
+
 ## Реализованная область очистки
 
-Очистка scratch не является GC опубликованных объектов. Сейчас можно удалять
+Очистка scratch не является GC опубликованных объектов. Scratch cleanup удаляет
 только приватные временные данные с проверяемым владельцем:
 
 | Данные | Владение | Очистка |
@@ -68,18 +100,19 @@ Maintenance capability сама не проверяет их и не являе�
 `StoredObject` — verified snapshot, не pin; `path_for` только вычисляет layout.
 Возвращённый raw path/его копия не продлевают admission helper. Внутренние рабочие
 flows держат operation guard. CAS types и content object storage теперь internal;
-публичные API других доменов/raw paths ещё предстоит закрыть в P11.
+low-level capability API закрыт A07; service DTO paths не являются pins.
 Workspace установки и сервисный запуск держат отдельный shared admission
-canonical library root. Assets и managed Java пока не подключены к нему.
+canonical library root. Assets и managed Java используют свои physical domains
+и отдельные roots/admission, а не один глобальный library lock.
 
-## Обязательные условия GC — content реализован, runtime остаётся открытым
+## Обязательные условия published GC
 
 Ни SHA-256 filename, ни отсутствие SQL binding в одной БД, ни возраст файла сами
 по себе не дают права удалять опубликованный объект или runtime generation.
 CAS контента и runtime blobs используют общий bytes-код, но **разные каталоги**.
 Content CAS использует отдельный complete owner catalogue и gate, описанные ниже.
-Полного runtime реестра roots пока нет; произвольный concurrent GC опубликованных
-данных вне проверенной content области запрещён.
+Runtime/asset/managed roots и collectors реализованы отдельно ниже;
+произвольный concurrent GC вне их проверенных service flows запрещён.
 
 ### Область ресурса и admission
 
@@ -89,8 +122,8 @@ Content CAS использует отдельный complete owner catalogue и 
    (например, один store разделяют разные БД), сборка откладывается.
 2. Все импортёры, cache readers, registration, recovery и collector должны
    участвовать в одной координации ресурса. Внутренние content/CAS runtime blob
-    flows используют описанный выше admission; content collector подключён,
-    assets, generations и managed Java — ещё нет. Lifetime lock ContentService не
+   flows используют описанный выше admission; assets, generations и managed Java
+   подключены к собственным domain gates. Lifetime lock ContentService не
    заменяет admission и не доказывает полноту roots.
 3. `preparing` удерживает **весь store**, в том числе ещё не зарегистрированные
    bytes в окне filesystem import → SQL registration. Проверка preparations и
@@ -101,7 +134,7 @@ Content CAS использует отдельный complete owner catalogue и 
    чем освобождать store-wide защиту. Уже реализованные content SQL leases —
    часть этого контракта. Operation admission закрывает живое окно import → lease.
    После drop/process exit durable gate content CAS реализован ниже; runtime
-   roots/generations/JVM пока требуют отдельного gate.
+   roots/generations/JVM защищаются отдельными catalogue/process gates.
 
 ### Roots опубликованных объектов
 
@@ -133,6 +166,11 @@ Collector допускается только после доказательс�
 активных preparations и live/unknown pins. Неизвестные старые поколения или
 нечитаемые/неподдерживаемые профили сохраняются. Удаление регистрации экземпляра
 сейчас оставляет game files, поэтому само по себе также не разрешает их очистку.
+
+## История runtime/assets/managed implementation
+
+Следующие подразделы описывают состояние на named commit. Исторические «GC ещё
+выключен»/«P11 далее» не отменяют актуальную область и ограничения в начале документа.
 
 ### Реализованные runtime process pins (ещё не разрешение GC)
 
@@ -616,7 +654,7 @@ fmt/check/test/build: **533 passed, 0 failed, 1 ignored**, прежние warnin
 `/tmp/opencode/core-java-recovery-verified-{check,test,build}.log`.
 GUI diagnostics presentation, history/supervision и platform/manual остаются далее.
 
-### Порядок удаления и проверка
+## Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
 перед удалением, а не «SELECT unreferenced, затем remove». После process crash на
@@ -634,7 +672,7 @@ Power-loss durability этим контрактом не обещается. С�
 [publication-contract.md](publication-contract.md); Windows/macOS runtime и
 power-cut испытания остаются отдельными непроверенными критериями.
 
-## Доказательства текущего шага
+## Исторические scratch/admission evidence
 
 - `7859409`: shared owned import staging и startup cleanup для content/runtime
   stores. `process_exit_allows_import_staging_cleanup_without_collecting_bytes_or_live_owners`
