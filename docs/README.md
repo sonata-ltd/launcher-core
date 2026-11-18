@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **445 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **461 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -164,7 +164,13 @@ process-exit import→SQL и production sync. Startup asset maintenance пока
 GC (7 дней) с complete owner DB/SQL/index/placement roots и owned replay; 12 новых
 retention tests прошли. Mojang SHA-1 placements/SQL/virtual projections не удаляются,
 поэтому Minecraft не требует private CAS pin; unknown owners/layouts/pending imports
-откладывают collection. Следующая работа: managed Java ownership/portability/pins.
+откладывают collection. `b5bc1e7` добавляет managed Java operation ownership,
+matching-marker staging cleanup и shared writer/exclusive recovery admission;
+per-operation lock и durable reread защищают от stale validation. 16 новых tests
+прошли, включая four process-exit boundaries, отдельный live writer process и
+drop start/validation/recovery caller. Legacy/unknown/live ownership не присваивается.
+Следующая работа: managed Java archive identity/SQL portability/roots/process pins;
+published homes пока не собираются. Q04/Q05 остаются P09.
 Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.

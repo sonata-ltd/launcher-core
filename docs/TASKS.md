@@ -41,7 +41,7 @@
 | D05 | P2 — Hash loops повторяются, контент читается многократно | P06 | Исправлено | Общий проход читает файл частями с отменой. CAS проверяет три хеша при копировании и валидирует staging перед публикацией без повторного чтения файла. Forge по-прежнему считает только SHA-1. Тест проверки staged-байтов и отсутствия публикации при отказе прошёл. Коммит `001025f`. |
 | D06 | P2 — Copy Maven tree почти одинаков в Forge/Cleanroom | P06 | Исправлено | Forge и Cleanroom вызывают один перенос дерева Maven с отменой и атомарной заменой файлов. Символические ссылки и специальные файлы отклоняются. Тесты замены, отмены и ссылок прошли. Коммит `4d037f1`. |
 | D07 | P2 — Несколько stores без единого контракта идентичности | P08 | Частично | `c20d4a9`: контент/runtime используют utils::object_store, SHA-256 bytes identity, verified SHA-1 hints и copy placements; `8a38e9d`/`9659851`: общий Collection и runtime blob GC. `081230b`: assets используют тот же immutable store, Mojang SHA-1 layout — изолированные placements; `534b79d`: отдельный asset CAS collector с complete owners/SQL/index/placement roots. SQL identity сохраняется, corrupt CAS не перезаписывается. Полный Linux fmt/check/test/build: 445 passed, 0 failed, 1 ignored. Managed Java ещё открыт; asset SHA-1/virtual projections не удаляются и требуют отдельной ownership migration для более агрессивного GC. |
-| D08 | P2 — Нет GC поколений/CAS, sweeper не понимает новые partials | P08 | Частично | Scratch: `31d9d2f`/`7859409`/`9be8fe8`/`0493299`; admission: `2d37a3d`; content CAS GC: `aef7a11`; runtime pins: `dd96cdd`; catalogue: `47dbe51`; generation replay: `150e1f2`; общий Collection: `8a38e9d`; runtime blob GC: `9659851`; asset CAS GC: `534b79d`. Startup — 7 дней, SQL/admission живут до completion после drop caller; unknown owners/layouts и live/unknown preparations fail-closed. Полный Linux fmt/check/test/build: 445 passed, 0 failed, 1 ignored, все прежние regressions и 12 новых asset retention tests. Managed Java ещё открыт; SHA-1 asset placements не собираются. Реальные JVM/descendants, power-cut и Windows/macOS не проверены. Подробности — retention-contract.md. |
+| D08 | P2 — Нет GC поколений/CAS, sweeper не понимает новые partials | P08 | Частично | Scratch: `31d9d2f`/`7859409`/`9be8fe8`/`0493299`; admission: `2d37a3d`; content CAS GC: `aef7a11`; runtime pins/catalogue/generation replay: `dd96cdd`/`47dbe51`/`150e1f2`; общий Collection/blob GC: `8a38e9d`/`9659851`; asset CAS GC: `534b79d`; managed Java owned staging/recovery: `b5bc1e7`. Managed recovery требует dead versioned operation owner и совпадающий bounded regular marker; shared writers/exclusive recovery плюс per-operation lock. Drop caller сохраняет guard start/install/validation/recovery workers. Полный Linux fmt/check/test/build: 461 passed, 0 failed, 1 ignored; 16 новых managed tests, four process-exit boundaries и отдельный live writer process. Managed Java published homes/CAS ещё не собираются; SHA-1 asset placements не собираются. Реальные JVM/descendants, power-cut и Windows/macOS не проверены. Подробности — retention-contract.md. |
 | D09 | P2 — Одинаковые settings/rename меняют разные события | P05 | Исправлено | Оба сервисных пути публикуют одинаковые доменные события. Старые уведомления Scan и Option оставлены для совместимости. Тест событий патча прошёл. Коммит `7e0e7d1`. |
 | D10 | P2 — Platform normalization дублируется и расходится | P06 | Исправлено | Единый HostPlatform задаёт архитектуру и версию ОС. Установка и запуск получают один RuleContext. Названия Prism и Java остаются в своих адаптерах. Тест общего контекста и алиасов i386/i586 прошёл на Linux. Коммит `f938656`. |
 | Q01 | P2 — Overview patch частично сохраняется при ошибке rename | P05 | Исправлено | Имя и поля обзора меняются в одной транзакции. Тест конфликта имени проверяет откат тегов. Коммит `d2f869c`. |
@@ -166,3 +166,26 @@ corrupt intents, drop caller snapshot/blocking intent с SQL probe, canonical al
 и links, startup integration. Первый focused run обнаружил пропущенный test hook
 после intent cleanup; hook добавлен, expanded и полный повторные прогоны прошли.
 Логи core-assets-gc-verified-{check,test,build}; managed Java остаётся следующим P08.
+
+`b5bc1e7` продолжает managed часть D08/S05: versioned owner (UUID/PID) в record
+и staging marker; no-clobber staging creation, cleanup только matching regular
+bounded marker. Recovery под exclusive canonical .managed admission; normal
+writers под shared admission и exclusive per-operation scope. Dead-owned scratch
+terminal records тоже очищается, опубликованные homes не удаляются. Active
+live/unknown/legacy/future owner и unknown/mismatched marker сохраняются без
+перезаписи record. Foreign cancel запрещён; validation перечитывает durable record
+под operation lock, поэтому stale snapshot не присваивает чужую active операцию.
+Paths records/staging/home/executable проверяются до чтения/записи/probe;
+существующий publication destination не заменяется (внешняя concurrent FS подмена
+не поддерживается). Drop start/validation/recovery caller не освобождает worker
+admission во время blocking staging/cleanup/record commit.
+Полный Linux fmt/check/test/build: **461 passed, 0 failed, 1 ignored**; 16 новых
+tests плюс прежние managed regressions. Four process-exit boundaries (directory
+creation до marker, marker, home publication, terminal staging cleanup), отдельный
+live writer process, canonical aliases/escaping links, unknown owners/markers,
+durable identity/home safety, duplicate operation, stale validation, caller drop
+и preexisting destination. Focused: 41 managed tests. Первый expanded run не
+скомпилировал visibility test hooks; scope исправлен, expanded/focused/full прошли.
+Логи core-managed-owner-verified-{check,test,build}; прежние warnings/ignore.
+Q04 registrar/Q05 corrupt-record isolation остаются P09; managed archive identity,
+SQL portability и published-home roots/process pins/GC остаются P08, не PASS.

@@ -385,6 +385,42 @@ snapshot/blocking intent с SQL probe, multiple/missing/replaced DB, unknown own
 metadata/layouts, canonical aliases, links, future bytes и startup integration.
 Логи `/tmp/opencode/core-assets-gc-verified-{check,test,build}.log`.
 
+### Managed Java staging ownership and recovery
+
+`b5bc1e7`: `.managed` имеет общий canonical shared writer/exclusive recovery
+admission. Start/install/validation — owned tasks; recovery blocking worker владеет
+exclusive scope до cleanup/record commit после drop caller. Отдельный exclusive
+operation scope запрещает двум initialized services одновременно писать одну
+операцию. Validation перечитывает durable record под этим lock до присвоения:
+старый AwaitingValidation/Failed snapshot не заменяет чужой active/Ready record.
+Loaded active entry не даёт локального cancel, даже если owner PID равен текущему.
+
+Record и staging `.sonata-owner.json` содержат version/operation UUID/PID. Новый
+staging создаётся create_dir без adoption/clobber. Cleanup normal writer требует
+local owner; recovery — доказанно dead owner, оба требуют совпадающий bounded
+regular marker. PID reuse/permission/zero/future/unknown ownership сохраняет bytes.
+Unmarked directory после exit до marker остаётся unknown. Terminal records могут
+очистить dead-owned matching scratch после cleanup crash, но не published homes.
+Mismatch/missing/corrupt marker откладывает эту операцию, record не переписывается;
+normal failure сохраняет cleanup diagnostic. Legacy active owner не присваивается.
+
+Root-aware проверки records/staging/home/executable предшествуют FS I/O и probe;
+escaping executable не запускается. Filename обязан совпадать с record UUID.
+Существующий publication destination отвергается; это не защита от конкурентной
+внешней FS подмены. Recovery по-прежнему fail-fast для corrupt/unsafe самого JSON
+record (Q05 isolation относится к P09). Shared admission не retention roots gate,
+published homes/CAS GC здесь не включён; game/installer process pins ещё открыты.
+
+Полный Linux fmt/check/test/build: **461 passed, 0 failed, 1 ignored**. 16 новых
+tests и прежние 25 managed tests: four actual process-exit boundaries, отдельный
+live writer process (admission, затем live PID без lock, затем confirmed exit),
+drop start/validation/recovery caller, operation exclusion/stale durable record,
+unknown/live/legacy/future owner, mismatched/missing/corrupt marker, canonical alias,
+escaping FS/executable, record identity/unsafe homes и preexisting destination.
+Логи `/tmp/opencode/core-managed-owner-verified-{check,test,build}.log`.
+Это Linux synthetic executable/process-crash evidence, не реальные JVM/descendants,
+Windows/macOS, power-loss или GUI/manual evidence.
+
 ### Порядок удаления и проверка
 
 Нужен повторяемый протокол FS/SQL с admission barrier и повторной проверкой roots
