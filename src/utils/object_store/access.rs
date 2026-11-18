@@ -107,6 +107,21 @@ impl ObjectStore {
             _lock: StoreLock(file),
         })
     }
+
+    pub(crate) async fn maintenance(&self, cancel: &Cancellation) -> io::Result<StoreMaintenance> {
+        loop {
+            cancel.check()?;
+            match self.try_maintenance() {
+                Ok(maintenance) => return Ok(maintenance),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    cancel
+                        .run(async_std::task::sleep(Duration::from_millis(10)))
+                        .await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 }
 
 fn lock_error(error: fs::TryLockError) -> io::Error {

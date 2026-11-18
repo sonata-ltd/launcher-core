@@ -6,7 +6,7 @@ use super::{
     journal,
 };
 use crate::{
-    data::db::Database,
+    data::db::{retention::LockedDatabases, Database},
     utils::{
         cancellation::Cancellation,
         files,
@@ -17,10 +17,9 @@ use crate::{
     },
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Sqlite, Transaction,
-};
+#[cfg(test)]
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Sqlite, Transaction};
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
@@ -35,22 +34,7 @@ const INTENTS: &str = ".sonata-gc";
 mod tests;
 
 pub(super) async fn owner(db: &Database) -> Result<Option<DatabaseOwner>> {
-    let (_, _, path): (i64, String, String) = sqlx::query_as("PRAGMA database_list")
-        .fetch_all(&db.pool)
-        .await?
-        .into_iter()
-        .find(|(_, name, _)| name == "main")
-        .ok_or_else(|| ContentError::Invalid("missing main database".into()))?;
-    if path.is_empty() {
-        return Ok(None);
-    }
-    let identity = sqlx::query_scalar("SELECT identity FROM retention_identity WHERE singleton=1")
-        .fetch_one(&db.pool)
-        .await?;
-    Ok(Some(DatabaseOwner {
-        identity,
-        path: fs::canonicalize(path)?,
-    }))
+    Ok(db.retention_owner().await?)
 }
 
 pub(super) async fn attach(db: &Database, maintenance: &StoreMaintenance) -> Result<()> {
@@ -165,49 +149,10 @@ pub(super) async fn collect(store: Arc<ObjectStore>, minimum_age: Duration) -> R
 
 async fn collect_owned(store: Arc<ObjectStore>, minimum_age: Duration) -> Result<usize> {
     let maintenance = Arc::new(store.try_maintenance()?);
-    let owners = RootCatalog::owners(&maintenance)?;
-    let mut pools = Vec::new();
-    let mut transactions = Vec::new();
+    let mut databases = LockedDatabases::open(maintenance.clone()).await?;
     let mut retained = HashSet::new();
-    let mut paths = HashMap::new();
-    for owner in owners {
-        if let Some(previous) = paths.insert(owner.path.clone(), owner.identity.clone()) {
-            if previous != owner.identity {
-                return Err(ContentError::Invalid(
-                    "database replaced in retention catalogue".into(),
-                ));
-            }
-            continue;
-        }
-        if !fs::symlink_metadata(&owner.path)?.is_file()
-            || fs::canonicalize(&owner.path)? != owner.path
-        {
-            return Err(ContentError::Invalid(
-                "catalogued database is missing or replaced by a link".into(),
-            ));
-        }
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(
-                SqliteConnectOptions::new()
-                    .filename(&owner.path)
-                    .create_if_missing(false)
-                    .foreign_keys(true),
-            )
-            .await?;
-        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        let identity: String =
-            sqlx::query_scalar("SELECT identity FROM retention_identity WHERE singleton=1")
-                .fetch_one(&mut *tx)
-                .await?;
-        if identity != owner.identity {
-            return Err(ContentError::Invalid(
-                "retention database identity changed".into(),
-            ));
-        }
-        retained.extend(roots(&mut tx, &store).await?);
-        pools.push(pool);
-        transactions.push(tx);
+    for tx in &mut databases.transactions {
+        retained.extend(roots(tx, &store).await?);
     }
     #[cfg(test)]
     tests::checkpoint(maintenance.root(), "snapshot").await;
@@ -221,7 +166,7 @@ async fn collect_owned(store: Arc<ObjectStore>, minimum_age: Duration) -> Result
         let was_removed =
             async_std::task::spawn_blocking(move || unlink(&worker, &deletion)).await?;
         removed += usize::from(was_removed);
-        for tx in &mut transactions {
+        for tx in &mut databases.transactions {
             // Keep provenance/identity; absence is not a verified cache hit.
             sqlx::query("UPDATE content_objects SET store_state='external' WHERE lower(sha256)=?")
                 .bind(&intent.sha256)
@@ -231,7 +176,10 @@ async fn collect_owned(store: Arc<ObjectStore>, minimum_age: Duration) -> Result
     }
     #[cfg(test)]
     tests::checkpoint(maintenance.root(), "sql").await;
-    for (index, tx) in transactions.into_iter().enumerate() {
+    for (index, tx) in std::mem::take(&mut databases.transactions)
+        .into_iter()
+        .enumerate()
+    {
         tx.commit().await?;
         #[cfg(test)]
         if index == 0 {
@@ -245,9 +193,7 @@ async fn collect_owned(store: Arc<ObjectStore>, minimum_age: Duration) -> Result
     async_std::task::spawn_blocking(move || clear_finished_intents(&worker, &plan)).await?;
     #[cfg(test)]
     tests::checkpoint(maintenance.root(), "cleaned").await;
-    for pool in pools {
-        pool.close().await;
-    }
+    databases.close().await;
     Ok(removed)
 }
 

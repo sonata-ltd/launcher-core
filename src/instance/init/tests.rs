@@ -49,6 +49,9 @@ async fn failed_reinstall_removes_new_generation_and_preserves_published_install
     .await
     .unwrap();
 
+    retention::attach(db.clone(), paths.libraries().clone(), Cancel::new())
+        .await
+        .unwrap();
     let previous_workspace = InstallWorkspace::create(&paths, 1.into()).await.unwrap();
     let previous_runtime = previous_workspace.maven_dir().join("client.jar");
 

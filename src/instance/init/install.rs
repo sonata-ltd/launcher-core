@@ -88,6 +88,13 @@ pub(crate) async fn execute<'a>(
     context.cancel.check()?;
     request.loader.validate(&request.game_version)?;
 
+    init::retention::attach(
+        context.db.clone(),
+        context.paths.libraries().clone(),
+        context.cancel.clone(),
+    )
+    .await?;
+
     let workspace = InstallWorkspace::create_with_cancellation(
         context.paths,
         request.instance_id,

@@ -4,6 +4,7 @@ use sqlx::{
 };
 use thiserror::Error;
 
+pub(crate) mod retention;
 #[cfg(test)]
 mod tests;
 
@@ -41,6 +42,29 @@ pub enum DbError {
 pub type Result<T> = std::result::Result<T, DbError>;
 
 impl Database {
+    pub(crate) async fn retention_owner(
+        &self,
+    ) -> std::result::Result<Option<crate::utils::object_store::catalog::DatabaseOwner>, sqlx::Error>
+    {
+        let (_, _, path): (i64, String, String) = sqlx::query_as("PRAGMA database_list")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .find(|(_, name, _)| name == "main")
+            .ok_or_else(|| sqlx::Error::Protocol("missing main database".into()))?;
+        if path.is_empty() {
+            return Ok(None);
+        }
+        let identity =
+            sqlx::query_scalar("SELECT identity FROM retention_identity WHERE singleton=1")
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(Some(crate::utils::object_store::catalog::DatabaseOwner {
+            identity,
+            path: std::fs::canonicalize(path)?,
+        }))
+    }
+
     pub async fn init(url: &str) -> Result<Self> {
         tracing::info!(%url, "opening database");
 

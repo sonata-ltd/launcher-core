@@ -51,6 +51,8 @@ pub struct GlobalState {
 
 #[derive(Error, Debug)]
 pub enum AppError {
+    #[error("failed to initialize runtime retention: {0}")]
+    RuntimeRetention(#[from] crate::instance::init::error::InitError),
     #[error(transparent)]
     Content(#[from] crate::instance::content::error::ContentError),
 
@@ -106,6 +108,7 @@ impl GlobalState {
             .clone()
             .unwrap_or_else(|| format!("sqlite://{}", paths.cache_db().display()));
         let db = Arc::new(Database::init(&db_url).await?);
+        crate::instance::init::retention::initialize(db.clone(), paths.clone()).await?;
 
         let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
         let operations = Arc::new(OperationRegistry::new(bus.clone()));

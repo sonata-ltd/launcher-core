@@ -27,6 +27,20 @@ pub(crate) struct RootCatalog {
 }
 
 impl RootCatalog {
+    /// A known writer needs no exclusive catalogue rewrite. An incomplete
+    /// catalogue already accounts for unknown owners by disabling collection.
+    pub(crate) fn covers(root: &Path, owner: Option<&DatabaseOwner>) -> io::Result<bool> {
+        let catalog = match Self::read(&root.join(FILE)) {
+            Ok(catalog) => catalog,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(match owner {
+            Some(owner) => catalog.owners.contains(owner),
+            None => !catalog.complete,
+        })
+    }
+
     pub(crate) fn attach(
         maintenance: &StoreMaintenance,
         owner: Option<DatabaseOwner>,

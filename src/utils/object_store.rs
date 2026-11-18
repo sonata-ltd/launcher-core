@@ -23,6 +23,12 @@ pub(crate) struct ObjectStore {
     root: PathBuf,
 }
 
+impl ObjectStore {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

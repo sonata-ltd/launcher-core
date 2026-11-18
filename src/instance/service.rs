@@ -374,6 +374,12 @@ impl InstanceService {
 
         // A broad durable pin precedes profile/legacy reads. A lazy JVM JAR open
         // remains protected after launcher exit, not only until spawn returns.
+        instance::init::retention::attach(
+            self.db.clone(),
+            self.paths.libraries().clone(),
+            crate::utils::cancellation::Cancellation::new(),
+        )
+        .await?;
         let runtime_store =
             crate::utils::object_store::ObjectStore::new(self.paths.libraries().clone());
         let _runtime_access = runtime_store
