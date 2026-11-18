@@ -25,6 +25,7 @@ use crate::{
     },
     utils::{download::transfer::Cancel, files},
 };
+use futures::FutureExt;
 use uuid::Uuid;
 
 const ACTIVE_LIMIT: usize = 128;
@@ -66,6 +67,23 @@ impl Job {
 struct Jobs {
     active: HashMap<Uuid, Job>,
     history: History<Uuid, Job>,
+}
+
+struct TerminalGuard {
+    jobs: Arc<Mutex<Jobs>>,
+    id: Uuid,
+}
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        self.jobs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .finish(
+                self.id,
+                ContentPhase::Failed,
+                Some("Content worker stopped unexpectedly".into()),
+            );
+    }
 }
 
 impl Jobs {
@@ -121,6 +139,7 @@ pub struct InstanceContentService {
     store: Arc<ObjectStore>,
     plans: Arc<Mutex<HashMap<Uuid, StoredPlan>>>,
     jobs: Arc<Mutex<Jobs>>,
+    tasks: crate::utils::jobs::supervisor::Tasks,
     // OS-lock защищает от второго обновлённого процесса с тем же корнем.
     // In-memory барьер InstanceService защищает launch и install внутри процесса.
     _root_lock: crate::utils::object_store::StoreLock,
@@ -209,24 +228,36 @@ impl InstanceContentService {
         .await;
         let plans = Arc::new(Mutex::new(HashMap::<Uuid, StoredPlan>::new()));
         let jobs = Arc::new(Mutex::new(Jobs::new()));
+        let tasks = instances.tasks();
         let weak_plans = Arc::downgrade(&plans);
         let weak_jobs = Arc::downgrade(&jobs);
-        async_std::task::spawn(async move {
-            loop {
-                async_std::task::sleep(Duration::from_secs(60)).await;
-                let (Some(plans), Some(jobs)) = (weak_plans.upgrade(), weak_jobs.upgrade()) else {
-                    break;
-                };
-                plans
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
-                jobs.lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .history
-                    .prune();
-            }
-        });
+        let stop = Cancel::default();
+        let stopped = stop.clone();
+        tasks
+            .spawn("content history pruning", Some(stop), async move {
+                loop {
+                    if stopped
+                        .run(async_std::task::sleep(Duration::from_secs(60)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let (Some(plans), Some(jobs)) = (weak_plans.upgrade(), weak_jobs.upgrade())
+                    else {
+                        break;
+                    };
+                    plans
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
+                    jobs.lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .history
+                        .prune();
+                }
+            })
+            .map_err(|error| ContentError::Invalid(error.to_string()))?;
         Ok(Self {
             operations,
             catalog: ContentCatalog::new(curseforge_key),
@@ -238,6 +269,7 @@ impl InstanceContentService {
             store,
             plans,
             jobs,
+            tasks,
             _root_lock: root_lock,
             _store_lock: store_lock,
         })
@@ -468,13 +500,16 @@ impl InstanceContentService {
             .map_err(|error| ContentError::Invalid(error.to_string()))?;
         let id = Uuid::new_v4();
         use crate::data::registry::operation::message::stage::OperationStage;
-        let operation = self.operations.begin(
-            format!("instance.content.install:{}", instance.get()),
-            vec![
-                OperationStage::DownloadContent,
-                OperationStage::PublishContent,
-            ],
-        );
+        let operation = self
+            .operations
+            .begin(
+                format!("instance.content.install:{}", instance.get()),
+                vec![
+                    OperationStage::DownloadContent,
+                    OperationStage::PublishContent,
+                ],
+            )
+            .owned_worker();
         let operation_id = operation.id();
         let cancel = Cancel::default();
         {
@@ -502,13 +537,15 @@ impl InstanceContentService {
             )?;
         }
         let service = self.clone();
-        async_std::task::spawn(async move {
+        self.tasks.spawn("content installation", Some(cancel.clone()), async move {
             // Job владеет activity, а не GUI Task: закрытие страницы не даёт
             // запустить игру посередине установки и не теряет результат.
             let _activity = activity;
+            let _terminal = TerminalGuard { jobs: service.jobs.clone(), id };
             use crate::data::registry::operation::message::status::Outcome;
             operation.start_stage_determinable(OperationStage::DownloadContent);
-            let result = service.execute_plan(id, plan, &cancel, &operation).await;
+            let result = std::panic::AssertUnwindSafe(service.execute_plan(id, plan, &cancel, &operation)).catch_unwind().await
+                .unwrap_or_else(|_| Err(ContentError::Invalid("Content worker panicked".into())));
             let mut error = result.err();
             if error.is_some() {
                 match recovery::recover(
@@ -570,7 +607,10 @@ impl InstanceContentService {
                     tracing::warn!(error = %cleanup_error, "completed content journal cleanup failed");
                 }
             }
-        });
+        }).map_err(|error| {
+            self.jobs.lock().unwrap_or_else(|error| error.into_inner()).finish(id, ContentPhase::Failed, Some(error.to_string()));
+            ContentError::Invalid(error.to_string())
+        })?;
         Ok(id)
     }
 
@@ -677,22 +717,25 @@ impl InstanceContentService {
         let service = Arc::clone(self);
 
         // A caller dropping its future must not release the lease mid-publication.
-        async_std::task::spawn(async move {
-            let _activity = activity;
-            let failures = recovery::recover(
-                &service.db,
-                &service.paths,
-                &service.instances,
-                Some(instance),
-            )
-            .await?;
-            storage::clear_completed_for_instance(&service.db, instance).await?;
-            match failures.into_iter().next() {
-                Some(failure) => Err(failure.error),
-                None => Ok(()),
-            }
-        })
-        .await
+        self.tasks
+            .spawn("content recovery", None, async move {
+                let _activity = activity;
+                let failures = recovery::recover(
+                    &service.db,
+                    &service.paths,
+                    &service.instances,
+                    Some(instance),
+                )
+                .await?;
+                storage::clear_completed_for_instance(&service.db, instance).await?;
+                match failures.into_iter().next() {
+                    Some(failure) => Err(failure.error),
+                    None => Ok(()),
+                }
+            })
+            .map_err(|error| ContentError::Invalid(error.to_string()))?
+            .await
+            .map_err(|error| ContentError::Invalid(error.to_string()))?
     }
 
     /// Stops recovery of one pending installation and keeps all files in place.

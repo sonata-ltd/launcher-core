@@ -44,6 +44,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let reporter = progress::spawn_reporter(&state.bus);
     let outcome = dispatch(&state, &argv).await;
 
+    state.shutdown().await;
+
     reporter.finish().await;
 
     outcome

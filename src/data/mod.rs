@@ -73,36 +73,6 @@ impl GlobalState {
     pub async fn new(config: Config) -> Result<Self, AppError> {
         let paths = Arc::new(LauncherPaths::resolve(&config).await?);
 
-        {
-            let paths = Arc::clone(&paths);
-
-            task::spawn(async move {
-                const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
-
-                let removed = sweep_partials(paths.libraries(), STALE_AFTER).await
-                    + sweep_partials(paths.assets(), STALE_AFTER).await;
-
-                if removed > 0 {
-                    tracing::info!(removed, "cleaned up partial downloads");
-                }
-                crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
-                let blobs = paths.libraries().join("blobs");
-                task::spawn_blocking(move || {
-                    let store = crate::utils::object_store::ObjectStore::new(blobs);
-                    match store.sweep_staging() {
-                        Ok(removed) if removed > 0 => {
-                            tracing::info!(removed, "cleaned up abandoned runtime imports")
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, "could not sweep runtime import staging")
-                        }
-                    }
-                })
-                .await;
-            });
-        }
-
         let db_url = config
             .database_url
             .clone()
@@ -118,10 +88,11 @@ impl GlobalState {
         let bus = EventBus::new(DEFAULT_EVENTBUS_CAPACITY);
         let operations = Arc::new(OperationRegistry::new(bus.clone()));
 
-        let java_service = Arc::new(JavaService::new(
+        let java_service = Arc::new(JavaService::with_tasks(
             Arc::clone(&db),
             bus.clone(),
             paths.java_runtimes().clone(),
+            operations.tasks.clone(),
         ));
         let java_registry = java_service.get_registry();
         if let Err(error) = java_service.initialize().await {
@@ -172,6 +143,29 @@ impl GlobalState {
             )),
         };
 
+        // Background workers start only after every fallible bootstrap step.
+        {
+            let paths = paths.clone();
+            operations
+                .tasks
+                .spawn("startup scratch maintenance", None, async move {
+                    const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+                    let removed = sweep_partials(paths.libraries(), STALE_AFTER).await
+                        + sweep_partials(paths.assets(), STALE_AFTER).await;
+                    tracing::debug!(removed, "partial download maintenance complete");
+                    crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
+                    let blobs = paths.libraries().join("blobs");
+                    task::spawn_blocking(move || {
+                        let store = crate::utils::object_store::ObjectStore::new(blobs);
+                        if let Err(error) = store.sweep_staging() {
+                            tracing::warn!(%error, "runtime scratch maintenance deferred");
+                        }
+                    })
+                    .await;
+                })
+                .expect("bootstrap task admission open");
+        }
+
         // The first-run Java search. In the background: `GlobalState::new`
         // is awaited before the GUI opens its window, and probing a hung
         // candidate takes seconds.
@@ -179,13 +173,16 @@ impl GlobalState {
             let java = Arc::clone(&services.java);
             let instances = Arc::clone(&services.instances);
 
-            task::spawn(async move {
-                match java.ensure_discovered().await {
-                    Ok(added) if added > 0 => instances.assign_missing().await,
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(error = %e, "java discovery failed"),
-                }
-            });
+            operations
+                .tasks
+                .spawn("startup Java discovery", None, async move {
+                    match java.ensure_discovered().await {
+                        Ok(added) if added > 0 => instances.assign_missing().await,
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "java discovery failed"),
+                    }
+                })
+                .expect("bootstrap task admission open");
         }
 
         Ok(Self {
@@ -223,14 +220,17 @@ impl GlobalState {
     ) -> crate::java::managed::Result<Arc<JavaRuntime>> {
         let core = Arc::clone(self);
         let (tx, rx) = async_channel::bounded(1);
-        task::spawn(async move {
-            let java = core.java();
-            let result = java.validate_managed(id).await;
-            if result.is_ok() {
-                core.services.instances.assign_missing().await;
-            }
-            let _ = tx.send(result).await;
-        });
+        self.operations
+            .tasks
+            .spawn("managed Java assignment", None, async move {
+                let java = core.java();
+                let result = java.validate_managed(id).await;
+                if result.is_ok() {
+                    core.services.instances.assign_missing().await;
+                }
+                let _ = tx.send(result).await;
+            })
+            .map_err(|error| crate::java::managed::ManagedJavaError::new("shutdown", error))?;
         rx.recv()
             .await
             .map_err(|e| crate::java::managed::ManagedJavaError::new("validation", e))?
@@ -238,6 +238,13 @@ impl GlobalState {
 
     pub fn java(&self) -> Arc<JavaService> {
         Arc::clone(&self.services.java)
+    }
+
+    /// Seal worker admission and await cooperative cancellation, commits and
+    /// cleanup. Running games are not killed implicitly: stop them explicitly
+    /// or await their exit. This does not close shared DB pools underneath users.
+    pub async fn shutdown(&self) -> Vec<crate::utils::jobs::supervisor::TaskResult> {
+        self.operations.tasks.shutdown().await
     }
 
     pub fn versions(&self) -> Arc<VersionCatalog> {

@@ -26,6 +26,7 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 #[derive(Default)]
 pub(in crate::instance) struct ModIndex {
     watches: Mutex<VecDeque<WatchedInstance>>,
+    tasks: crate::utils::jobs::supervisor::Tasks,
 }
 
 struct WatchedInstance {
@@ -36,6 +37,12 @@ struct WatchedInstance {
 }
 
 impl ModIndex {
+    pub(in crate::instance) fn with_tasks(tasks: crate::utils::jobs::supervisor::Tasks) -> Self {
+        Self {
+            watches: Default::default(),
+            tasks,
+        }
+    }
     /// Called with the launch reservation held. Notifications are advisory,
     /// so every launch with registered mods verifies the current bytes.
     pub(in crate::instance) async fn before_launch(
@@ -75,7 +82,13 @@ impl ModIndex {
             }
         }
 
-        match start_watch(db.clone(), activity.clone(), instance, root.to_owned()) {
+        match start_watch(
+            db.clone(),
+            activity.clone(),
+            instance,
+            root.to_owned(),
+            self.tasks.clone(),
+        ) {
             Ok(entry) => {
                 let dirty = Arc::clone(&entry.dirty);
                 if watches.len() == MAX_WATCHES {
@@ -97,6 +110,7 @@ fn start_watch(
     activity: Arc<InstanceActivity>,
     instance: InstanceId,
     root: PathBuf,
+    tasks: crate::utils::jobs::supervisor::Tasks,
 ) -> Result<WatchedInstance> {
     let (wake, changes) = async_channel::bounded(1);
     let dirty = Arc::new(DirtyGeneration::default());
@@ -131,37 +145,42 @@ fn start_watch(
 
     let watched_root = root.clone();
     let watched_dirty = dirty.clone();
-    async_std::task::spawn(async move {
-        while changes.recv().await.is_ok() {
-            async_std::task::sleep(DEBOUNCE).await;
-            while changes.try_recv().is_ok() {}
-            if changes.is_closed() {
-                break;
-            }
-            let current_identity = directory_identity(&mods);
-            if current_identity != mods_identity {
-                let Some(watcher) = weak_watcher.upgrade() else {
+    let stop = crate::utils::cancellation::Cancellation::new();
+    let stopped = stop.clone();
+    tasks
+        .spawn("mod inventory watcher", Some(stop), async move {
+            while matches!(stopped.run(changes.recv()).await, Ok(Ok(()))) {
+                async_std::task::sleep(DEBOUNCE).await;
+                while changes.try_recv().is_ok() {}
+                if changes.is_closed() {
                     break;
+                }
+                let current_identity = directory_identity(&mods);
+                if current_identity != mods_identity {
+                    let Some(watcher) = weak_watcher.upgrade() else {
+                        break;
+                    };
+                    if let Ok(mut watcher) = watcher.lock() {
+                        if mods_identity.is_some() {
+                            watcher.forget_directory(&mods);
+                        }
+                        mods_identity =
+                            current_identity.filter(|_| watcher.watch_directory(&mods).is_ok());
+                    };
+                }
+                // Running a game is allowed to defer the index update. Launch and
+                // installation both perform a fresh scan under their reservation.
+                let Ok(_activity) = activity.reserve_content_change(instance) else {
+                    continue;
                 };
-                if let Ok(mut watcher) = watcher.lock() {
-                    if mods_identity.is_some() {
-                        watcher.forget_directory(&mods);
-                    }
-                    mods_identity =
-                        current_identity.filter(|_| watcher.watch_directory(&mods).is_ok());
-                };
+                if let Err(error) =
+                    reconcile(&db, instance, &watched_root, Some(&watched_dirty)).await
+                {
+                    tracing::debug!(%instance, %error, "mod index refresh deferred");
+                }
             }
-            // Running a game is allowed to defer the index update. Launch and
-            // installation both perform a fresh scan under their reservation.
-            let Ok(_activity) = activity.reserve_content_change(instance) else {
-                continue;
-            };
-            if let Err(error) = reconcile(&db, instance, &watched_root, Some(&watched_dirty)).await
-            {
-                tracing::debug!(%instance, %error, "mod index refresh deferred");
-            }
-        }
-    });
+        })
+        .map_err(|error| ContentError::Invalid(error.to_string()))?;
 
     Ok(WatchedInstance {
         instance,

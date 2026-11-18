@@ -20,9 +20,9 @@ pub(super) struct InstanceActivity {
 }
 
 impl InstanceActivity {
-    pub(super) fn new(bus: EventBus) -> Self {
+    pub(super) fn with_tasks(bus: EventBus, tasks: crate::utils::jobs::supervisor::Tasks) -> Self {
         Self {
-            running: RunningInstances::new(bus),
+            running: RunningInstances::with_tasks(bus, tasks),
             install_jobs: Default::default(),
             lifecycle: Default::default(),
             content_jobs: Default::default(),

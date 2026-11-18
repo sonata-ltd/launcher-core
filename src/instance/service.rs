@@ -54,6 +54,9 @@ pub struct InstanceService {
 }
 
 impl InstanceService {
+    pub(crate) fn tasks(&self) -> crate::utils::jobs::supervisor::Tasks {
+        self.operations.tasks.clone()
+    }
     pub fn new(
         db: Arc<Database>,
         settings: Arc<SettingsService>,
@@ -70,10 +73,15 @@ impl InstanceService {
             settings,
             java: java_service.get_registry(),
             java_service,
-            operations,
+            operations: operations.clone(),
             paths,
-            activity: Arc::new(InstanceActivity::new(bus.clone())),
-            mod_index: Arc::default(),
+            activity: Arc::new(InstanceActivity::with_tasks(
+                bus.clone(),
+                operations.tasks.clone(),
+            )),
+            mod_index: Arc::new(instance::content::index::ModIndex::with_tasks(
+                operations.tasks.clone(),
+            )),
             bus,
         }
     }
@@ -167,12 +175,14 @@ impl InstanceService {
         let service = Arc::clone(self);
         let (tx, rx) = async_channel::bounded(1);
 
-        async_std::task::spawn(async move {
-            let result = service.install_inner(id, &job.cancel).await;
-            let _ = tx.send(result).await;
+        self.tasks()
+            .spawn("instance install", Some(job.cancel.clone()), async move {
+                let result = service.install_inner(id, &job.cancel).await;
+                let _ = tx.send(result).await;
 
-            drop(job);
-        });
+                drop(job);
+            })
+            .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
 
         rx.recv()
             .await
@@ -199,10 +209,13 @@ impl InstanceService {
 
         let meta_provider = MetaProvider::from_str(&rec.meta_provider)?;
 
-        let op = self.operations.begin(
-            "instance.install".into(),
-            instance::init::install::resolve_install_sequence(&loader),
-        );
+        let op = self
+            .operations
+            .begin(
+                "instance.install".into(),
+                instance::init::install::resolve_install_sequence(&loader),
+            )
+            .owned_worker();
 
         self.java_service.wait_discovery().await;
         let java_use = match self.java_service.retain_runtime(cancel).await {

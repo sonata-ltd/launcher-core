@@ -36,19 +36,29 @@ struct Entry {
 
 #[derive(Clone)]
 pub struct RunningInstances {
+    tasks: crate::utils::jobs::supervisor::Tasks,
     inner: Arc<Mutex<HashMap<InstanceId, Entry>>>,
     bus: EventBus,
 }
 
 impl RunningInstances {
     pub fn new(bus: EventBus) -> Self {
+        Self::with_tasks(bus, Default::default())
+    }
+
+    pub(crate) fn with_tasks(bus: EventBus, tasks: crate::utils::jobs::supervisor::Tasks) -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             bus,
+            tasks,
         }
     }
 
     pub fn reserve(&self, id: InstanceId) -> Result<Reservation> {
+        let ticket = self
+            .tasks
+            .admit("game preparation/process", None)
+            .map_err(|error| InstanceError::RunFailed(error.to_string()))?;
         {
             let mut map = self.inner.lock().unwrap();
 
@@ -70,6 +80,7 @@ impl RunningInstances {
         Ok(Reservation {
             id,
             owner: Some(self.clone()),
+            ticket: Some(ticket),
         })
     }
 
@@ -108,6 +119,7 @@ impl RunningInstances {
 pub struct Reservation {
     id: InstanceId,
     owner: Option<RunningInstances>,
+    ticket: Option<crate::utils::jobs::supervisor::Ticket>,
 }
 
 impl Reservation {
@@ -132,7 +144,12 @@ impl Reservation {
 
         owner.bus.publish(InstanceEvent::Started { id, pid });
 
-        task::spawn(watch(owner, id, child, rx, natives));
+        // A running game is not force-stopped by launcher shutdown. Its watcher
+        // must still confirm exit/cleanup before shutdown reports completion.
+        self.ticket
+            .take()
+            .expect("admitted game preparation")
+            .spawn(watch(owner, id, child, rx, natives));
     }
 }
 
@@ -211,6 +228,25 @@ mod tests {
 
     use super::*;
     use crate::bus::event::CoreEvent;
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn shutdown_waits_for_admitted_preparation_and_confirmed_process_exit() {
+        let tasks = crate::utils::jobs::supervisor::Tasks::default();
+        let running = RunningInstances::with_tasks(EventBus::new(8), tasks.clone());
+        let reservation = running.reserve(1.into()).unwrap();
+        let mut shutdown = Box::pin(tasks.shutdown());
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        assert!(running.reserve(2.into()).is_err());
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        reservation.commit(child);
+        assert!(futures::poll!(&mut shutdown).is_pending());
+        running.kill(1.into()).unwrap();
+        async_std::future::timeout(std::time::Duration::from_secs(3), shutdown)
+            .await
+            .unwrap();
+        assert!(running.snapshot().is_empty());
+    }
 
     async fn next_instance_event(rx: &mut async_broadcast::Receiver<CoreEvent>) -> InstanceEvent {
         loop {

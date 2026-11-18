@@ -48,6 +48,7 @@ pub(super) struct Records {
 }
 
 pub struct OperationRegistry {
+    pub(crate) tasks: crate::utils::jobs::supervisor::Tasks,
     records: Arc<Mutex<Records>>,
     bus: EventBus,
     next_id: AtomicU32,
@@ -60,6 +61,7 @@ impl OperationRegistry {
 
     pub fn with_history(bus: EventBus, capacity: usize, ttl: Duration) -> Self {
         Self {
+            tasks: Default::default(),
             records: Arc::new(Mutex::new(Records {
                 active: HashMap::new(),
                 history: History::new(capacity, ttl),

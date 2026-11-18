@@ -17,11 +17,18 @@ pub struct OperationHandle {
     bus: EventBus,
     records: Arc<Mutex<super::Records>>,
     finished: bool,
+    abandoned: Outcome,
 }
 
 impl OperationHandle {
     pub fn id(&self) -> OperationId {
         self.id
+    }
+
+    /// Unexpected drop of an admitted worker is failure, not user cancellation.
+    pub(crate) fn owned_worker(mut self) -> Self {
+        self.abandoned = Outcome::Failed;
+        self
     }
 
     pub(super) fn new(id: OperationId, bus: EventBus, records: Arc<Mutex<super::Records>>) -> Self {
@@ -30,6 +37,7 @@ impl OperationHandle {
             bus,
             records,
             finished: false,
+            abandoned: Outcome::Cancelled,
         }
     }
 
@@ -141,7 +149,7 @@ impl Drop for OperationHandle {
         self.close(if std::thread::panicking() {
             Outcome::Failed
         } else {
-            Outcome::Cancelled
+            self.abandoned.clone()
         });
     }
 }

@@ -75,3 +75,20 @@ fn zero_history_retention_never_leaves_a_finished_operation_active() {
     assert!(view.active.is_empty());
     assert!(view.completed.is_empty());
 }
+
+#[async_std::test]
+async fn owned_future_panic_records_failed_even_when_future_drops_after_unwind_is_caught() {
+    let registry = OperationRegistry::new(EventBus::new(1));
+    let handle = registry.begin("worker".into(), vec![]).owned_worker();
+    let task = registry
+        .tasks
+        .spawn("operation worker", None, async move {
+            let _handle = handle;
+            panic!("fixture");
+        })
+        .unwrap();
+    assert!(task.await.is_err());
+    let view = registry.reconcile();
+    assert!(view.active.is_empty());
+    assert!(matches!(view.completed[0].outcome, Outcome::Failed));
+}

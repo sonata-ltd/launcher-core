@@ -175,3 +175,45 @@ async fn legacy_validation_call_shape_delegates_from_owning_service_module() {
         "not_found"
     );
 }
+
+struct PanickingRegistrar;
+#[async_trait::async_trait]
+impl RuntimeRegistrar for PanickingRegistrar {
+    async fn runtime(&self, _: i64) -> Result<Option<Arc<JavaRuntime>>> {
+        Ok(None)
+    }
+    async fn register_managed(&self, _: DetectedJavaRuntime) -> Result<Arc<JavaRuntime>> {
+        panic!("registrar fixture");
+    }
+    fn validation_committed(&self, _: &JavaRuntime) {
+        panic!("must not notify");
+    }
+}
+
+#[async_std::test]
+async fn panicking_registrar_persists_failed_and_shutdown_waits_for_failure_cleanup() {
+    let (_dir, service, registrar) = fixture().await;
+    let id = registrar.operation;
+    assert_eq!(
+        service
+            .validate_with(id, Arc::new(PanickingRegistrar))
+            .await
+            .unwrap_err()
+            .code,
+        "worker_panic"
+    );
+    service.tasks.shutdown().await;
+    assert_eq!(
+        service.installation(id).await.unwrap().stage,
+        ManagedJavaStage::Failed
+    );
+    assert_eq!(
+        read_record(&service.root, id)
+            .unwrap()
+            .unwrap()
+            .snapshot
+            .stage,
+        ManagedJavaStage::Failed
+    );
+    assert!(crate::utils::process_pin::allows_cleanup(&service.root.join(".managed")).unwrap());
+}

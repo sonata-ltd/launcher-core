@@ -13,6 +13,7 @@ mod tests;
 mod transfer;
 
 use async_std::{fs, sync::Mutex as AsyncMutex, task};
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -41,6 +42,7 @@ struct Entry {
 }
 
 pub struct ManagedJavaService {
+    tasks: crate::utils::jobs::supervisor::Tasks,
     root: PathBuf,
     database: Option<Arc<crate::data::db::Database>>,
     entries: Mutex<HashMap<Uuid, Entry>>,
@@ -52,6 +54,7 @@ pub struct ManagedJavaService {
 impl ManagedJavaService {
     pub fn new(root: PathBuf) -> Self {
         Self {
+            tasks: Default::default(),
             root,
             database: None,
             entries: Mutex::new(HashMap::new()),
@@ -66,6 +69,11 @@ impl ManagedJavaService {
             database: Some(database),
             ..Self::new(root)
         }
+    }
+
+    pub(crate) fn with_tasks(mut self, tasks: crate::utils::jobs::supervisor::Tasks) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     pub async fn catalog(&self, refresh: bool) -> Result<Vec<ManagedJavaPackage>> {
@@ -163,15 +171,24 @@ impl ManagedJavaService {
 
     async fn start_package(self: &Arc<Self>, package: ManagedJavaPackage) -> Result<Uuid> {
         let service = Arc::clone(self);
-        task::spawn(async move { service.start_package_owned(package).await }).await
+        let cancel = Cancellation::new();
+        let ticket = self
+            .tasks
+            .admit("managed Java installation", Some(cancel.clone()))
+            .map_err(storage)?;
+        task::spawn(async move { service.start_package_owned(package, cancel, ticket).await }).await
     }
 
-    async fn start_package_owned(self: &Arc<Self>, package: ManagedJavaPackage) -> Result<Uuid> {
+    async fn start_package_owned(
+        self: &Arc<Self>,
+        package: ManagedJavaPackage,
+        cancel: Cancellation,
+        ticket: crate::utils::jobs::supervisor::Ticket,
+    ) -> Result<Uuid> {
         self.initialize().await?;
         let admission = ownership::access(&self.root).await?;
         let id = Uuid::new_v4();
         let operation = ownership::operation(&self.root, id)?;
-        let cancel = Cancellation::new();
         {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
             if entries.values().any(|e| {
@@ -216,10 +233,18 @@ impl ManagedJavaService {
         #[cfg(test)]
         tests::ownership_async_checkpoint(&self.root, "started").await;
         let service = Arc::clone(self);
-        task::spawn(async move {
+        ticket.spawn(async move {
             let _admission = admission;
             let _operation = operation;
-            let result = service.install(id, &package, &cancel).await;
+            let result = std::panic::AssertUnwindSafe(service.install(id, &package, &cancel))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(ManagedJavaError::new(
+                        "worker_panic",
+                        "Managed Java installation panicked",
+                    ))
+                });
             if let Err(error) = result {
                 service.fail(id, error).await;
             }
@@ -262,6 +287,10 @@ impl ManagedJavaService {
         id: Uuid,
         registrar: Arc<dyn registrar::RuntimeRegistrar>,
     ) -> Result<Arc<JavaRuntime>> {
+        let ticket = self
+            .tasks
+            .admit("managed Java validation", None)
+            .map_err(storage)?;
         self.initialize().await?;
         let snapshot = self.installation(id).await?;
         if snapshot.stage == ManagedJavaStage::Ready {
@@ -318,10 +347,10 @@ impl ManagedJavaService {
         // Validation is owned by the core even if the caller's future is dropped.
         let service = Arc::clone(self);
         let (tx, rx) = async_channel::bounded(1);
-        task::spawn(async move {
+        ticket.spawn(async move {
             let _operation = operation;
             let java_use = process::JavaUse::admitted(admission);
-            let result: Result<Arc<JavaRuntime>> = async {
+            let result: Result<Arc<JavaRuntime>> = std::panic::AssertUnwindSafe(async {
                 let java_use = java_use.as_ref().map_err(storage)?;
                 service.persist(id).await?;
                 let snapshot = service.installation(id).await?;
@@ -371,8 +400,15 @@ impl ManagedJavaService {
                 service.update(id, |record| *record = ready_record);
                 registrar.validation_committed(&runtime);
                 Ok(runtime)
-            }
-            .await;
+            })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(ManagedJavaError::new(
+                    "worker_panic",
+                    "Managed Java validation panicked",
+                ))
+            });
             let result = match result {
                 Ok(runtime) => Ok(runtime),
                 Err(error) => Err(service.fail(id, error).await),
