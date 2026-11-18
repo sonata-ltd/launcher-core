@@ -143,6 +143,7 @@ pub struct InstanceContentService {
     // OS-lock защищает от второго обновлённого процесса с тем же корнем.
     // In-memory барьер InstanceService защищает launch и install внутри процесса.
     _root_lock: crate::utils::object_store::StoreLock,
+    _instances_lock: crate::utils::object_store::StoreLock,
     _store_lock: crate::utils::object_store::StoreLock,
 }
 
@@ -164,6 +165,24 @@ impl InstanceContentService {
             crate::utils::object_store::StoreLock::exclusive(root_lock).map_err(|_| {
                 ContentError::Invalid("Другой процесс лаунчера уже использует этот корень".into())
             })?;
+        // The configured launcher root is not the instances resource identity:
+        // different roots may override instances to the same directory/alias.
+        std::fs::create_dir_all(paths.instances())?;
+        let lock_path = files::child(
+            paths.instances(),
+            std::path::Path::new(".launcher-content.lock"),
+        )?;
+        let instances_lock = crate::utils::object_store::StoreLock::exclusive(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(lock_path)?,
+        )
+        .map_err(|_| {
+            ContentError::Invalid("Instance directory is already in use by another launcher".into())
+        })?;
         let registry = instances.get_registry();
         let activity = instances.activity();
         let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
@@ -271,6 +290,7 @@ impl InstanceContentService {
             jobs,
             tasks,
             _root_lock: root_lock,
+            _instances_lock: instances_lock,
             _store_lock: store_lock,
         })
     }

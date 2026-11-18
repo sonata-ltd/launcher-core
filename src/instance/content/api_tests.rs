@@ -20,6 +20,95 @@ mod crash_tests;
 #[path = "admission_tests.rs"]
 mod admission_tests;
 
+#[async_std::test]
+async fn different_launcher_roots_cannot_share_the_same_instances_resource() {
+    let fixture = fixture().await;
+    let first = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let paths = Arc::new(
+        LauncherPaths::resolve(&Config {
+            root_override: Some(other.path().into()),
+            dirs: crate::data::config::DirOverrides {
+                instances: Some(fixture.paths.instances().clone()),
+                ..Default::default()
+            },
+            ..Config::init()
+        })
+        .await
+        .unwrap(),
+    );
+    assert!(InstanceContentService::new(
+        fixture.db.clone(),
+        paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone()
+    )
+    .await
+    .is_err());
+    drop(first);
+    let second = InstanceContentService::new(
+        fixture.db.clone(),
+        paths,
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    drop(second);
+    fixture.operations.tasks.shutdown().await;
+}
+
+#[cfg(unix)]
+#[async_std::test]
+async fn instance_root_aliases_share_the_lifetime_lock_across_distinct_launcher_roots() {
+    let fixture = fixture().await;
+    let first = InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    )
+    .await
+    .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let alias = other.path().join("alias");
+    std::os::unix::fs::symlink(fixture.paths.instances(), &alias).unwrap();
+    let paths = Arc::new(
+        LauncherPaths::resolve(&Config {
+            root_override: Some(other.path().into()),
+            dirs: crate::data::config::DirOverrides {
+                instances: Some(alias),
+                ..Default::default()
+            },
+            ..Config::init()
+        })
+        .await
+        .unwrap(),
+    );
+    assert!(InstanceContentService::new(
+        fixture.db.clone(),
+        paths,
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone()
+    )
+    .await
+    .is_err());
+    drop(first);
+    fixture.operations.tasks.shutdown().await;
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     paths: Arc<LauncherPaths>,

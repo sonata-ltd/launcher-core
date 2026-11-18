@@ -6,6 +6,9 @@ pub struct Config {
     pub root_override: Option<PathBuf>,
     pub dirs: DirOverrides,
     pub database_url: Option<String>,
+    /// Supplied by the host application; the core never reads credentials from
+    /// process environment during bootstrap.
+    pub curseforge_api_key: Option<String>,
 
     pub meta_provider: MetaProvider,
 }
@@ -28,6 +31,7 @@ impl Config {
             root_override: None,
             dirs: DirOverrides::default(),
             database_url: None,
+            curseforge_api_key: None,
 
             meta_provider: MetaProvider::Prism,
         }

@@ -36,6 +36,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config {
         database_url: std::env::var("DATABASE_URL").ok(),
+        curseforge_api_key: std::env::var("CURSEFORGE_API_KEY").ok(),
         ..Config::init()
     };
 

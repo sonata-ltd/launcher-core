@@ -111,7 +111,7 @@ impl GlobalState {
                 db.clone(),
                 paths.clone(),
                 instance_service.clone(),
-                std::env::var("CURSEFORGE_API_KEY").ok(),
+                config.curseforge_api_key.clone(),
                 operations.clone(),
             )
             .await?,
