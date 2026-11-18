@@ -121,7 +121,7 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 `8752028` (process-crash контракт и subprocess fixtures), `31d9d2f` (ownership
 partials), `7859409` (owned CAS import staging), `9be8fe8` (content staging cleanup),
 `0493299` (полный атомарный/no-clobber PID marker) и `2d37a3d` (CAS admission).
-Последний полный Linux fmt/check/test/build прошёл: **526 passed, 0 failed,
+Последний полный Linux fmt/check/test/build прошёл: **529 passed, 0 failed,
 1 ignored**. Отдельный shared/exclusive барьер canonical store защищает внутренние
 content/runtime blob операции, включая import → SQL lease, recovery/completion
 и URL index publication. Проверены aliases, реальные независимые процессы,
@@ -201,6 +201,12 @@ locks до cleanup/pool close после caller drop. 16 новых regressions,
 subprocess deletion boundaries и startup integration прошли. Historical/unknown
 ownership и asset SHA-1/virtual placements консервативно сохраняются, более
 агрессивный GC не реализован. Следующий пакет — P09 registrar/recovery/history/shutdown.
+P09 начат: `3d49bc3` вводит owned RuntimeRegistrar port; managed validation больше
+не извлекает owning JavaService/registry/bus. Registration/lookup/notification
+adapter находится в JavaService, Ready notification следует durable record commit.
+GlobalState facade и deprecated compatibility call shape сохранены. Три новых
+tests и прежние retained validation/caller-drop regressions прошли; далее Q05
+independent corrupt-record diagnostics, затем bounded history/supervision/shutdown.
 Exclusive capability не доказывает отсутствие roots. Публичные low-level
 raw-path APIs не дают автоматического pin; произвольный concurrent GC запрещён.
 CAS types и content object storage теперь internal, остальные API — работа P11.
