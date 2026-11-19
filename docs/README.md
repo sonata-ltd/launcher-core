@@ -124,13 +124,18 @@ App/bootstrap вне data; ContentInitError вместо всего ContentError
 ## Текущее состояние
 
 **B02 follow-up:** startup migration изолирует однозначно переименованные/disabled
-CAS hardlinks по Unix device/inode, не по equal bytes; competing bindings/aliases
-и unknown ownership остаются отложенными. Owned Tasks worker удерживает activity,
-CAS admission и lifetime locks после bootstrap drop до SQL completion/shutdown.
-18 новых Linux regressions PASS; полный core fmt/check --all-targets/test/build:
-**590 library + 2 CLI + 2 integration + 18 doctests**, 0 failed, 1 ignored. Windows
-GNU check/test --no-run/build — compile/link PASS без execution. GUI не запускался
-и не проверялся. [Evidence и оставшиеся partial cases](legacy-hardlink-migration.md).
+CAS hardlinks по physical identity — Unix device/inode и Windows volume serial + 128-bit
+file ID (`GetFileInformationByHandleEx`/`FILE_ID_INFO`, fail-closed `None`), не по equal
+bytes; competing bindings/aliases и unknown ownership остаются отложенными. Owned Tasks
+worker удерживает activity, CAS admission и lifetime locks после bootstrap drop до SQL
+completion/shutdown. `remove_file`-перед-`persist` доказанно избыточен (Windows
+REPLACE_EXISTING/REPLACE semantics), production `detach()` unchanged. 18 Linux
+regressions PASS (path-based `same_physical_file` asserts, семь gates
+`any(unix, windows)`); полный core fmt/check --all-targets/test/build:
+**620 library + 2 CLI + 2 integration + 18 doctests**, 0 failed, 1 ignored. Windows
+GNU cross — compile/link PASS без execution; native Windows execution pending
+(dual-boot пользователь). GUI не запускался и не проверялся.
+[Evidence и оставшиеся partial cases](legacy-hardlink-migration.md).
 
 **P11-V02 (core часть):** native CI matrix Linux/Windows/macOS настроен, но hosted
 jobs ещё не запускались. Linux core fmt/all-target check/test/build: **572 library

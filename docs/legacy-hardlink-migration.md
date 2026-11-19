@@ -1,8 +1,13 @@
 # B02 — Проверяемая migration исторических hardlinks
 
 Checkpoint: **19 ноября 2026**, исходный core HEAD `7d9ac3a` плюс code/tests этого
-шага. **B02 остаётся частичным**: доказанное разъединение расширено, неизвестное
-владение не угадывается. GUI не изменялся, не запускался и не проверялся.
+шага. Этот commit (`fix(content): resolve Windows physical file identity for legacy
+hardlink migration`) реализует Windows physical identity: `same_physical_file` получает
+path-based contract с Unix device+inode, Windows volume serial + 128-bit file ID и
+fail-closed `None`. **B02 остаётся частичным**: доказанное разъединение расширено,
+неизвестное владение не угадывается. Linux pipeline green (620+2+2+18); native Windows
+execution pending — его выполнит пользователь на dual-boot. GUI не изменялся, не
+запускался и не проверялся.
 
 ## Исправленные пробелы
 
@@ -26,9 +31,19 @@ dependencies, numbered GUI patches и local lockfile не меняются.
 - Только если записанный путь отсутствует, проверяется текущий regular CAS file
   по layout SHA-256. Digest — адрес поиска, **не proof bytes/ownership**. CAS не
   восстанавливается и не перезаписывается этой migration.
-- Rename proof реализован только на **Unix: совпадение device + inode**. Размер,
-  timestamps и равные hashes не заменяют identity. На остальных платформах rename
-  lookup возвращает false; обычные записанные paths по-прежнему разъединяются.
+- Rename proof реализован на **Unix: совпадение device + inode** и на **Windows:
+  volume serial + 128-bit file ID** (`GetFileInformationByHandleEx`/`FILE_ID_INFO`,
+  fail-closed `None` при сбое query). Размер, timestamps и равные hashes не заменяют
+  identity. На остальных платформах rename lookup возвращает false; обычные записанные
+  paths по-прежнему разъединяются.
+- Windows identity-файл открывается через `std::fs::OpenOptions` + stable
+  `OpenOptionsExt` (`access_mode(FILE_READ_ATTRIBUTES)`, `share_mode(READ|WRITE|DELETE)`,
+  `custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)`) — чтобы match'овать `symlink_metadata`
+  no-follow. Windows-поля `std::MetadataExt` unstable → windows-sys единственный stable
+  route (feature `Win32_Storage_FileSystem`). `remove_file`-перед-`persist` из scope
+  исключён как доказанно избыточный: `tempfile::persist` pass'ом `overwrite=true`
+  (`MoveFileExW REPLACE_EXISTING`) и std `rename` REPLACE существующий destination
+  (Win10 1607+ = Unix semantics), production `detach()` unchanged.
 - Поиск ограничен известным `inventory_scope` того же ContentKind: непосредственные
   JAR/`JAR.disabled` в mods либо ZIP в resourcepacks/shaderpacks. Symbolic links,
   symlinked inventory directory, nested/unknown archives и files вне scope не дают
@@ -64,7 +79,11 @@ identity CAS, и повторный startup не обязан автоматич
 ## Regression evidence
 
 `src/instance/content/legacy_tests.rs` подключён из `api_tests.rs` и использует
-temp roots, настоящие files/hardlinks и SQLite. **18 tests реально прошли на Linux**:
+temp roots, настоящие files/hardlinks и SQLite. **18 tests реально прошли на Linux**
+(в этом commit их identity-assert'ы заменены на `legacy::same_physical_file`-path вызовы;
+семь gates `cfg(unix)` → `any(unix, windows)`, `dropped_bootstrap` ungated с portable
+lock API). Два unix-only byte-name/symlink fixtures остались unix-only. Native Windows
+execution pending.
 
 | Проверка | Regression(s) |
 |---|---|
@@ -82,10 +101,11 @@ temp roots, настоящие files/hardlinks и SQLite. **18 tests реаль�
 | SQL failure после copy не теряет bytes/не меняет CAS/binding | `sql_failure_after_isolation_preserves_bytes_cas_and_original_binding` |
 
 Отдельно объявлен non-Unix regression
-`unsupported_physical_identity_defers_even_a_unique_renamed_link`: скомпилирован для
-Windows GNU, **не выполнялся**. Unix positive/symlink/identity tests не выдаются за
-Windows assertions. Caller-drop regression использует recorded path и portable
-SQL/lock APIs; он также скомпилирован для Windows GNU без execution.
+`unsupported_physical_identity_defers_even_a_unique_renamed_link`: теперь `not(any(unix, windows))`
+— скомпилирован только для platform'ов без physical identity (Windows больше не входит).
+Семь identity tests и caller-drop `dropped_bootstrap` (recorded path + portable SQL/lock
+API; `File::lock` stable с 1.89) — `any(unix, windows)`: реально выполняются на Linux и
+скомпилированы/link'ы для Windows GNU; native Windows execution pending (дual-boot).
 
 Checkpoints `legacy-identified` и `legacy-sql` operation-scoped, только `cfg(test)`.
 В caller-drop test bootstrap действительно доводится до copy/SQL boundary; затем
@@ -103,12 +123,18 @@ ctime у remaining alias. Разъединение соседнего hardlink �
 inode ctime/link count; test теперь проверяет прежние device/inode/mtime и bytes.
 Повтор expanded focused suite: **18 PASS**, затем full pipeline PASS.
 
+В этом commit path-based `same_physical_file` заменил device/inode/byte-name asserts,
+`outside_stamp` binding восстановлен перед setup-pair assert'ом, и убран дубль
+`fs::read(&target)` в `dropped_bootstrap`; пере-сфокусированный run: **18 PASS**,
+gate flips не изменили Linux execution count.
+
 ## Проверки и артефакты
 
 | Pipeline | Фактический результат |
 |---|---|
-| Linux x86_64 locked/offline fmt/check --all-targets/test/build | **PASS: 590 library + 2 CLI + 2 integration + 18 doctests; 0 failed, 1 ignored** |
-| Windows GNU cross из Linux, fmt/check --all-targets/test --no-run/build | **Compile/link PASS**, execution не выполнялся |
+| Linux x86_64 locked/offline fmt/check --all-targets/test/build | **PASS: 620 library + 2 CLI + 2 integration + 18 doctests; 0 failed, 1 ignored** |
+| Windows GNU cross из Linux, fmt/check --all-targets/test --no-run/build | **Compile/link PASS**, execution не выполнялся (cross runner compile-only) |
+| Windows native — dual-boot пользователь | Pending: выполнит пользователь `verify-platform.py --output <new dir>` на Windows; commit land'ится с native pending |
 | Windows MSVC/macOS native | Не запускались в B02; прежние toolchain/native runner blockers сохраняются |
 | GUI | Не запускался/не проверялся по уточнению пользователя |
 
@@ -118,15 +144,25 @@ index reconciliation, admission и process-crash regressions. Их прохож�
 
 ```sh
 bash docs/check.sh test legacy_tests
-python3 docs/verify-platform.py --offline --output /tmp/opencode/core-b02-native
+# этот commit — offline native + Windows GNU cross (новые dirs):
+python3 docs/verify-platform.py --offline --output /tmp/opencode/core-b02-native-2
 python3 docs/verify-platform.py --offline --target x86_64-pc-windows-gnu \
-  --output /tmp/opencode/core-b02-windows-gnu
+  --output /tmp/opencode/core-b02-windows-gnu-2
+# native Windows evidence — выполнить на dual-boot Windows (не cross):
+python docs/verify-platform.py --output /tmp/opencode/core-b02-native-windows
 ```
 
 Output directories уже существуют, для повтора выбрать новые. Raw evidence:
 
-- `/tmp/opencode/core-b02-native/{fmt,check,test,build}.log`, `report.json`.
-- `/tmp/opencode/core-b02-windows-gnu/{fmt,check,test-compile,build}.log`, `report.json`.
+- `/tmp/opencode/core-b02-native/{fmt,check,test,build}.log`, `report.json` (прежний run).
+- `/tmp/opencode/core-b02-windows-gnu/{fmt,check,test-compile,build}.log`, `report.json`
+  (прежний run).
+- `/tmp/opencode/core-b02-native-2/{fmt,check,test,build}.log`, `report.json` —
+  **этот commit**, offline native, `lock_unchanged: true`.
+- `/tmp/opencode/core-b02-windows-gnu-2/{fmt,check,test-compile,build}.log`,
+  `report.json` — **этот commit**, Windows GNU cross, `lock_unchanged: true`.
+- `/tmp/opencode/core-b02-native-windows/` — pending: native Windows evidence от
+  dual-boot пользователя.
 - `/tmp/opencode/core-b02-regressions-{first,second,verified}.log`, initial check и
   existing-migration compile logs; промежуточные failures не скрыты.
 - `/tmp/opencode/core-b02-baseline.json`, `core-b02-preservation.json`: GUI 173
@@ -135,8 +171,10 @@ Output directories уже существуют, для повтора выбра
 Logs/reports локальные, не durable committed archive. Их UTC timestamp сохранён
 по часам окружения, не переписан под локальную дату checkpoint. Local Cargo.lock
 SHA-256: `45a050b11dd430a83528d17c98f474c26f767a039eebec35dac61df3951cf2a3`.
-Lock и `not-a-database-url` не входят в B02 commit; исходный GUI и patches 01–05
-сохранены. Push/CI dispatch не выполнялись.
+Windows feature-add (`Win32_Storage_FileSystem` к существующему `cfg(windows)`
+windows-sys) — single feature, byte-unchanged lock; оба runner'а этого commit'а
+подтвердили `lock_unchanged: true`. Lock и `not-a-database-url` не входят в B02 commit;
+исходный GUI и patches 01–05 сохранены. Push/CI dispatch не выполнялись.
 
 ## Что остаётся открытым
 
@@ -145,6 +183,8 @@ identity, moved/nested files вне scope, SQL failures в FS/SQL окне и п
 внешняя подмена FS/DB не решаются угадыванием. Наличие других aliases вне scope
 может по-прежнему позволять менять CAS, хотя доказанный path уже изолирован.
 Corrupt CAS repair/ownership migration и более агрессивный GC этим шагом не
-добавлены. **B02/B06/D08/S05/S06 и native/manual P11 остаются частичными**.
+добавлены. Windows physical identity реализован (path-based contract); native Windows
+execution pending — выполнит пользователь на dual-boot.
+**B02/B06/D08/S05/S06 и native/manual P11 остаются частичными**.
 См. [publication contract](publication-contract.md), [retention contract](retention-contract.md)
 и [platform evidence](platform-verification.md).

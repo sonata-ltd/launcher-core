@@ -14,6 +14,9 @@
 | macOS | Inventory установленного toolchain | Target/native runner отсутствует; compile/runtime не проверены |
 | Python verification runner | 8 stdlib unittest contracts | PASS; mock tests не являются platform execution evidence |
 | GitHub Actions matrix | YAML/static contract checks | Настроен Linux/Windows/macOS native CI; hosted jobs **не запускались** |
+| Linux x86_64, core — этот commit (`fix(content): resolve Windows physical file identity…`) | fmt, check --all-targets, test, build; locked/offline | PASS: 620 library + 2 CLI + 2 integration + 18 doctests; 0 failed, 1 ignored; lock_unchanged true |
+| Windows GNU из Linux — этот commit | fmt, check --all-targets, test --no-run, build; locked/offline | Cross-compile/link PASS; Windows execution не выполнялся; lock_unchanged true |
+| Windows native — dual-boot пользователь | Command из раздела «Воспроизведение», выполняемый на Windows | **Pending**: выполнит пользователь; commit land'ится с native Windows pending |
 
 Здесь native означает ОС, на которой выполняется **core test binary**, не
 native GUI interaction. Windows GNU linking включает CLI и Rust test executables;
@@ -24,6 +27,13 @@ native GUI interaction. Windows GNU linking включает CLI и Rust test ex
 Production Rust code, migrations, dependencies и GUI patches 01–05 не менялись.
 Runtime timestamp в raw reports сохранён как есть (UTC по часам окружения), без
 переписывания под локальную дату checkpoint.
+
+Этот commit (`fix(content): resolve Windows physical file identity for legacy
+hardlink migration`) стоит поверх `b20fe94` и меняет production code: path-based
+`same_physical_file` (`src/instance/content/store/legacy.rs`), одна windows-sys
+feature (`Win32_Storage_FileSystem`) и test gates. Прежние строки таблицы относятся
+к checkpoint `083d7cc`; строки этого commit'а добавлены рядом и подтверждают
+`lock_unchanged: true`. GUI patches 01–05 не менялись, GUI не запускался.
 
 ## Переносимые process regressions
 
@@ -58,7 +68,7 @@ Windows runtime-проверку. Windows/macOS assertions ещё должны �
 python docs/verify-platform.py --output /path/to/new-evidence-directory
 ```
 
-Локальные offline/cross команды этого запуска:
+Локальные offline/cross команды этого запуска и этого commit'а:
 
 ```sh
 python3 -m unittest discover -s docs -p test_verify_platform.py
@@ -67,6 +77,12 @@ python3 docs/verify-platform.py --offline --target x86_64-pc-windows-gnu \
   --output /tmp/opencode/core-p11-v02-windows-gnu
 python3 docs/verify-platform.py --offline --target x86_64-pc-windows-msvc \
   --output /tmp/opencode/core-p11-v02-windows-msvc
+# этот commit (новые dirs, lock_unchanged true):
+python3 docs/verify-platform.py --offline --output /tmp/opencode/core-b02-native-2
+python3 docs/verify-platform.py --offline --target x86_64-pc-windows-gnu \
+  --output /tmp/opencode/core-b02-windows-gnu-2
+# native Windows evidence — выполнить на dual-boot Windows (native mode, не cross):
+python docs/verify-platform.py --output /tmp/opencode/core-b02-native-windows
 ```
 
 Указанные directories уже содержат evidence; для повтора нужен **новый** путь.
@@ -117,6 +133,12 @@ Workflow доступен для push/PR/manual dispatch после публик
 - `/tmp/opencode/core-p11-v02-runner-tests.log`.
 - `/tmp/opencode/core-p11-v02-baseline.json` и `core-p11-v02-preservation.json`:
   source GUI inventory/status, core lock и source patch hashes.
+- `/tmp/opencode/core-b02-native-2/{fmt,check,test,build}.log` и `report.json` —
+  этот commit, offline native Linux, `lock_unchanged: true`.
+- `/tmp/opencode/core-b02-windows-gnu-2/{fmt,check,test-compile,build}.log` и
+  `report.json` — этот commit, Windows GNU cross, `lock_unchanged: true`.
+- `/tmp/opencode/core-b02-native-windows/` — pending: native Windows evidence,
+  который выполнит пользователь на dual-boot.
 
 Raw reports/logs находятся локально в `/tmp/opencode`, не являются durable
 committed archive. Исходные 173 GUI files/Git status, patches 01–05 и local core
@@ -133,3 +155,7 @@ live providers и external concurrent FS/DB replacement. GUI проверка о
 Unix-only symlink/shell/crash fixtures в других модулях этим шагом не объявлены
 проверенными на Windows. Power-loss/OS/disk crash durability не обещается.
 B02/B06/D08/S05/S06 сохраняют прежние partial ownership/provenance ограничения.
+Windows physical identity в B02 реализован (path-based `GetFileInformationByHandleEx`/
+`FILE_ID_INFO`, fail-closed `None`); единственное отсутствующее доказательство B02 —
+native Windows execution от dual-boot пользователя (команда выше), остальное —
+прежние fail-closed ограничения контракта.

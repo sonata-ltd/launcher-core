@@ -73,7 +73,7 @@ async fn add_binding(f: &Fixture, relative: &Path, same_object: bool) {
     .execute(&f.db.pool).await.unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn unique_renamed_and_disabled_links_keep_binding_identity_and_provenance() {
     for (name, enabled) in [("renamed.jar", true), ("renamed.jar.disabled", false)] {
@@ -94,7 +94,7 @@ async fn unique_renamed_and_disabled_links_keep_binding_identity_and_provenance(
         let relative = Path::new("mods").join(name);
         let renamed = f.root.join(&relative);
         fs::rename(target, &renamed).unwrap();
-        assert_eq!(stamp(&renamed).inode, stamp(&object).inode);
+        assert!(legacy::same_physical_file(&renamed, &object));
         let permissions = fs::metadata(&renamed).unwrap().permissions();
 
         let service = startup(&f).await;
@@ -114,7 +114,7 @@ async fn unique_renamed_and_disabled_links_keep_binding_identity_and_provenance(
         assert_eq!(after, provenance);
         assert_eq!(fs::read(&renamed).unwrap(), b"verified bytes");
         assert_eq!(fs::metadata(&renamed).unwrap().permissions(), permissions);
-        assert_ne!(stamp(&renamed).inode, stamp(&object).inode);
+        assert!(!legacy::same_physical_file(&renamed, &object));
         fs::write(&renamed, b"local edit").unwrap();
         assert_eq!(fs::read(object).unwrap(), b"verified bytes");
         drop(service);
@@ -122,7 +122,7 @@ async fn unique_renamed_and_disabled_links_keep_binding_identity_and_provenance(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn renamed_archives_are_found_only_in_their_registered_content_scope() {
     for (kind, directory) in [
@@ -147,6 +147,7 @@ async fn renamed_archives_are_found_only_in_their_registered_content_scope() {
         let out_of_scope = f.root.join("mods/other.jar");
         fs::hard_link(&object, &out_of_scope).unwrap();
         let outside_stamp = stamp(&out_of_scope);
+        assert!(legacy::same_physical_file(&out_of_scope, &object));
         let service = startup(&f).await;
         let row = bindings(&f).await.remove(0);
         assert_eq!(
@@ -156,11 +157,10 @@ async fn renamed_archives_are_found_only_in_their_registered_content_scope() {
         assert_eq!(row.kind, kind);
         assert_eq!(row.mod_enabled, None);
         assert_eq!(row.placement, "copy");
-        assert_ne!(stamp(&renamed).inode, stamp(&object).inode);
+        assert!(!legacy::same_physical_file(&renamed, &object));
         let outside_after = stamp(&out_of_scope);
-        assert_eq!(outside_after.device, outside_stamp.device);
-        assert_eq!(outside_after.inode, outside_stamp.inode);
         assert_eq!(outside_after.modified, outside_stamp.modified);
+        assert!(legacy::same_physical_file(&out_of_scope, &object));
         assert_eq!(fs::read(&out_of_scope).unwrap(), b"verified bytes");
         // Removing another alias changes the shared inode's ctime/link count.
         drop(service);
@@ -320,7 +320,7 @@ async fn a_recorded_path_can_be_isolated_even_when_cas_is_missing() {
     f.operations.tasks.shutdown().await;
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn a_corrupt_renamed_cas_alias_preserves_current_bytes_and_drops_stale_identity() {
     let f = fixture().await;
@@ -341,14 +341,14 @@ async fn a_corrupt_renamed_cas_alias_preserves_current_bytes_and_drops_stale_ide
     assert_eq!(row.preferred_provider_file_id, None);
     assert_eq!(fs::read(&renamed).unwrap(), b"user modified shared bytes");
     assert_eq!(fs::read(&object).unwrap(), b"user modified shared bytes");
-    assert_ne!(stamp(&renamed).inode, stamp(&object).inode);
+    assert!(!legacy::same_physical_file(&renamed, &object));
     fs::write(renamed, b"later edit").unwrap();
     assert_eq!(fs::read(object).unwrap(), b"user modified shared bytes");
     drop(service);
     f.operations.tasks.shutdown().await;
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[async_std::test]
 async fn unsupported_physical_identity_defers_even_a_unique_renamed_link() {
     let f = fixture().await;
@@ -470,8 +470,7 @@ async fn dropped_bootstrap_keeps_migration_guards_until_sql_completion_and_shutd
     );
     assert_eq!(bindings(&f).await[0].placement, "hardlink");
     assert_eq!(fs::read(&target).unwrap(), b"verified bytes");
-    #[cfg(unix)]
-    assert_ne!(stamp(&target).inode, stamp(&object).inode);
+    assert!(!legacy::same_physical_file(&target, &object));
     assert_eq!(fs::read(&object).unwrap(), b"verified bytes");
     pause.resume();
     let mut shutdown = Box::pin(f.operations.tasks.shutdown());
@@ -494,7 +493,7 @@ async fn dropped_bootstrap_keeps_migration_guards_until_sql_completion_and_shutd
     assert_eq!(fs::read(object).unwrap(), b"verified bytes");
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn a_collision_after_copy_cannot_merge_or_replace_bindings() {
     let f = fixture().await;
@@ -515,12 +514,12 @@ async fn a_collision_after_copy_cannot_merge_or_replace_bindings() {
     let (service, expected) = futures::join!(caller, inspect);
     assert_eq!(bindings(&f).await, expected);
     assert_eq!(fs::read(&renamed).unwrap(), b"verified bytes");
-    assert_ne!(stamp(&renamed).inode, stamp(&object).inode);
+    assert!(!legacy::same_physical_file(&renamed, &object));
     drop(service);
     f.operations.tasks.shutdown().await;
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn a_replaced_target_after_identity_lookup_is_not_overwritten() {
     let f = fixture().await;
@@ -552,7 +551,7 @@ async fn a_replaced_target_after_identity_lookup_is_not_overwritten() {
     f.operations.tasks.shutdown().await;
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn changed_binding_or_new_competing_claim_after_copy_is_not_reassigned() {
     for mutation in ["path_key", "kind", "claim"] {
@@ -591,13 +590,13 @@ async fn changed_binding_or_new_competing_claim_after_copy_is_not_reassigned() {
         let (service, expected) = futures::join!(caller, inspect);
         assert_eq!(bindings(&f).await, expected);
         assert_eq!(fs::read(&renamed).unwrap(), b"verified bytes");
-        assert_ne!(stamp(&renamed).inode, stamp(&object).inode);
+        assert!(!legacy::same_physical_file(&renamed, &object));
         drop(service);
         f.operations.tasks.shutdown().await;
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[async_std::test]
 async fn sql_failure_after_isolation_preserves_bytes_cas_and_original_binding() {
     let f = fixture().await;
@@ -615,7 +614,7 @@ async fn sql_failure_after_isolation_preserves_bytes_cas_and_original_binding() 
     let service = startup(&f).await;
     assert_eq!(bindings(&f).await, rows);
     assert_eq!(fs::read(&renamed).unwrap(), b"verified bytes");
-    assert_ne!(stamp(&renamed).inode, stamp(&object).inode);
+    assert!(!legacy::same_physical_file(&renamed, &object));
     fs::write(renamed, b"independent after failure").unwrap();
     assert_eq!(fs::read(object).unwrap(), b"verified bytes");
     drop(service);
