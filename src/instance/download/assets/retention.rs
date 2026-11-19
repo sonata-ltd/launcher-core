@@ -23,6 +23,8 @@ use std::{
 
 type Result<T> = std::result::Result<T, DbError>;
 
+mod index;
+
 pub(super) async fn attach(
     db: Arc<Database>,
     objects: PathBuf,
@@ -133,35 +135,11 @@ fn placement_roots(assets: &Path, roots: &mut Roots) -> io::Result<()> {
     if directory(&indexes)? {
         for entry in fs::read_dir(indexes)? {
             let entry = entry?;
-            let index: serde_json::Value =
+            let index: index::Index =
                 serde_json::from_slice(&read_regular(&entry.path(), 32 * 1024 * 1024)?)
                     .map_err(io::Error::other)?;
-            if index.as_object().is_none_or(|fields| {
-                fields
-                    .keys()
-                    .any(|key| !["objects", "virtual", "map_to_resources"].contains(&key.as_str()))
-            }) {
-                return Err(io::Error::other("unknown asset index metadata"));
-            }
-            let objects = index
-                .get("objects")
-                .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| io::Error::other("unknown asset index layout"))?;
-            for value in objects.values() {
-                if value.as_object().is_none_or(|fields| {
-                    fields
-                        .keys()
-                        .any(|key| !["hash", "size"].contains(&key.as_str()))
-                }) {
-                    return Err(io::Error::other("unknown asset object metadata"));
-                }
-                add_hash(
-                    roots,
-                    value
-                        .get("hash")
-                        .and_then(serde_json::Value::as_str)
-                        .ok_or_else(|| io::Error::other("asset index root has no hash"))?,
-                )?;
+            for object in index.objects {
+                add_hash(roots, &object.hash)?;
             }
         }
     }

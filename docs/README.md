@@ -12,6 +12,7 @@
 - [TASKS.md](TASKS.md): полный реестр замечаний с пакетами реализации.
 - [publication-contract.md](publication-contract.md): порядок FS/SQL и явные границы process-crash гарантии; power-loss durability не обещается.
 - [retention-contract.md](retention-contract.md): scratch cleanup, conservative published GC и обязательные roots/admission/process/age gates.
+- [asset-index-retention-contract.md](asset-index-retention-contract.md): D08 follow-up — строгий typed schema private asset index roots, duplicate rejection и known-type validation.
 - [consumer-contract.md](consumer-contract.md): service API, observer reconciliation, typed diagnostics, recovery и shutdown.
 - [gui-migration/README.md](gui-migration/README.md): source-only GUI patches 01–05 и изолированный runner.
 - [gui-migration/linux-verification.md](gui-migration/linux-verification.md): итоговые Linux evidence и непроверенные критерии.
@@ -187,6 +188,15 @@ termination не превращается в cooperative close. Историче
 615 library + 2 CLI + 2 integration + 18 doctests PASS, 0 failed, 1 ignored.
 Historical metadata/unknown identity и manual/native P11 по-прежнему partial;
 это не разрешение более агрессивного GC и не гарантия live mod compatibility.
+
+**D08 follow-up (asset index roots):** fail-closed исправление private asset CAS
+collector — строгий typed schema с уникальными object names, rejection первого
+duplicate root, unknown types и явного `null`, проверка до `Collection::plan`.
+5 новых regressions: red run 1 PASS / 4 FAIL (только valid control), green focused
+5 passed, retention 17 passed; Linux полный suite — **620 library + 2 CLI + 2
+integration + 18 doctests passed, 0 failed, 1 ignored**; Windows GNU compile/link
+PASS без execution. D08 остаётся «Частично»: ownership/deletion не расширены, GUI
+не запускался. [Контракт, регрессии и evidence](asset-index-retention-contract.md).
 
 ## История реализации P08/P09
 

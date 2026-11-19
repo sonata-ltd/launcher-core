@@ -419,6 +419,12 @@ Unknown/future index/object fields, layouts, pending import scratch, links,
 corrupt metadata и unavailable/replaced DB откладывают всю private CAS область.
 Virtual/resource layouts пока unknown, также откладывают GC.
 
+[D08 strict index follow-up](asset-index-retention-contract.md) заменяет last-wins
+JSON roots typed schema с duplicate rejection, unique object names и known-type
+boolean/u64 validation. Present null не равен omitted field. Invalid schema
+откладывает collection до intents; replay не обходит fresh roots gate. Это только
+fail-closed исправление, не расширение placement ownership/deletion permission.
+
 Collector удаляет только verified old unrooted SHA-256 objects и matching aliases,
 через общий Collection. SQL rows/identity, indexes и Mojang/virtual placements не
 меняются и не удаляются. Minecraft читает изолированные SHA-1 copies, не CAS:

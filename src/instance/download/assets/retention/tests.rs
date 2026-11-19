@@ -241,6 +241,142 @@ async fn unknown_layouts_and_corrupt_asset_indexes_defer_all_collection_before_i
 }
 
 #[async_std::test]
+async fn asset_index_known_flags_with_unknown_types_defer_collection_before_intents() {
+    for field in ["virtual", "map_to_resources"] {
+        for invalid in [
+            serde_json::Value::Null,
+            1.into(),
+            "false".into(),
+            serde_json::json!({"additional_roots": []}),
+            serde_json::json!([]),
+        ] {
+            let f = fixture().await;
+            let garbage = f.import(b"unrooted bytes must not be deleted with an unknown schema");
+            let mut index = serde_json::json!({"objects": {}});
+            index[field] = invalid;
+            fs::create_dir(f.assets.join("indexes")).unwrap();
+            fs::write(
+                f.assets.join("indexes/index.json"),
+                serde_json::to_vec(&index).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                collect(f.assets.clone(), Duration::ZERO).await.is_err(),
+                "{index}"
+            );
+            assert!(garbage.path.is_file() && !f.intent(&garbage).exists());
+        }
+    }
+}
+
+#[async_std::test]
+async fn asset_index_known_size_with_unknown_types_defers_collection_before_intents() {
+    for invalid in [
+        serde_json::Value::Null,
+        (-1).into(),
+        serde_json::json!(0.5),
+        "10".into(),
+        false.into(),
+        serde_json::json!({}),
+        serde_json::json!([]),
+    ] {
+        let f = fixture().await;
+        let rooted = f.import(b"index root");
+        let garbage = f.import(b"unrooted CAS bytes");
+        let index =
+            serde_json::json!({"objects": {"a": {"hash": rooted.digests.sha1, "size": invalid}}});
+        fs::create_dir(f.assets.join("indexes")).unwrap();
+        fs::write(
+            f.assets.join("indexes/index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            collect(f.assets.clone(), Duration::ZERO).await.is_err(),
+            "{index}"
+        );
+        assert!(rooted.path.is_file() && garbage.path.is_file() && !f.intent(&garbage).exists());
+    }
+}
+
+#[async_std::test]
+async fn asset_index_duplicate_root_fields_cannot_hide_a_semantic_hash() {
+    for mode in [
+        "objects",
+        "object-name",
+        "hash",
+        "size",
+        "virtual",
+        "resources",
+    ] {
+        let f = fixture().await;
+        let root = f.import(b"must not lose the first semantic root");
+        let garbage = f.import(b"unused bytes");
+        let hash = &root.digests.sha1;
+        let index = match mode {
+            "objects" => format!(r#"{{"objects":{{"a":{{"hash":"{hash}"}}}},"objects":{{}}}}"#),
+            "object-name" => format!(
+                r#"{{"objects":{{"a":{{"hash":"{hash}"}},"a":{{"hash":"{}"}}}}}}"#,
+                "0".repeat(40)
+            ),
+            "hash" => format!(
+                r#"{{"objects":{{"a":{{"hash":"{hash}","hash":"{}"}}}}}}"#,
+                "0".repeat(40)
+            ),
+            "size" => format!(r#"{{"objects":{{"a":{{"hash":"{hash}","size":1,"size":2}}}}}}"#),
+            "virtual" => format!(
+                r#"{{"objects":{{"a":{{"hash":"{hash}"}}}},"virtual":true,"virtual":false}}"#
+            ),
+            "resources" => format!(
+                r#"{{"objects":{{"a":{{"hash":"{hash}"}}}},"map_to_resources":true,"map_to_resources":false}}"#
+            ),
+            _ => unreachable!(),
+        };
+        fs::create_dir(f.assets.join("indexes")).unwrap();
+        fs::write(f.assets.join("indexes/index.json"), index).unwrap();
+        assert!(
+            collect(f.assets.clone(), Duration::ZERO).await.is_err(),
+            "{mode}"
+        );
+        assert!(root.path.is_file() && garbage.path.is_file());
+        assert!(!f.intent(&root).exists() && !f.intent(&garbage).exists());
+    }
+}
+
+#[async_std::test]
+async fn asset_index_valid_optional_flags_and_sizes_preserve_roots_and_allow_private_cas_gc() {
+    for mode in ["omitted", "false", "true", "zero", "maximum"] {
+        let f = fixture().await;
+        let root = f.import(b"index root");
+        let garbage = f.import(b"unused bytes");
+        let mut index = serde_json::json!({"objects": {"a": {"hash": root.digests.sha1}}});
+        match mode {
+            "omitted" => {}
+            "false" | "true" => {
+                let flag = mode == "true";
+                index["virtual"] = flag.into();
+                index["map_to_resources"] = flag.into();
+                index["objects"]["a"]["size"] = root.digests.size_bytes.into();
+            }
+            "zero" => index["objects"]["a"]["size"] = 0.into(),
+            "maximum" => index["objects"]["a"]["size"] = u64::MAX.into(),
+            _ => unreachable!(),
+        }
+        fs::create_dir(f.assets.join("indexes")).unwrap();
+        let path = f.assets.join("indexes/index.json");
+        let bytes = serde_json::to_vec(&index).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            collect(f.assets.clone(), Duration::ZERO).await.unwrap(),
+            1,
+            "{mode}"
+        );
+        assert!(root.path.is_file() && !garbage.path.exists());
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[async_std::test]
 async fn admission_excludes_asset_importers_and_age_keeps_recent_or_future_bytes() {
     let f = fixture().await;
     let object = f.import(b"young bytes");
@@ -398,6 +534,42 @@ async fn asset_replay_rechecks_new_sql_index_and_placement_roots_and_reimport_ag
         if mode != "reimport" {
             assert!(!f.intent(&object).exists());
         }
+    }
+}
+
+#[async_std::test]
+async fn asset_index_invalid_replay_schema_keeps_intents_until_a_fresh_valid_snapshot() {
+    for mode in ["duplicate", "flag", "size"] {
+        let f = fixture().await;
+        let object = f.import(b"pending deletion must not override unknown roots");
+        crash(&f, "intent").await;
+        let intent = fs::read(f.intent(&object)).unwrap();
+        fs::create_dir(f.assets.join("indexes")).unwrap();
+        let path = f.assets.join("indexes/new.json");
+        let hash = &object.digests.sha1;
+        let invalid = match mode {
+            "duplicate" => format!(r#"{{"objects":{{"a":{{"hash":"{hash}"}}}},"objects":{{}}}}"#),
+            "flag" => format!(r#"{{"objects":{{"a":{{"hash":"{hash}"}}}},"virtual":null}}"#),
+            "size" => format!(r#"{{"objects":{{"a":{{"hash":"{hash}","size":-1}}}}}}"#),
+            _ => unreachable!(),
+        };
+        fs::write(&path, invalid).unwrap();
+        assert!(
+            collect(f.assets.clone(), Duration::ZERO).await.is_err(),
+            "{mode}"
+        );
+        assert!(object.path.is_file());
+        assert_eq!(fs::read(f.intent(&object)).unwrap(), intent);
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"objects": {"a": {"hash": hash}}})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(collect(f.assets.clone(), Duration::ZERO).await.unwrap(), 0);
+        assert!(object.path.is_file() && !f.intent(&object).exists());
+        fs::write(&path, br#"{"objects":{}}"#).unwrap();
+        assert_eq!(collect(f.assets.clone(), Duration::ZERO).await.unwrap(), 1);
+        assert!(!object.path.exists());
     }
 }
 
