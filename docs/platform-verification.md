@@ -21,6 +21,7 @@
 | Windows native — dual-boot пользователь | Command из раздела «Воспроизведение», выполняемый на Windows | **Pending**: выполнит пользователь; commit land'ится с native Windows pending |
 | Real JVM detection (real JDK) | отдельный run `--include-ignored`, документирован ниже | PASS от 20 ноября: `probes_java_on_path` 1 passed, real JDK `27.0.1.0.3` |
 | Live providers — endpoint observations от 20 ноября | точные code-path URLs через curl, без credentials/user DB | Modrinth `/v2/search` → HTTP 200 real JSON; CurseForge `/v1/mods/search` без `x-api-key` → HTTP 403 «API Key missing or invalid» |
+| Live providers — кодовый путь от 20 ноября (этот commit) | 5 execution реального кода против live API из внешнего scratch-потребителя через public API | Modrinth search/dispatch/normalize/exact_release PASS; CurseForge: fail-closed `MissingCurseForgeKey` до сети; execution с invalid key → `Err Http(403)` |
 
 Здесь native означает ОС, на которой выполняется **core test binary**, не
 native GUI interaction. Windows GNU linking включает CLI и Rust test executables;
@@ -192,12 +193,45 @@ DTO/normalize/search поведение на реальных responses не п�
 этим шагом не объявляются PASS; `CURSEFORGE_API_KEY` на этой машине отсутствует.
 Raw JSON — локальный non-durable evidence.
 
+## Live-provider кодовый путь от 20 ноября (этот commit)
+
+Сеть на этой машине доступна. Реальный код core выполнен из **внешнего scratch-потребителя**
+`/tmp/opencode/core-scenarios` (path-dep на core, lock scratch изменён, repo lock не
+двигался) — только через public API: `ContentCatalog::new/search/releases/exact_release`,
+`modrinth::Modrinth::new/search/releases/exact_release`, `instance::content::model::{Provider}`,
+`catalog::types::Compatibility`, `utils::files::child`. Standard pipeline этого commit
+не пере-запускался: `620 library + 2 CLI + 2 integration + 18 doctests, 0 failed, 1 ignored`
+сохраняются; новых core-тестов этот шаг не добавляет (scratch binaries — не core tests).
+Build: locked-режим `check.sh` env (SQLx offline, openssl-3, `--offline` на scratch).
+Query/compatibility для наблюдений: `query=sodium`, `minecraft=1.21.1`, `loader=fabric`.
+
+Результаты (OBS-лог `/tmp/opencode/core-wine-evidence/d_live_providers.log` — локальный
+non-durable evidence):
+
+1. `ContentCatalog::search(Modrinth, …)` → `Ok`: `total=49`, `returned=20`, top hit
+   `AANobbMI|Sodium` — live dispatch по реального ответа.
+2. `Modrinth::releases` на top hit → `Ok`: `count=12`, first `SMxNOGZ6|file=sodium-fabric-0.8.13+mc1.21.1.jar`
+   `host=cdn.modrinth.com size=1574609 deps=0` — normalize по реальным responses; DTO-поля
+   (file_name/size/url host) заполнены против live данных.
+3. `ContentCatalog::exact_release(Modrinth, …)` на первый normalized release → результат
+   идентичен direct-provider normalize path (`SMxNOGZ6`, тот же file/host/size).
+4. Live code path CurseForge с intentionally invalid key → `Err Http(403)` — живой ответ
+   API, контракт fail-closed по auth выполнен кодом.
+5. Keyless call → `Err MissingCurseForgeKey` **in code** — error до network call,
+   подтверждает contract observation предыдущего commit'а уже самим кодом.
+
+Это **execution кодового пути против live responses** (live network calls, реальные DTO/normalize).
+Closes the observation-only gap для Modrinth-ветки; CurseForge success path открыт до
+`CURSEFORGE_API_KEY` (keyless fail-closed и invalid-key `Err` execution — закрыты этим
+шагом). Live providers этим шагом не объявляются полностью закрытыми.
+
 ## Что остаётся открытым
 
 P11-V02 **частичен**, не завершён: actual native Windows/macOS reports; manual
 isolated launch/install/content/recovery/normal close; реальные JVM/descendants
-(detected-properties probe — PASS выше), live providers (observation-уровня выше:
-Modrinth endpoint 200, code path не выполнялся; CurseForge открыт до
+(detected-properties probe — PASS выше; WINE-execution кодового пути — ниже; native
+Windows execution остаётся authoritative), live providers (Modrinth code path выполнен
+против live responses — см. секцию выше; CurseForge открыт до
 `CURSEFORGE_API_KEY`) и external concurrent FS/DB replacement. GUI проверка отложена
 пользователем, не отменена из критериев.
 Unix-only symlink/shell/crash fixtures в других модулях этим шагом не объявлены
