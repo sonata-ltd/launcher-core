@@ -4494,3 +4494,19 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "iced_animate"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "iced_luminate"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "iced_page_router"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "iced_texture_cache"
+version = "0.1.0"
