@@ -42,6 +42,12 @@ pub struct FileDigests {
     pub size_bytes: u64,
 }
 
+pub(crate) struct RetentionDigests {
+    pub(crate) sha256: String,
+    pub(crate) sha1: String,
+    pub(crate) size_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStamp {
     pub size_bytes: u64,
@@ -123,6 +129,48 @@ fn digest_regular_file(
     cancellation: &Cancellation,
     mut visit: impl FnMut(&[u8], u64) -> io::Result<()>,
 ) -> io::Result<(FileDigests, FileStamp)> {
+    let mut sha256 = Sha256::new();
+    let mut sha1 = Sha1::new();
+    let mut sha512 = Sha512::new();
+    let (size_bytes, stamp) = read_regular_chunks(path, cancellation, |bytes, total| {
+        visit(bytes, total)?;
+        sha256.update(bytes);
+        sha1.update(bytes);
+        sha512.update(bytes);
+        Ok(())
+    })?;
+
+    Ok((
+        FileDigests {
+            sha256: format!("{:x}", sha256.finalize()),
+            sha1: format!("{:x}", sha1.finalize()),
+            sha512: format!("{:x}", sha512.finalize()),
+            size_bytes,
+        },
+        stamp,
+    ))
+}
+
+pub(crate) fn retention_digests(path: &Path) -> io::Result<RetentionDigests> {
+    let mut sha256 = Sha256::new();
+    let mut sha1 = Sha1::new();
+    let (size_bytes, _) = read_regular_chunks(path, &Cancellation::new(), |bytes, _| {
+        sha256.update(bytes);
+        sha1.update(bytes);
+        Ok(())
+    })?;
+    Ok(RetentionDigests {
+        sha256: format!("{:x}", sha256.finalize()),
+        sha1: format!("{:x}", sha1.finalize()),
+        size_bytes,
+    })
+}
+
+fn read_regular_chunks(
+    path: &Path,
+    cancellation: &Cancellation,
+    visit: impl FnMut(&[u8], u64) -> io::Result<()>,
+) -> io::Result<(u64, FileStamp)> {
     cancellation.check()?;
 
     let metadata = fs::symlink_metadata(path)?;
@@ -138,16 +186,7 @@ fn digest_regular_file(
         return Err(io::Error::other("file changed before hashing"));
     }
 
-    let mut sha256 = Sha256::new();
-    let mut sha1 = Sha1::new();
-    let mut sha512 = Sha512::new();
-    let size_bytes = read_chunks(&mut input, Some(cancellation), |bytes, total| {
-        visit(bytes, total)?;
-        sha256.update(bytes);
-        sha1.update(bytes);
-        sha512.update(bytes);
-        Ok(())
-    })?;
+    let size_bytes = read_chunks(&mut input, Some(cancellation), visit)?;
 
     let after = FileStamp::from_metadata(&input.metadata()?);
     let path_after = fs::symlink_metadata(path)?;
@@ -159,13 +198,5 @@ fn digest_regular_file(
         return Err(io::Error::other("file changed during hashing"));
     }
 
-    Ok((
-        FileDigests {
-            sha256: format!("{:x}", sha256.finalize()),
-            sha1: format!("{:x}", sha1.finalize()),
-            sha512: format!("{:x}", sha512.finalize()),
-            size_bytes,
-        },
-        after,
-    ))
+    Ok((size_bytes, after))
 }

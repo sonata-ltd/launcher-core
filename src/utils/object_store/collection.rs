@@ -2,7 +2,7 @@
 //! Admission and a complete domain snapshot are required before constructing
 //! this capability; aliases are hints, never roots supplied by this module.
 use super::{catalog::read_regular, ObjectStore, StoreMaintenance};
-use crate::utils::{cancellation::Cancellation, files};
+use crate::utils::files;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -161,11 +161,7 @@ impl Collection {
                 {
                     continue;
                 }
-                let (digests, _) = files::digest::digest_file(
-                    &store.path_for(&hash)?,
-                    &Cancellation::new(),
-                    |_| {},
-                )?;
+                let digests = files::digest::retention_digests(&store.path_for(&hash)?)?;
                 if digests.sha256 != hash || retained.sha1.contains(&digests.sha1) {
                     continue;
                 }
@@ -200,8 +196,7 @@ impl Collection {
         } else {
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_file() => {
-                    let (digests, _) =
-                        files::digest::digest_file(&path, &Cancellation::new(), |_| {})?;
+                    let digests = files::digest::retention_digests(&path)?;
                     if digests.sha256 != intent.sha256
                         || digests.sha1 != intent.sha1
                         || digests.size_bytes != intent.size
