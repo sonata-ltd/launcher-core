@@ -157,27 +157,34 @@ pub async fn run(
     prepared: Prepared,
     libraries: PathBuf,
     minecraft: PathBuf,
-    game_root: PathBuf,
     java: PathBuf,
     cancel: &Cancel,
     op: &crate::data::registry::operation::handle::OperationHandle,
 ) -> Result<()> {
-    run_retained(
-        prepared, libraries, minecraft, game_root, java, cancel, op, None,
-    )
-    .await
+    run_retained(prepared, libraries, minecraft, java, cancel, op, None).await
 }
+
+/// Processors see this directory inside the installer work directory as
+/// `ROOT`. The instance game directory is never handed to installer code.
+const PROCESSOR_ROOT: &str = "processor-root";
 
 pub(crate) async fn run_retained(
     prepared: Prepared,
     libraries: PathBuf,
     minecraft: PathBuf,
-    game_root: PathBuf,
     java: PathBuf,
     cancel: &Cancel,
     op: &crate::data::registry::operation::handle::OperationHandle,
     java_use: Option<&crate::java::managed::process::JavaUse>,
 ) -> Result<()> {
+    let extracted = prepared.extracted.clone();
+    let game_root = async_std::task::spawn_blocking(move || {
+        files::directory::Directory::ensure_path(&extracted)?
+            .create_relative(Path::new(PROCESSOR_ROOT))
+    })
+    .await?
+    .path()
+    .to_owned();
     let mut tokens = HashMap::from([
         ("SIDE".into(), "client".into()),
         (
@@ -388,7 +395,6 @@ mod tests {
             prepared,
             libraries,
             temp.path().join("minecraft.jar"),
-            temp.path().into(),
             java,
             &Cancel::default(),
             &op,
@@ -423,6 +429,88 @@ mod tests {
         assert!(snapshots[2].lines.is_empty());
         assert_eq!(snapshots[1].lines[0].text, "processor output");
         assert_eq!(snapshots[3].lines[0].text, "processor output");
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn processors_receive_a_private_root_inside_the_installer_work_directory() {
+        use crate::data::registry::operation::OperationRegistry;
+        use crate::{bus::EventBus, data::registry::operation::message::stage::OperationStage};
+        use std::{io::Write, os::unix::fs::PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let libraries = temp.path().join("generation/maven");
+        let jar = libraries.join(MavenCoordinate::parse("g:processor:1").unwrap().path());
+        std::fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(jar).unwrap());
+        zip.start_file(
+            "META-INF/MANIFEST.MF",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"Manifest-Version: 1.0\nMain-Class: example.Processor\n\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        let java = temp.path().join("fake-java");
+        std::fs::write(
+            &java,
+            "#!/bin/sh\nfor argument; do root=$argument; done\nprintf processor > \"$root/marker\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let work = temp.path().join("generation/work/installer");
+        let prepared = Prepared {
+            profile: serde_json::from_value(json!({
+                "minecraft": "1.20.1", "json": "/version.json",
+                "processors": [{"jar": "g:processor:1", "sides": ["client"], "args": ["{ROOT}"]}]
+            }))
+            .unwrap(),
+            installer: temp.path().join("installer.jar"),
+            extracted: work.clone(),
+        };
+        let registry = OperationRegistry::new(EventBus::new(8));
+        let op = registry.begin(
+            "Install".into(),
+            vec![OperationStage::RunModloaderProcessors],
+        );
+        run(
+            prepared,
+            libraries,
+            temp.path().join("minecraft.jar"),
+            java,
+            &Cancel::default(),
+            &op,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(work.join(PROCESSOR_ROOT).join("marker")).unwrap(),
+            b"processor"
+        );
+        let mut written = Vec::new();
+        for entry in walk(temp.path()) {
+            if entry.file_name() == Some(std::ffi::OsStr::new("marker")) {
+                written.push(entry);
+            }
+        }
+        assert_eq!(written, [work.join(PROCESSOR_ROOT).join("marker")]);
+    }
+
+    #[cfg(unix)]
+    fn walk(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
     }
 
     #[async_std::test]

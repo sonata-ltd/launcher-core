@@ -247,7 +247,6 @@ impl InstanceService {
 
         let request = InstallRequest {
             instance_id: rec.id,
-            instance_dir_name: rec.dir.clone(),
             game_version: rec.version.clone(),
             manifest_url: rec.manifest_url.clone(),
             meta_provider,

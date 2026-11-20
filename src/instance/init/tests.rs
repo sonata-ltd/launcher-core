@@ -331,7 +331,6 @@ async fn failed_reinstall_removes_new_generation_and_preserves_published_install
     );
     let request = InstallRequest {
         instance_id: 1.into(),
-        instance_dir_name: "test".into(),
         game_version: "1.12.2".into(),
         manifest_url: "https://example.invalid/unused".into(),
         meta_provider: MetaProvider::Prism,
@@ -411,7 +410,6 @@ async fn empty_installation() -> (
 fn vanilla_request() -> InstallRequest {
     InstallRequest {
         instance_id: 1.into(),
-        instance_dir_name: "test".into(),
         game_version: "1.20.1".into(),
         manifest_url: "https://example.invalid/unused".into(),
         meta_provider: MetaProvider::Prism,

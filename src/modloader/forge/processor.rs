@@ -26,6 +26,34 @@ pub struct ProcessorCommand {
     pub retention_root: PathBuf,
 }
 
+/// Private temporary directory created inside the processor work directory.
+const PROCESSOR_TEMP: &str = "tmp";
+
+/// Variables a JVM needs to start and to decode non-ASCII paths. Everything
+/// else, including JVM option injection variables, is not inherited.
+#[cfg(windows)]
+const INHERITED_ENVIRONMENT: &[&str] = &["SystemRoot", "SystemDrive", "windir"];
+#[cfg(not(windows))]
+const INHERITED_ENVIRONMENT: &[&str] = &["LANG", "LC_ALL", "LC_CTYPE"];
+
+fn confine_environment(command: &mut Command, temporary: &std::path::Path) {
+    command.env_clear();
+    for name in INHERITED_ENVIRONMENT {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    for name in ["TMPDIR", "TMP", "TEMP"] {
+        command.env(name, temporary);
+    }
+}
+
+fn java_temporary_property(temporary: &std::path::Path) -> std::ffi::OsString {
+    let mut property = std::ffi::OsString::from("-Djava.io.tmpdir=");
+    property.push(temporary);
+    property
+}
+
 fn output_matches(path: &std::path::Path, expected: &str, cancel: &Cancellation) -> Result<bool> {
     if !files::hash_valid(expected, 40) {
         return Err(ModloaderError::Invalid(
@@ -120,6 +148,7 @@ async fn run_with_log_limit(
     let classpath = std::env::join_paths(&command.classpath)
         .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
 
+    let temporary = cwd.create_relative(std::path::Path::new(PROCESSOR_TEMP))?;
     let pin = crate::utils::process_pin::ProcessPin::create(&command.retention_root)?;
     let java_pin = match java_use.map(|java_use| java_use.child_pin()).transpose() {
         Ok(pin) => pin,
@@ -130,7 +159,10 @@ async fn run_with_log_limit(
     };
     let pins: Vec<_> = std::iter::once(&pin).chain(java_pin.iter()).collect();
     crate::utils::process_pin::prepare_spawn(std::path::Path::new(&command.java), &pins)?;
-    let child = Command::new(&command.java)
+    let mut process = Command::new(&command.java);
+    confine_environment(&mut process, temporary.path());
+    let child = process
+        .arg(java_temporary_property(temporary.path()))
         .arg("-cp")
         .arg(classpath)
         .arg(&command.main_class)

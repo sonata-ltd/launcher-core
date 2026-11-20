@@ -251,3 +251,32 @@ async fn outer_completion_after_processor_drop_cannot_acknowledge_unknown_java_c
     assert!(!allows_cleanup(dir.path()).unwrap());
     assert!(!allows_cleanup(&java_root.join(".managed")).unwrap());
 }
+
+#[async_std::test]
+async fn processor_environment_is_not_inherited_and_temporary_files_stay_private() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("SONATA_PROCESSOR_ENVIRONMENT_PROBE", "inherited");
+    let command = command(
+        dir.path(),
+        "printf '%s\\n%s\\n%s\\n%s\\n' \"${SONATA_PROCESSOR_ENVIRONMENT_PROBE-absent}\" \
+         \"${HOME-absent}\" \"$TMPDIR\" \"$1\"",
+    );
+    let log = command.log.clone();
+    let result = run(command, &Cancellation::new(), |_| {}).await;
+    std::env::remove_var("SONATA_PROCESSOR_ENVIRONMENT_PROBE");
+    result.unwrap();
+
+    let temporary = dir.path().join(PROCESSOR_TEMP);
+    assert!(temporary.is_dir());
+    let observed = fs::read_to_string(log).unwrap();
+    let lines: Vec<_> = observed.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "absent",
+            "absent",
+            temporary.to_str().unwrap(),
+            &format!("-Djava.io.tmpdir={}", temporary.display()),
+        ]
+    );
+}

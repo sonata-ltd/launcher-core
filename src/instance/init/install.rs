@@ -53,7 +53,6 @@ fn complete(op: &OperationHandle, stage: OperationStage, started: Instant) {
 
 pub(crate) struct InstallRequest {
     pub(crate) instance_id: InstanceId,
-    pub(crate) instance_dir_name: String,
     pub(crate) game_version: String,
     pub(crate) manifest_url: String,
     pub(crate) meta_provider: MetaProvider,
@@ -312,21 +311,8 @@ async fn install<'a>(
     complete(context.op, OperationStage::DownloadLibs, started);
 
     if let Some(prepared) = forge_installer {
-        use crate::utils::files::{self, directory::Directory};
-
-        let instances = context.paths.instances();
-        let instance = std::path::Path::new(&request.instance_dir_name);
-        files::relative(instance)?;
-        let game_directory = if let Some(lease) = context.db.layout_lease.as_deref() {
-            lease.create_instance_directory(&instances.join(instance))?
-        } else {
-            std::fs::create_dir_all(instances)?;
-            Directory::open(&instances.canonicalize()?)?.create_relative(instance)?
-        };
-        game_directory.verify_location()?;
         modloader::forge::finalize_retained(
             forge::FinalizeRequest {
-                game_dir: dunce::simplified(game_directory.path()),
                 game_version: &request.game_version,
                 prepared,
                 maven_dir: workspace.maven_dir(),

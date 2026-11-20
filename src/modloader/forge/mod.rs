@@ -165,7 +165,6 @@ pub async fn prepare<'a>(
 }
 
 pub struct FinalizeRequest<'a> {
-    pub game_dir: &'a Path,
     pub game_version: &'a str,
     pub prepared: Prepared,
     pub maven_dir: &'a Path,
@@ -239,7 +238,6 @@ async fn finalize_impl<'a>(
                 request.prepared,
                 request.maven_dir.to_path_buf(),
                 request.maven_dir.join(client),
-                request.game_dir.to_path_buf(),
                 PathBuf::from(&java.exec_path),
                 context.cancel,
                 context.op,
@@ -252,7 +250,6 @@ async fn finalize_impl<'a>(
                 request.prepared,
                 request.maven_dir.to_path_buf(),
                 request.maven_dir.join(client),
-                request.game_dir.to_path_buf(),
                 PathBuf::from(&java.exec_path),
                 context.cancel,
                 context.op,
