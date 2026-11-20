@@ -15,6 +15,7 @@ use crate::{
 pub trait InstanceSettingsStore: Send + Sync {
     async fn get(&self, id: InstanceId) -> Result<Option<InstanceSettings>>;
     async fn patch(&self, id: InstanceId, patch: &SettingsPatch) -> Result<bool>;
+    async fn assign_missing_java(&self, id: InstanceId, runtime: i64) -> Result<bool>;
     async fn global(&self) -> Result<GlobalSettings>;
 }
 
@@ -117,5 +118,21 @@ impl InstanceSettingsStore for DbInstanceSettingsStore {
         .await?;
 
         Ok(row.unwrap_or_default())
+    }
+
+    async fn assign_missing_java(&self, id: InstanceId, runtime: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE instances_settings SET java_runtime=?
+             WHERE instance_id=?
+               AND (java_runtime IS NULL OR NOT EXISTS(
+                    SELECT 1 FROM java_runtimes WHERE id=instances_settings.java_runtime))
+               AND EXISTS(SELECT 1 FROM java_runtimes WHERE id=?)",
+        )
+        .bind(runtime)
+        .bind(id.get())
+        .bind(runtime)
+        .execute(&self.db.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 }

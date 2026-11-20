@@ -378,6 +378,16 @@ impl InstanceService {
 
         match select::pick_with_policy(&runtimes, policy, select::host_arch()) {
             Some((java, fit)) => {
+                #[cfg(test)]
+                tests::pause_auto_selection(self.paths.root()).await;
+                let runtime = java.id;
+                if !self
+                    .settings
+                    .assign_missing_java(rec.id, runtime, &self.bus)
+                    .await?
+                {
+                    return Ok(());
+                }
                 tracing::info!(
                     instance = %rec.id,
                     runtime = java.id,
@@ -386,19 +396,12 @@ impl InstanceService {
                     "java auto-selected"
                 );
 
-                let runtime = java.id;
-                let patch = SettingsPatch {
-                    java_runtime: Some(Some(runtime)),
-                    ..Default::default()
-                };
-
-                self.update_settings(rec.id, &patch).await?;
                 self.bus.publish(JavaEvent::AutoSelected {
                     instance: rec.id,
                     runtime,
                 });
             }
-            None if notify => {
+            None if notify && !self.has_own_java(rec.id).await? => {
                 self.bus.publish(JavaEvent::NoSuitableRuntime {
                     instance: rec.id,
                     name: rec.name.clone(),
@@ -564,5 +567,108 @@ impl InstanceService {
             .get(java_id)
             .await?
             .ok_or(InstanceError::JavaRuntimeMissing(java_id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::channel::oneshot;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+    };
+
+    type SelectionHook = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static SELECTION: OnceLock<Mutex<HashMap<PathBuf, SelectionHook>>> = OnceLock::new();
+
+    pub(super) async fn pause_auto_selection(root: &Path) {
+        let hook = SELECTION
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(root);
+        if let Some((entered, resume)) = hook {
+            let _ = entered.send(());
+            let _ = resume.await;
+        }
+    }
+
+    #[async_std::test]
+    async fn java_auto_selection_preserves_a_manual_choice_made_before_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::GlobalState::new(crate::Config {
+            root_override: Some(temp.path().into()),
+            discover_java_on_startup: false,
+            ..crate::Config::init()
+        })
+        .await
+        .unwrap();
+        let instances = core.instances();
+        let record = instances
+            .create(
+                "Fixture".into(),
+                "1.20.1".into(),
+                "fixture".into(),
+                "prism".into(),
+            )
+            .await
+            .unwrap();
+        let java = core.java();
+        let runtime = |major| crate::java::model::NewJavaRuntime {
+            version: Some(format!("{major}.0.1")),
+            major: Some(major),
+            arch: None,
+            exec_path: Some(temp.path().join(format!("java-{major}"))),
+            home_path: Some(temp.path().into()),
+            vendor: None,
+            source: Default::default(),
+        };
+        java.init_external(runtime(17)).await.unwrap();
+        let manual = java.init_external(runtime(21)).await.unwrap();
+        let mut events = core.bus.subscribe();
+        let (entered, waiting) = oneshot::channel();
+        let (resume, gate) = oneshot::channel();
+        SELECTION
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(temp.path().into(), (entered, gate));
+        let policy = JavaPolicy {
+            majors: vec![17],
+            allow_newer: false,
+        };
+        let automatic = instances.auto_select_retained(&record, &policy, true);
+        let choose = async {
+            async_std::future::timeout(std::time::Duration::from_secs(10), waiting)
+                .await
+                .unwrap()
+                .unwrap();
+            instances
+                .update_settings(
+                    record.id,
+                    &SettingsPatch {
+                        java_runtime: Some(Some(manual.id)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            resume.send(()).unwrap();
+        };
+        let (result, ()) = futures::join!(automatic, choose);
+        result.unwrap();
+        assert_eq!(
+            instances.settings(record.id).await.unwrap().java_runtime,
+            Some(manual.id)
+        );
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(
+                event,
+                crate::bus::event::CoreEvent::Java(JavaEvent::AutoSelected { .. })
+            ));
+        }
+        core.shutdown().await;
     }
 }

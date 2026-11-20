@@ -85,6 +85,20 @@ impl SettingsService {
 
         Ok(())
     }
+
+    pub(in crate::instance) async fn assign_missing_java(
+        &self,
+        id: InstanceId,
+        runtime: i64,
+        bus: &crate::bus::EventBus,
+    ) -> Result<bool> {
+        let _updates = self.updates.lock().await;
+        let changed = self.storage.assign_missing_java(id, runtime).await?;
+        if changed {
+            bus.publish(crate::instance::event::InstanceEvent::SettingsChanged(id));
+        }
+        Ok(changed)
+    }
 }
 
 #[cfg(test)]
