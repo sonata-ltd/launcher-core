@@ -42,6 +42,12 @@ pub(crate) struct StoreAccess {
     _lock: Arc<StoreLock>,
 }
 
+impl StoreAccess {
+    pub(crate) fn directory(&self) -> &Arc<Directory> {
+        &self.directory
+    }
+}
+
 impl Deref for StoreAccess {
     type Target = ObjectStore;
 

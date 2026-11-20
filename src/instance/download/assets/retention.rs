@@ -6,7 +6,7 @@ use crate::{
     data::db::{retention::LockedDatabases, Database, DbError},
     utils::{
         cancellation::Cancellation,
-        files,
+        files::{self, directory::Directory},
         object_store::{
             catalog::{read_regular, RootCatalog},
             collection::{Collection, Roots},
@@ -25,12 +25,16 @@ type Result<T> = std::result::Result<T, DbError>;
 
 pub(super) async fn attach(
     db: Arc<Database>,
-    objects: PathBuf,
+    objects: &Arc<Directory>,
     cancel: Cancellation,
 ) -> Result<()> {
+    let objects = objects.clone();
     async_std::task::spawn(async move {
-        let root = files::child(&objects, Path::new(".sonata-cas")).map_err(io::Error::other)?;
-        let store = ObjectStore::new(root);
+        let root = async_std::task::spawn_blocking(move || {
+            objects.create_relative(Path::new(".sonata-cas"))
+        })
+        .await?;
+        let store = ObjectStore::new(root.path().to_owned());
         let access = store.access(&cancel).await?;
         let owner = db.retention_owner().await.ok().flatten();
         if RootCatalog::covers(access.root(), owner.as_ref())? {

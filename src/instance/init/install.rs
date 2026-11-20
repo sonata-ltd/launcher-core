@@ -300,9 +300,9 @@ async fn install<'a>(
         .op
         .start_stage_determinable(OperationStage::DownloadLibs);
 
-    artifacts::hydrate(
+    artifacts::hydrate_in(
         &wanted,
-        workspace.maven_dir(),
+        &workspace.open_maven_dir()?,
         &blobs_path,
         context.cancel,
         context.op,

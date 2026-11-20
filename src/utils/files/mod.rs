@@ -140,13 +140,33 @@ where
     if let Some(cancel) = cancel {
         cancel.check()?;
     }
-    let mut input = fs::File::open(path)?;
+    digest_reader::<D>(fs::File::open(path)?, cancel)
+}
+
+fn digest_reader<D: Digest>(
+    mut input: impl std::io::Read,
+    cancel: Option<&super::cancellation::Cancellation>,
+) -> std::io::Result<String>
+where
+    sha1::digest::Output<D>: std::fmt::LowerHex,
+{
     let mut digest = D::new();
     digest::read_chunks(&mut input, cancel, |chunk, _| {
         digest.update(chunk);
         Ok(())
     })?;
     Ok(format!("{:x}", digest.finalize()))
+}
+
+pub(crate) fn matches_open_file(
+    input: std::io::Result<fs::File>,
+    sha1: &str,
+    cancel: &super::cancellation::Cancellation,
+) -> std::io::Result<bool> {
+    matches_digest(
+        input.and_then(|file| digest_reader::<Sha1>(file, Some(cancel))),
+        sha1,
+    )
 }
 
 pub fn matches(path: &Path, sha1: &str) -> std::io::Result<bool> {

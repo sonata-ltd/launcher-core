@@ -23,7 +23,10 @@ use crate::{
     },
     utils::{
         cancellation::{Cancellation, Cancelled},
-        download::{buffer::BufferPool, error::DownloadError, Download, Downloadable},
+        download::{
+            buffer::BufferPool, destination::Destination, error::DownloadError, Download,
+            Downloadable,
+        },
     },
 };
 
@@ -101,8 +104,15 @@ impl Syncer {
         T: Downloadable + Clone + Send + Sync + 'static,
         F: Fn(&T) -> PathBuf,
     {
-        self.run_with_cancellation(wanted, save_path, store, op, stage, &Cancellation::new())
-            .await
+        self.run_with_cancellation(
+            wanted,
+            |item| save_path(item).into(),
+            store,
+            op,
+            stage,
+            &Cancellation::new(),
+        )
+        .await
     }
 
     pub(crate) async fn run_with_cancellation<T, F>(
@@ -116,7 +126,7 @@ impl Syncer {
     ) -> Result<SyncOutcome<T>, SyncError>
     where
         T: Downloadable + Clone + Send + Sync + 'static,
-        F: Fn(&T) -> PathBuf,
+        F: Fn(&T) -> Destination,
     {
         cancel.check()?;
         let wanted = dedup_by_destination(wanted);
@@ -214,7 +224,7 @@ impl Syncer {
 
     fn spawn_attempt<T>(
         &self,
-        save_path: PathBuf,
+        save_path: Destination,
         item: T,
         attempt: usize,
         delay: Duration,
@@ -224,7 +234,7 @@ impl Syncer {
         T: Downloadable + Clone + Send + Sync + 'static,
     {
         let fallback = item.clone();
-        let download = Download::new(save_path, item, Arc::clone(&self.buffers));
+        let download = Download::to(save_path, item, Arc::clone(&self.buffers));
 
         task::spawn(async move {
             if !delay.is_zero() {

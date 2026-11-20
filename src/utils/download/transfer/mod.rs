@@ -1,5 +1,6 @@
 pub mod error;
 use super::{
+    destination::{Destination, Target},
     error::DownloadError as StreamError,
     stream::{self, Length, Stream},
 };
@@ -8,12 +9,17 @@ use crate::{
     utils::files,
     utils::object_store::ObjectStore,
 };
-use async_std::{fs, task};
+#[cfg(test)]
+use async_std::fs;
+use async_std::task;
 #[cfg(test)]
 use sha1::Digest;
 use sha1::Sha1;
 use std::{
+    ffi::OsStr,
+    io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -28,36 +34,82 @@ pub async fn download(
     expected: Option<&str>,
     cancel: &Cancel,
 ) -> Result<String> {
+    download_in(url, destination.to_owned().into(), expected, cancel).await
+}
+
+pub(crate) async fn download_in(
+    url: &str,
+    destination: Destination,
+    expected: Option<&str>,
+    cancel: &Cancel,
+) -> Result<String> {
+    validate_hash(expected)?;
+    cancel.check()?;
+    let target = Arc::new(task::spawn_blocking(move || destination.bind()).await?);
+    download_to(url, target, expected, cancel).await
+}
+
+fn validate_hash(expected: Option<&str>) -> Result<()> {
     if let Some(hash) = expected {
         if !files::hash_valid(hash, 40) {
             return Err(DownloadError::Invalid("invalid SHA-1".into()));
         }
     }
+    Ok(())
+}
 
+#[cfg(all(test, any(unix, windows)))]
+#[async_std::test]
+async fn download_declines_a_cached_file_in_a_redirected_directory() {
+    let scope = tempfile::tempdir().unwrap();
+    let parent = scope.path().join("libraries");
+    let other = scope.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("library.jar"), b"keep these bytes").unwrap();
+    let digest = files::sha1_file(&other.join("library.jar")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&other, &parent).unwrap();
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&parent)
+        .arg(&other)
+        .status()
+        .unwrap()
+        .success());
+
+    let result = download(
+        "unused-url",
+        &parent.join("library.jar"),
+        Some(&digest),
+        &Cancel::new(),
+    )
+    .await;
+
+    assert!(matches!(result, Err(DownloadError::Io(_))));
+    assert_eq!(
+        std::fs::read(other.join("library.jar")).unwrap(),
+        b"keep these bytes"
+    );
+}
+
+async fn download_to(
+    url: &str,
+    target: Arc<Target>,
+    expected: Option<&str>,
+    cancel: &Cancel,
+) -> Result<String> {
     cancel.check()?;
-
     if let Some(hash) = expected {
-        let path = destination.to_owned();
-        let hash = hash.to_owned();
-
+        let expected = hash.to_owned();
         let token = cancel.clone();
-        let cached =
-            task::spawn_blocking(move || files::matches_cancellable(&path, &hash, &token)).await;
+        let check = target.clone();
+        let cached = task::spawn_blocking(move || check.matches(&expected, &token)).await;
         cancel.check()?;
         if cached? {
-            return Ok(expected.unwrap().to_owned());
+            return Ok(hash.to_owned());
         }
     }
-
-    let parent = destination
-        .parent()
-        .ok_or_else(|| DownloadError::Invalid("download path has no parent".into()))?;
-
-    fs::create_dir_all(parent).await?;
-
-    let file_name = destination
-        .file_name()
-        .ok_or_else(|| DownloadError::Invalid("download path has no file name".into()))?;
 
     const MAX_ATTEMPTS: u32 = 3;
     for attempt in 1..=MAX_ATTEMPTS {
@@ -69,12 +121,11 @@ pub async fn download(
                 stream::response(url, false, Some("SonataLauncher/0.1"), cancel)
                     .await
                     .map_err(map_stream_error)?;
-            let temporary = tempfile::TempPath::from_path(super::temp_path(parent, file_name));
-            let _owner = super::sweep::PartialOwner::create(&temporary)?;
-            let mut output = fs::File::create(&temporary as &Path).await?;
+            let directory = target.clone();
+            let (temporary, mut output) = task::spawn_blocking(move || directory.stage()).await?;
             let hash = Stream {
                 url: final_url.as_str(),
-                destination: &temporary,
+                destination: &temporary.path,
                 length: Length::UpTo(MAX_ARTIFACT_BYTES),
                 cancel,
             }
@@ -95,9 +146,14 @@ pub async fn download(
             drop(output);
             cancel.check()?;
 
-            let target = destination.to_owned();
-            task::spawn_blocking(move || temporary.persist(target).map_err(|error| error.error))
-                .await?;
+            let destination = target.clone();
+            let token = cancel.clone();
+            task::spawn_blocking(move || -> Result<()> {
+                token.check()?;
+                temporary.publish(&destination.name)?;
+                Ok(())
+            })
+            .await?;
 
             Ok(hash)
         }
@@ -138,15 +194,36 @@ pub async fn place(
     blobs: &Path,
     cancel: &Cancel,
 ) -> Result<String> {
+    place_in(url, path.to_owned().into(), expected, blobs, cancel).await
+}
+
+pub(crate) async fn place_in(
+    url: &str,
+    destination: Destination,
+    expected: Option<&str>,
+    blobs: &Path,
+    cancel: &Cancel,
+) -> Result<String> {
+    validate_hash(expected)?;
     cancel.check()?;
     let access = ObjectStore::new(blobs.to_owned()).access(cancel).await;
     cancel.check()?;
     let access = access?;
-    let index = blobs.join("urls").join(files::sha256(url.as_bytes()));
-    let cached = async_std::fs::read_to_string(&index)
-        .await
-        .ok()
-        .filter(|s| files::hash_valid(s, 40));
+    let target = Arc::new(task::spawn_blocking(move || destination.bind()).await?);
+    let index = files::sha256(url.as_bytes());
+    let read_index = index.clone();
+    let reader = access.clone();
+    let cached = task::spawn_blocking(move || -> io::Result<String> {
+        let urls = reader.directory().open_relative(Path::new("urls"))?;
+        let mut hash = String::new();
+        urls.open_file(OsStr::new(&read_index))?
+            .take(41)
+            .read_to_string(&mut hash)?;
+        Ok(hash)
+    })
+    .await
+    .ok()
+    .filter(|value| files::hash_valid(value, 40));
 
     let expected = expected.or(cached.as_deref());
 
@@ -157,7 +234,7 @@ pub async fn place(
         }
         let legacy_blob = blobs.join(hash.to_ascii_lowercase());
         let store = access.clone();
-        let target = path.to_owned();
+        let target = target.clone();
         let digest = hash.to_owned();
         let cancellation = cancel.clone();
         let placed = task::spawn_blocking(move || -> Result<bool> {
@@ -177,7 +254,12 @@ pub async fn place(
                     Ok(())
                 })?
             };
-            files::placement::copy_replace(&object.path, &target, &cancellation)?;
+            files::placement::copy_replace_in(
+                &object.path,
+                &target.directory,
+                &target.name,
+                &cancellation,
+            )?;
             Ok(true)
         })
         .await;
@@ -192,17 +274,27 @@ pub async fn place(
         }
     }
 
-    let hash = download(url, path, expected, cancel).await?;
+    let hash = download_to(url, target.clone(), expected, cancel).await?;
 
-    fs::create_dir_all(blobs).await?;
-
-    cache_blob(path, access.clone(), &hash, cancel).await?;
+    cache_blob(&target.path(), access.clone(), &hash, cancel).await?;
 
     let body = hash.as_bytes().to_vec();
-    let writer = access.clone();
-    async_std::task::spawn_blocking(move || {
-        let _access = writer;
-        files::atomic_write(&index, &body)
+    let token = cancel.clone();
+    task::spawn_blocking(move || -> Result<()> {
+        token.check()?;
+        let urls = access.directory().create_relative(Path::new("urls"))?;
+        let name = OsStr::new(&index);
+        urls.with_staged_file(
+            |output| {
+                output.write_all(&body)?;
+                output.sync_all()
+            },
+            |staged, ()| {
+                urls.require_regular_or_missing(name)?;
+                urls.replace(staged, name)
+            },
+        )?;
+        Ok(())
     })
     .await?;
 

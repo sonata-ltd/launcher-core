@@ -5,8 +5,9 @@ use std::time::Duration;
 use std::{path::PathBuf, sync::Arc};
 
 use crate::utils::cancellation::Cancellation;
-use async_std::fs::{create_dir_all, File};
+use async_std::fs::File;
 use async_std::future::timeout;
+use async_std::task;
 #[cfg(test)]
 use sha1::Digest;
 use sha1::Sha1;
@@ -15,7 +16,10 @@ use uuid::Uuid;
 use crate::utils::download::buffer::BufferPool;
 use crate::utils::download::error::{DownloadError, Result};
 
+use self::destination::Destination;
+
 pub mod buffer;
+pub(crate) mod destination;
 pub mod error;
 pub mod json;
 pub(crate) mod metadata_cache;
@@ -125,7 +129,7 @@ pub(crate) async fn download_manifest_bytes(url: &str) -> Result<Vec<u8>> {
 }
 
 pub struct Download<T: Downloadable> {
-    save_path: PathBuf,
+    destination: Destination,
     object: T,
     buffers_pool: Arc<BufferPool>,
 }
@@ -143,8 +147,12 @@ pub trait Downloadable {
 
 impl<T: Downloadable + Send + Sync + 'static> Download<T> {
     pub fn new(save_path: PathBuf, object: T, buffers_pool: Arc<BufferPool>) -> Download<T> {
+        Self::to(save_path.into(), object, buffers_pool)
+    }
+
+    pub(crate) fn to(destination: Destination, object: T, buffers_pool: Arc<BufferPool>) -> Self {
         Download {
-            save_path,
+            destination,
             object,
             buffers_pool,
         }
@@ -156,66 +164,73 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
 
     pub(crate) async fn download_with_cancellation(self, cancel: &Cancellation) -> Result<T> {
         cancel.check()?;
-        let (save_dir, file_name) = match (self.save_path.parent(), self.save_path.file_name()) {
-            (Some(dir), Some(name)) => (dir, name),
-            _ => {
-                return Err(DownloadError::InvalidSavePath {
-                    path: self.save_path.clone(),
-                })
-            }
-        };
-
-        create_dir_all(save_dir)
-            .await
-            .map_err(|e| DownloadError::DirectoryCreation {
-                path: save_dir.to_path_buf(),
-                source: e,
+        let Self {
+            destination,
+            object,
+            buffers_pool,
+        } = self;
+        let final_path = destination.path();
+        let save_dir = final_path
+            .parent()
+            .filter(|_| final_path.file_name().is_some())
+            .ok_or_else(|| DownloadError::InvalidSavePath {
+                path: final_path.clone(),
             })?;
-
-        let temporary = tempfile::TempPath::from_path(temp_path(save_dir, file_name));
-        let _owner =
-            sweep::PartialOwner::create(&temporary).map_err(|source| DownloadError::FileWrite {
-                path: temporary.to_path_buf(),
+        let target = task::spawn_blocking(move || destination.bind())
+            .await
+            .map_err(|source| DownloadError::DirectoryCreation {
+                path: save_dir.to_owned(),
                 source,
             })?;
-        self.fetch_to(&temporary, cancel).await?;
+        let final_path = target.path();
+        let (target, partial) = task::spawn_blocking(move || {
+            let partial = target.stage();
+            (target, partial)
+        })
+        .await;
+        let (temporary, mut output) = partial.map_err(|source| DownloadError::FileCreation {
+            path: final_path.clone(),
+            source,
+        })?;
+        Self::fetch_to(&object, &buffers_pool, &temporary.path, &mut output, cancel).await?;
+        drop(output);
         cancel.check()?;
-        let final_path = self.save_path;
-        async_std::task::spawn_blocking(move || {
+        let cancel = cancel.clone();
+        task::spawn_blocking(move || -> Result<()> {
+            cancel.check()?;
+            let from = temporary.path.clone();
             temporary
-                .persist(&final_path)
-                .map_err(|error| DownloadError::FileCommit {
-                    from: error.path.to_path_buf(),
+                .publish(&target.name)
+                .map_err(|source| DownloadError::FileCommit {
+                    from,
                     to: final_path,
-                    source: error.error,
+                    source,
                 })
         })
         .await?;
-        Ok(self.object)
+        Ok(object)
     }
 
-    async fn fetch_to(&self, temp_path: &Path, cancel: &Cancellation) -> Result<()> {
-        let (mut response, url) =
-            stream::response(self.object.get_url(), false, None, cancel).await?;
-        tracing::debug!(name = %self.object.get_name(), url = %http::diagnostic_url(url.as_str()), "downloading");
-        let mut file =
-            File::create(temp_path)
-                .await
-                .map_err(|source| DownloadError::FileCreation {
-                    path: temp_path.to_owned(),
-                    source,
-                })?;
+    async fn fetch_to(
+        object: &T,
+        buffers_pool: &BufferPool,
+        temp_path: &Path,
+        file: &mut File,
+        cancel: &Cancellation,
+    ) -> Result<()> {
+        let (mut response, url) = stream::response(object.get_url(), false, None, cancel).await?;
+        tracing::debug!(name = %object.get_name(), url = %http::diagnostic_url(url.as_str()), "downloading");
 
-        let mut guard = cancel.run(self.buffers_pool.acquire()).await?;
+        let mut guard = cancel.run(buffers_pool.acquire()).await?;
         let actual = stream::Stream {
             url: url.as_str(),
             destination: temp_path,
             length: stream::Length::UpTo(u64::MAX),
             cancel,
         }
-        .copy::<Sha1>(&mut response, &mut file, guard.as_mut_slice(), |_| {})
+        .copy::<Sha1>(&mut response, file, guard.as_mut_slice(), |_| {})
         .await?;
-        let expected = self.object.get_hash().to_lowercase();
+        let expected = object.get_hash().to_lowercase();
 
         if actual != expected {
             return Err(DownloadError::ChecksumMismatch {
@@ -231,8 +246,6 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
                 path: temp_path.to_path_buf(),
                 source: e,
             })?;
-
-        drop(file);
 
         Ok(())
     }

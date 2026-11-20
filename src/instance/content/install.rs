@@ -12,7 +12,10 @@ use crate::{
     },
     instance::model::InstanceId,
     utils::{
-        download::transfer::{self, Cancel},
+        download::{
+            destination::Destination,
+            transfer::{self, Cancel},
+        },
         files::{
             self,
             digest::{copy_and_digest, digest_file},
@@ -152,8 +155,16 @@ async fn execute_preparing(
                     super::store::storage::register_leased(&db, &object.digests, true, id).await?;
                 (object, object_id)
             } else {
-                let download = stage.downloads()?.join(format!("{index}.jar"));
-                transfer::download(&file.url, &download, file.sha1.as_deref(), cancel).await?;
+                let directory = stage.downloads_directory();
+                let name = format!("{index}.jar");
+                let download = directory.path().join(&name);
+                transfer::download_in(
+                    &file.url,
+                    Destination::Within(directory.clone(), name.into()),
+                    file.sha1.as_deref(),
+                    cancel,
+                )
+                .await?;
                 let expected = file.clone();
                 import_and_register(&db, store.clone(), download, id, cancel, move |hashes| {
                     if !expected.matches(hashes) {

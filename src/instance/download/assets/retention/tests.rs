@@ -23,9 +23,13 @@ async fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let assets = directory.path().join("assets");
     let db = database(&directory.path().join("assets.db")).await;
-    attach(db.clone(), assets.join("objects"), Cancellation::new())
-        .await
-        .unwrap();
+    attach(
+        db.clone(),
+        &Directory::ensure_path(&assets.join("objects")).unwrap(),
+        Cancellation::new(),
+    )
+    .await
+    .unwrap();
     let store = Arc::new(ObjectStore::new(assets.join("objects/.sonata-cas")));
     Fixture {
         directory,
@@ -107,9 +111,13 @@ async fn all_asset_databases_and_their_identities_are_required_not_only_the_curr
         let object = f.import(b"other owner input");
         let path = f.directory.path().join("other.db");
         let db = database(&path).await;
-        attach(db.clone(), f.assets.join("objects"), Cancellation::new())
-            .await
-            .unwrap();
+        attach(
+            db.clone(),
+            &Directory::ensure_path(&f.assets.join("objects")).unwrap(),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
         let hash = if mode == "invalid-hash" {
             "zz".repeat(20)
         } else {
@@ -157,15 +165,23 @@ async fn unknown_old_or_ephemeral_asset_owners_disable_collection() {
         }
         if mode == "ephemeral" {
             let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
-            attach(db, f.assets.join("objects"), Cancellation::new())
-                .await
-                .unwrap();
+            attach(
+                db,
+                &Directory::ensure_path(&f.assets.join("objects")).unwrap(),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
         } else if mode == "catalogue-corrupt" {
             fs::write(f.store.root().join(".sonata-roots.json"), b"broken").unwrap();
         } else {
-            attach(f.db.clone(), f.assets.join("objects"), Cancellation::new())
-                .await
-                .unwrap();
+            attach(
+                f.db.clone(),
+                &Directory::ensure_path(&f.assets.join("objects")).unwrap(),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
         }
         assert!(
             collect(f.assets.clone(), Duration::ZERO).await.is_err(),

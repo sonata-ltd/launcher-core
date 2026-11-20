@@ -73,6 +73,35 @@ impl Directory {
         Ok(directory)
     }
 
+    /// Resolve a caller-selected directory. Missing descendants are created from
+    /// the first openable ancestor. Callers with a known root use create_relative.
+    pub(crate) fn ensure_path(path: &Path) -> io::Result<Arc<Self>> {
+        let mut base = if path.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path
+        };
+        let mut missing = Vec::new();
+        let mut root = loop {
+            match Self::open(base) {
+                Ok(root) => break root,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    let name = base.file_name().ok_or(error)?;
+                    missing.push(name);
+                    base = base
+                        .parent()
+                        .filter(|path| !path.as_os_str().is_empty())
+                        .unwrap_or_else(|| Path::new("."));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        for name in missing.into_iter().rev() {
+            root = root.create_child(name)?;
+        }
+        Ok(root)
+    }
+
     pub(crate) fn create_relative(self: &Arc<Self>, relative: &Path) -> io::Result<Arc<Self>> {
         super::relative(relative).map_err(io::Error::other)?;
         let mut directory = self.clone();
@@ -90,8 +119,101 @@ impl Directory {
         }
     }
 
+    pub(crate) fn open_entry_file(self: &Arc<Self>, entry: &Path) -> io::Result<File> {
+        super::relative(entry).map_err(io::Error::other)?;
+        let name = entry.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+        match entry.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                self.open_relative(parent)?.open_file(name)
+            }
+            _ => self.open_file(name),
+        }
+    }
+
     pub(crate) fn create_file(&self, name: &OsStr) -> io::Result<File> {
         self.create_file_with_mode(name, 0o666)
+    }
+
+    pub(crate) fn create_private_file(&self, name: &OsStr) -> io::Result<File> {
+        self.create_file_with_mode(name, 0o600)
+    }
+
+    pub(crate) fn open_file(&self, name: &OsStr) -> io::Result<File> {
+        self.verify_location()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = component(name)?;
+            let fd = unsafe {
+                libc::openat(
+                    self.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // openat returned a new descriptor owned by this file.
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+            };
+            windows_component(name)?;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(self.path.join(name))?;
+            if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(io::Error::other("file is redirected"));
+            }
+            file
+        };
+        #[cfg(not(any(unix, windows)))]
+        let file: File = {
+            let _ = name;
+            return Err(io::ErrorKind::Unsupported.into());
+        };
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("expected a regular file"));
+        }
+        Ok(file)
+    }
+
+    pub(crate) fn verify_file(&self, name: &OsStr, identity: FileIdentity) -> io::Result<()> {
+        self.verify_location()?;
+        if FileIdentity::at(&self.path.join(name))? != identity {
+            return Err(io::Error::other("directory entry changed"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn require_regular_or_missing(&self, name: &OsStr) -> io::Result<()> {
+        self.verify_location()?;
+        #[cfg(unix)]
+        component(name)?;
+        #[cfg(windows)]
+        windows_component(name)?;
+        match fs::symlink_metadata(self.path.join(name)) {
+            Ok(metadata) if metadata.is_file() => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                        return Err(io::ErrorKind::InvalidInput.into());
+                    }
+                }
+                Ok(())
+            }
+            Ok(_) => Err(io::ErrorKind::InvalidInput.into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     fn create_file_with_mode(&self, name: &OsStr, mode: u32) -> io::Result<File> {
@@ -144,17 +266,11 @@ impl Directory {
     ) -> Result<T, E> {
         let name = format!(".sonata-staged-{}", uuid::Uuid::new_v4());
         let name = OsStr::new(&name);
-        let mut file = self.create_file_with_mode(name, 0o600)?;
+        let mut file = self.create_private_file(name)?;
         let identity = FileIdentity::from_handle(&file)?;
         let written = write(&mut file);
         drop(file);
-        let check_identity = || -> io::Result<()> {
-            self.verify_location()?;
-            if FileIdentity::at(&self.path.join(name))? != identity {
-                return Err(io::Error::other("staged file changed"));
-            }
-            Ok(())
-        };
+        let check_identity = || self.verify_file(name, identity);
         let result = written.and_then(|value| {
             check_identity()?;
             publish(name, value)
@@ -321,10 +437,14 @@ impl Directory {
     }
 
     pub(crate) fn verify_location(&self) -> io::Result<()> {
-        if FileIdentity::at(&self.path)? != FileIdentity::from_handle(&self.handle)? {
+        if FileIdentity::at(&self.path)? != self.identity()? {
             return Err(io::Error::other("publication directory changed"));
         }
         Ok(())
+    }
+
+    pub(crate) fn identity(&self) -> io::Result<FileIdentity> {
+        FileIdentity::from_handle(&self.handle)
     }
 
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {

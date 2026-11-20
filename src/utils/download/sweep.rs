@@ -1,28 +1,82 @@
 use std::{
-    ffi::OsStr,
-    io::ErrorKind,
+    ffi::{OsStr, OsString},
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
 use async_std::{fs, stream::StreamExt};
 
+use crate::utils::files::{directory::Directory, identity::FileIdentity};
+
 const OWNER_EXTENSION: &str = "sonata-owner";
+
+pub(super) struct OwnedEntry {
+    directory: Arc<Directory>,
+    name: OsString,
+    witness: std::fs::File,
+}
+
+impl OwnedEntry {
+    pub(super) fn new(directory: Arc<Directory>, name: OsString, witness: std::fs::File) -> Self {
+        Self {
+            directory,
+            name,
+            witness,
+        }
+    }
+
+    pub(super) fn publish(&self, name: &OsStr) -> io::Result<()> {
+        self.verify()?;
+        self.directory.require_regular_or_missing(name)?;
+        self.directory.replace(&self.name, name)
+    }
+
+    fn verify(&self) -> io::Result<()> {
+        self.directory
+            .verify_file(&self.name, FileIdentity::from_handle(&self.witness)?)
+    }
+}
+
+impl Drop for OwnedEntry {
+    fn drop(&mut self) {
+        if self.verify().is_ok() {
+            let _ = self.directory.unlink(&self.name);
+        }
+    }
+}
 
 /// The marker is created before the partial file, and removed on normal return
 /// or unwind. A process exit leaves enough ownership evidence for retention.
 pub(crate) struct PartialOwner {
-    _marker: tempfile::TempPath,
+    _marker: OwnedEntry,
 }
 
 impl PartialOwner {
+    #[cfg(test)]
     pub(crate) fn create(partial: &Path) -> std::io::Result<Self> {
-        let path = owner_path(partial);
-        // Do not take cleanup ownership of an existing marker on collision.
-        crate::utils::process::write_owner(&path)?;
-        #[allow(deprecated)]
-        let marker = tempfile::TempPath::from_path(path);
-        Ok(Self { _marker: marker })
+        let parent = partial.parent().ok_or(ErrorKind::InvalidInput)?;
+        let name = partial.file_name().ok_or(ErrorKind::InvalidInput)?;
+        Self::create_in(Directory::open(parent)?, name)
+    }
+
+    pub(super) fn create_in(directory: Arc<Directory>, partial: &OsStr) -> io::Result<Self> {
+        let name = owner_path(Path::new(partial)).into_os_string();
+        let file = directory.with_staged_file(
+            |file| {
+                file.write_all(std::process::id().to_string().as_bytes())?;
+                file.sync_all()?;
+                file.try_clone()
+            },
+            |staged, file| {
+                directory.publish(staged, &directory, &name)?;
+                Ok::<_, io::Error>(file)
+            },
+        )?;
+        Ok(Self {
+            _marker: OwnedEntry::new(directory, name, file),
+        })
     }
 }
 

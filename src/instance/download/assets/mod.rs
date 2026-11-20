@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
@@ -23,7 +24,11 @@ use crate::{
         assets::storage::DbAssetStore,
         sync::{SyncError, Syncer},
     },
-    utils::{cancellation::Cancellation, download::Downloadable, files},
+    utils::{
+        cancellation::Cancellation,
+        download::{destination::Destination, Downloadable},
+        files::{self, directory::Directory},
+    },
 };
 
 pub(crate) mod index;
@@ -62,8 +67,13 @@ pub struct AssetInfo {
 }
 
 impl AssetInfo {
+    #[cfg(test)]
     fn object_path(&self, objects: &Path) -> PathBuf {
-        objects.join(&self.hash[..2]).join(&self.hash)
+        objects.join(self.object_relative())
+    }
+
+    fn object_relative(&self) -> PathBuf {
+        Path::new(&self.hash[..2]).join(&self.hash)
     }
 }
 
@@ -90,8 +100,10 @@ pub struct AssetsData;
 
 impl AssetsData {
     pub(crate) async fn initialize(db: Arc<Database>, assets: PathBuf) -> Result<(), DbError> {
-        let objects = files::regular_directory_child(&assets, Path::new("objects"))?;
-        retention::attach(db, objects, Cancellation::new()).await?;
+        let objects = open_objects(assets.clone())
+            .await
+            .map_err(files::FileError::from)?;
+        retention::attach(db, &objects, Cancellation::new()).await?;
         Self::sweep_imports(assets.clone()).await;
         match retention::collect(assets, std::time::Duration::from_secs(7 * 86400)).await {
             Ok(removed) => tracing::debug!(removed, "asset CAS maintenance completed"),
@@ -147,12 +159,14 @@ impl AssetsData {
         op.start_stage_determinable(STAGE_TYPE);
         let started = Instant::now();
 
-        let objects_dir = files::regular_directory_child(paths.assets(), Path::new("objects"))?;
-        let store = DbAssetStore::new(db, objects_dir.clone(), cancel.clone());
+        let objects_dir = open_objects(paths.assets().clone())
+            .await
+            .map_err(files::FileError::from)?;
+        let store = DbAssetStore::at(db, objects_dir.clone(), cancel.clone());
         let outcome = Syncer::default()
             .run_with_cancellation(
                 wanted,
-                |asset| asset.object_path(&objects_dir),
+                |asset| Destination::Within(objects_dir.clone(), asset.object_relative()),
                 &store,
                 op,
                 STAGE_TYPE,
@@ -174,6 +188,16 @@ impl AssetsData {
             downloaded: outcome.downloaded.len(),
         })
     }
+}
+
+async fn open_objects(assets: PathBuf) -> std::io::Result<Arc<Directory>> {
+    async_std::task::spawn_blocking(move || {
+        // This is the configured root. Its internal layout is traversed below
+        // the opened directory, including on the first installation.
+        std::fs::create_dir_all(&assets)?;
+        Directory::open(&assets.canonicalize()?)?.create_child(OsStr::new("objects"))
+    })
+    .await
 }
 
 #[cfg(test)]

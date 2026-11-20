@@ -8,7 +8,12 @@ use crate::{
         },
         rules::{self, RuleContext},
     },
-    utils::{files, maven::MavenCoordinate, url},
+    utils::{
+        download::destination::Destination,
+        files::{self, directory::Directory},
+        maven::MavenCoordinate,
+        url,
+    },
 };
 
 pub mod error;
@@ -21,6 +26,7 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub fn host() -> RuleContext<'static> {
@@ -246,6 +252,23 @@ pub async fn hydrate(
     cancel: &Cancel,
     op: &crate::data::registry::operation::handle::OperationHandle,
 ) -> Result<()> {
+    cancel.check()?;
+    if !root.exists() && wanted.iter().all(|item| item.url.is_none()) {
+        op.update_stage(OperationStage::DownloadLibs, 0, 0, None);
+        return Ok(());
+    }
+    let root = root.to_owned();
+    let directory = async_std::task::spawn_blocking(move || Directory::ensure_path(&root)).await?;
+    hydrate_in(wanted, &directory, blobs, cancel, op).await
+}
+
+pub(crate) async fn hydrate_in(
+    wanted: &[Wanted],
+    root: &Arc<Directory>,
+    blobs: &Path,
+    cancel: &Cancel,
+    op: &crate::data::registry::operation::handle::OperationHandle,
+) -> Result<()> {
     use crate::data::registry::operation::message::{
         stage::OperationStage,
         target::{FileStatus, ProcessTarget},
@@ -253,7 +276,7 @@ pub async fn hydrate(
 
     let wanted: Vec<_> = wanted
         .iter()
-        .filter(|item| item.url.is_some() || root.join(&item.path).is_file())
+        .filter(|item| item.url.is_some() || root.path().join(&item.path).is_file())
         .cloned()
         .collect();
 
@@ -270,20 +293,25 @@ pub async fn hydrate(
         let name = wanted.path.to_string_lossy().into_owned();
         let work = async move {
             cancel.check()?;
-            let path = files::child(&root, &wanted.path)?;
-
-            if path.is_file() {
-                if let Some(hash) = &wanted.sha1 {
-                    let path = path.clone();
-                    let hash = hash.clone();
-
-                    if async_std::task::spawn_blocking(move || files::matches(&path, &hash)).await?
-                    {
-                        return Ok(());
-                    }
-                } else {
-                    return Ok(());
+            let check = root.clone();
+            let relative = wanted.path.clone();
+            let hash = wanted.sha1.clone();
+            let token = cancel.clone();
+            let cached = async_std::task::spawn_blocking(move || -> std::io::Result<bool> {
+                let file = check.open_entry_file(&relative);
+                match hash {
+                    Some(hash) => files::matches_open_file(file, &hash, &token),
+                    None => match file {
+                        Ok(_) => Ok(true),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                        Err(error) => Err(error),
+                    },
                 }
+            })
+            .await?;
+            cancel.check()?;
+            if cached {
+                return Ok(());
             }
             if let Some(url) = wanted.url {
                 let sidecar = if wanted.sha1.is_none() {
@@ -302,9 +330,9 @@ pub async fn hydrate(
                     None
                 };
 
-                transfer::place(
+                transfer::place_in(
                     &url,
-                    &path,
+                    Destination::Within(root, wanted.path),
                     wanted.sha1.as_deref().or(sidecar.as_deref()),
                     &blobs,
                     &cancel,

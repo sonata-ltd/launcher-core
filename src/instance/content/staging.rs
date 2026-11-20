@@ -52,9 +52,8 @@ impl ContentStaging {
         &self.files
     }
 
-    pub(super) fn downloads(&self) -> io::Result<&Path> {
-        self.downloads.verify_location()?;
-        Ok(self.downloads.path())
+    pub(super) fn downloads_directory(&self) -> &Arc<Directory> {
+        &self.downloads
     }
 }
 
@@ -100,7 +99,7 @@ mod tests {
         fs::write(legacy.join("old.jar"), b"untracked staged bytes").unwrap();
         fs::write(stage.files().join(".sonata-owner"), b"provider filename").unwrap();
         fs::write(
-            stage.downloads().unwrap().join("0.jar"),
+            stage.downloads_directory().path().join("0.jar"),
             b"downloaded bytes",
         )
         .unwrap();

@@ -1,15 +1,23 @@
 use uuid::Uuid;
 
 use crate::{
-    data::layout::LauncherPaths, instance::init::error::Result, instance::model::InstanceId,
+    data::layout::LauncherPaths,
+    instance::init::error::Result,
+    instance::model::InstanceId,
+    utils::files::{directory::Directory, identity::FileIdentity},
 };
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 pub(crate) struct InstallWorkspace {
     generation_root: PathBuf,
     relative_maven_dir: PathBuf,
     maven_dir: PathBuf,
     work_dir: PathBuf,
+    generation_identity: FileIdentity,
     _admission: crate::utils::object_store::StoreAccess,
 }
 
@@ -79,43 +87,38 @@ impl InstallWorkspace {
             generation,
         )?;
 
-        let generation_root = crate::utils::files::child(
-            paths.libraries(),
-            &PathBuf::from("instances")
-                .join(instance_id.to_string())
-                .join(&generation_uuid),
-        )?;
-
-        let relative_maven_dir = PathBuf::from("instances")
-            .join(instance_id.to_string())
-            .join(generation_uuid)
-            .join("maven");
+        let instance_dir = PathBuf::from("instances").join(instance_id.to_string());
+        let generation_relative = instance_dir.join(&generation_uuid);
+        let generation_root = paths.libraries().join(&generation_relative);
+        let relative_maven_dir = generation_relative.join("maven");
 
         let maven_dir = generation_root.join("maven");
         let work_dir = generation_root.join("work");
 
+        cancel.check()?;
+        let parent = admission.directory().create_relative(&instance_dir)?;
+        // An existing UUID directory is never ours, even if its PID marker matches.
+        let generation_directory = parent.create_private_child(OsStr::new(&generation_uuid))?;
         let workspace = InstallWorkspace {
             generation_root,
             relative_maven_dir,
             maven_dir,
             work_dir,
+            generation_identity: generation_directory.identity()?,
             _admission: admission,
         };
 
-        // An existing UUID directory is never ours, even if its PID marker
-        // matches. Fail before cleanup can touch another workspace's files.
-        async_std::fs::create_dir_all(workspace.generation_root.parent().unwrap()).await?;
-        async_std::fs::create_dir(&workspace.generation_root).await?;
-        let dir_creation_result = async {
+        let dir_creation_result = (|| {
             // Ownership is visible before any useful runtime outputs.
-            crate::utils::process::write_owner(&workspace.generation_root.join(".sonata-owner"))?;
-            owner.write(&workspace.generation_root)?;
-            async_std::fs::create_dir_all(workspace.maven_dir()).await?;
-            async_std::fs::create_dir_all(workspace.work_dir()).await?;
+            generation_directory.verify_location()?;
+            crate::utils::process::write_owner(&generation_directory.path().join(".sonata-owner"))?;
+            owner.write(generation_directory.path())?;
+            generation_directory.create_private_child(OsStr::new("maven"))?;
+            generation_directory.create_private_child(OsStr::new("work"))?;
 
             Ok::<(), std::io::Error>(())
-        }
-        .await;
+        })();
+        drop(generation_directory);
 
         if let Err(e) = dir_creation_result {
             if let Err(cleanup_error) = workspace.cleanup_failed().await {
@@ -176,11 +179,27 @@ impl InstallWorkspace {
         if !owned || !processes_finished {
             tracing::debug!(root = %self.generation_root.display(), "kept workspace with live or unknown process ownership");
         }
-        Ok(owned && processes_finished)
+        let same_generation = FileIdentity::at(&self.generation_root)? == self.generation_identity;
+        Ok(owned && processes_finished && same_generation)
     }
 
     pub fn maven_dir(&self) -> &Path {
         &self.maven_dir
+    }
+
+    pub(crate) fn open_maven_dir(&self) -> Result<Arc<Directory>> {
+        let generation = self
+            .relative_maven_dir
+            .parent()
+            .ok_or(std::io::ErrorKind::InvalidInput)
+            .map_err(std::io::Error::from)?;
+        let root = self._admission.directory();
+        root.verify_location()?;
+        let generation = root.open_relative(generation)?;
+        if generation.identity()? != self.generation_identity {
+            return Err(std::io::Error::other("installation workspace changed").into());
+        }
+        Ok(generation.open_relative(Path::new("maven"))?)
     }
 
     pub fn work_dir(&self) -> &Path {

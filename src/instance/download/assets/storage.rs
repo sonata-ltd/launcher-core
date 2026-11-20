@@ -1,5 +1,6 @@
 use std::{
     collections::HashSet,
+    ffi::OsStr,
     io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -13,7 +14,7 @@ use crate::{
     instance::download::{assets::AssetInfo, sync::SyncStore},
     utils::{
         cancellation::Cancellation,
-        files,
+        files::{self, directory::Directory},
         object_store::{ObjectStore, StoreAccess},
     },
 };
@@ -23,14 +24,26 @@ const INSERT_CHUNK: usize = 300;
 pub struct DbAssetStore {
     db: Arc<Database>,
     objects: PathBuf,
+    directory: Option<Arc<Directory>>,
     cancel: Cancellation,
 }
 
 impl DbAssetStore {
+    #[cfg(test)]
     pub fn new(db: Arc<Database>, objects: PathBuf, cancel: Cancellation) -> Self {
         Self {
             db,
             objects,
+            directory: None,
+            cancel,
+        }
+    }
+
+    pub(super) fn at(db: Arc<Database>, directory: Arc<Directory>, cancel: Cancellation) -> Self {
+        Self {
+            db,
+            objects: directory.path().to_owned(),
+            directory: Some(directory),
             cancel,
         }
     }
@@ -43,12 +56,21 @@ impl DbAssetStore {
         items: Vec<AssetInfo>,
         require_all: bool,
     ) -> Result<HashSet<String>, DbError> {
-        let objects = self.objects.clone();
+        let objects = match &self.directory {
+            Some(directory) => directory.clone(),
+            None => {
+                let objects = self.objects.clone();
+                async_std::task::spawn_blocking(move || Directory::ensure_path(&objects))
+                    .await
+                    .map_err(bytes_error)?
+            }
+        };
         let cancel = self.cancel.clone();
-        super::retention::attach(self.db.clone(), objects.clone(), cancel.clone()).await?;
-        let root = files::child(&objects, Path::new(".sonata-cas"))
-            .map_err(|error| DbError::InvalidInput(error.to_string()))?;
-        let access = ObjectStore::new(root)
+        super::retention::attach(self.db.clone(), &objects, cancel.clone()).await?;
+        let root = objects
+            .open_relative(Path::new(".sonata-cas"))
+            .map_err(bytes_error)?;
+        let access = ObjectStore::new(root.path().to_owned())
             .access(&cancel)
             .await
             .map_err(bytes_error)?;
@@ -81,40 +103,42 @@ pub(super) fn bytes_error(error: io::Error) -> DbError {
 }
 
 fn materialize(
-    objects: &Path,
+    objects: &Arc<Directory>,
     access: &StoreAccess,
     asset: &AssetInfo,
     cancel: &Cancellation,
 ) -> io::Result<bool> {
-    let relative = PathBuf::from(&asset.hash[..2]).join(&asset.hash);
-    let path = files::child(objects, &relative).map_err(io::Error::other)?;
-    let present = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() => {
-            files::matches_cancellable(&path, asset.hash(), cancel)?
-        }
-        // Never overwrite directories, links or special files with an asset.
-        Ok(_) => return Err(io::Error::other("asset placement is not regular")),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+    let shard_name = &asset.hash[..2];
+    let name = OsStr::new(&asset.hash);
+    let shard = match objects.open_relative(Path::new(shard_name)) {
+        Ok(directory) => Some(directory),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    if present {
+    if let Some(shard) = &shard {
         // Import verifies SHA-1 while copying and creates an isolated SHA-256
         // object. Existing corrupt objects are reported, never clobbered.
-        if access.find_sha1(asset.hash(), cancel)?.is_none() {
-            let _: crate::utils::object_store::StoredObject =
+        if files::matches_open_file(shard.open_file(name), asset.hash(), cancel)? {
+            if access.find_sha1(asset.hash(), cancel)?.is_none() {
+                let path = shard.path().join(name);
                 access.import_checked(&path, cancel, |digests| {
                     if digests.sha1 != asset.hash {
                         return Err(io::Error::other("asset changed during import"));
                     }
                     Ok(())
                 })?;
+            }
+            return Ok(true);
         }
-        return Ok(true);
     }
     let Some(object) = access.find_sha1(asset.hash(), cancel)? else {
         return Ok(false);
     };
-    files::placement::copy_replace(&object.path, &path, cancel)?;
+    let shard = match shard {
+        Some(shard) => shard,
+        None => objects.create_child(OsStr::new(shard_name))?,
+    };
+    files::placement::copy_replace_in(&object.path, &shard, name, cancel)?;
     Ok(true)
 }
 
