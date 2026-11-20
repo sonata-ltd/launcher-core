@@ -57,27 +57,12 @@ impl ObjectStore {
             std::sync::Arc<crate::utils::files::directory::Directory>,
         )>,
     > {
-        use crate::utils::files::directory::Directory;
-        if create {
-            fs::create_dir_all(&self.anchor)?;
-        }
-        let anchor = match fs::canonicalize(&self.anchor) {
-            Ok(anchor) => anchor,
-            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let anchor = Directory::open(&anchor)?;
-        let directory = if self.beneath.as_os_str().is_empty() {
-            anchor
-        } else if create {
-            anchor.create_relative(&self.beneath)?
-        } else {
-            match anchor.open_optional(&self.beneath)? {
-                Some(directory) => directory,
-                None => return Ok(None),
-            }
-        };
-        Ok(Some((directory.path().to_owned(), directory)))
+        let directory = crate::utils::files::directory::Directory::open_beneath(
+            &self.anchor,
+            &self.beneath,
+            create,
+        )?;
+        Ok(directory.map(|directory| (directory.path().to_owned(), directory)))
     }
 
     /// A launcher-owned store directory directly below its configured parent.

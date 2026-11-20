@@ -61,10 +61,18 @@ pub fn read(archive: &Path, resource: &str, limit: u64) -> Result<Vec<u8>> {
 }
 
 pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    extract_in(archive, &Directory::open(destination)?, excludes)
+}
+
+/// Extract into a directory the caller already holds open.
+pub(crate) fn extract_in(
+    archive: &Path,
+    destination: &std::sync::Arc<Directory>,
+    excludes: &[String],
+) -> Result<()> {
     const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
     const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
-    fs::create_dir_all(destination)?;
-    let destination = Directory::open(destination)?;
 
     let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
 

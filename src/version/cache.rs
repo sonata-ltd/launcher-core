@@ -63,11 +63,10 @@ pub(super) async fn read(root: PathBuf, provider: MetaProvider) -> Result<Option
         let relative = path
             .strip_prefix(&root)
             .map_err(|error| VersionError::Cache(error.to_string()))?;
-        let file = match root
-            .canonicalize()
-            .and_then(|root| Directory::open(&root))
-            .and_then(|root| root.open_entry_file(relative))
-        {
+        let file = match Directory::open_child_of(&root, false).and_then(|root| {
+            root.ok_or_else(|| std::io::ErrorKind::NotFound.into())
+                .and_then(|root| root.open_entry_file(relative))
+        }) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(VersionError::Cache(format!("{}: {error}", path.display()))),
@@ -85,8 +84,8 @@ pub(super) async fn read(root: PathBuf, provider: MetaProvider) -> Result<Option
 pub(super) async fn write(root: PathBuf, provider: MetaProvider, index: DiskIndex) -> Result<()> {
     async_std::task::spawn_blocking(move || {
         let store = || -> io::Result<()> {
-            std::fs::create_dir_all(&root)?;
-            let directory = Directory::open(&root.canonicalize()?)?;
+            let directory =
+                Directory::open_child_of(&root, true)?.ok_or(io::ErrorKind::NotFound)?;
             let provider = provider.to_string().to_ascii_lowercase();
             let directory = directory.create_relative(Path::new(&provider))?;
             let name = std::ffi::OsStr::new("net.minecraft.json");

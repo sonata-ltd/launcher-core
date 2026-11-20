@@ -18,21 +18,27 @@ const PREFIX: &str = "run-";
 #[derive(Clone)]
 pub(crate) struct NativeDirectory {
     directory: Arc<OwnedDirectory>,
+    files: Arc<Directory>,
     extracted: PathBuf,
     runtime_pins: Vec<crate::utils::process_pin::ProcessPin>,
 }
 
 impl NativeDirectory {
+    #[cfg(test)]
     pub(crate) fn create(root: &Path) -> io::Result<Self> {
-        let root = Directory::ensure_path(root)?;
-        let directory = OwnedDirectory::create_in(&root, PREFIX)?;
-        let extracted = directory
+        Self::create_in(&Directory::ensure_path(root)?)
+    }
+
+    /// Natives scratch below a directory the caller already holds open.
+    pub(crate) fn create_in(root: &Arc<Directory>) -> io::Result<Self> {
+        let directory = OwnedDirectory::create_in(root, PREFIX)?;
+        let files = directory
             .directory()
-            .create_private_child(OsStr::new("files"))?
-            .path()
-            .to_owned();
+            .create_private_child(OsStr::new("files"))?;
+        let extracted = files.path().to_owned();
         Ok(Self {
             directory: Arc::new(directory),
+            files,
             extracted,
             runtime_pins: Vec::new(),
         })
@@ -65,6 +71,10 @@ impl NativeDirectory {
             self.directory.retain();
             tracing::warn!(path = %self.directory.directory().path().display(), "kept native libraries because process exit was unconfirmed");
         }
+    }
+
+    pub(super) fn files(&self) -> &Arc<Directory> {
+        &self.files
     }
 
     pub(crate) fn retain_runtime(&mut self, pin: crate::utils::process_pin::ProcessPin) {
@@ -154,20 +164,22 @@ pub struct Natives {}
 
 impl Natives {
     pub async fn extract(paths: Vec<PathBuf>, destination: &Path) -> io::Result<()> {
-        async_std::fs::create_dir_all(destination).await?;
+        let destination = destination.to_owned();
+        let destination =
+            async_std::task::spawn_blocking(move || Directory::ensure_path(&destination)).await?;
         for path in paths {
-            Self::extract_archive(path, destination.to_owned(), vec!["META-INF/".into()]).await?;
+            Self::extract_archive(path, destination.clone(), vec!["META-INF/".into()]).await?;
         }
         Ok(())
     }
 
     pub(super) async fn extract_archive(
         path: PathBuf,
-        destination: impl AsRef<Path> + Send + 'static,
+        destination: Arc<Directory>,
         excludes: Vec<String>,
     ) -> io::Result<()> {
         async_std::task::spawn_blocking(move || {
-            crate::modloader::archive::extract(&path, destination.as_ref(), &excludes)
+            crate::modloader::archive::extract_in(&path, &destination, &excludes)
                 .map_err(io::Error::other)
         })
         .await

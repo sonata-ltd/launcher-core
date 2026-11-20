@@ -17,7 +17,7 @@ use crate::{
     },
     java::{model::JavaRuntime, policy::JavaPolicy, select},
     modloader::model::LoaderSpec,
-    utils::files,
+    utils::files::{self, directory::Directory},
     version::rules::RuleContext,
 };
 use serde_json::Value;
@@ -153,14 +153,17 @@ async fn prepare_command(
 ) -> Result<LaunchCommand> {
     let game = files::child(paths.instances(), Path::new(&rec.dir))?;
 
-    async_std::fs::create_dir_all(&game)
-        .await
-        .map_err(InstanceError::Io)?;
-
-    let native_root = game.join(".sonata-natives");
-    let natives = async_std::task::spawn_blocking(move || NativeDirectory::create(&native_root))
-        .await
-        .map_err(LaunchError::Natives)?;
+    // The configured instances root may be an alias; the instance directory
+    // and natives scratch below it are created without following links.
+    let instances = paths.instances().clone();
+    let relative = PathBuf::from(&rec.dir);
+    let natives = async_std::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&instances)?;
+        let game = Directory::open(&instances.canonicalize()?)?.create_relative(&relative)?;
+        NativeDirectory::create_in(&game.create_child(std::ffi::OsStr::new(".sonata-natives"))?)
+    })
+    .await
+    .map_err(LaunchError::Natives)?;
 
     let mut classpath = Vec::new();
     for item in &profile.artifacts {
@@ -187,7 +190,7 @@ async fn prepare_command(
                 })
                 .unwrap_or_else(|| vec!["META-INF/".into()]);
 
-            Natives::extract_archive(path, natives.clone(), excludes)
+            Natives::extract_archive(path, natives.files().clone(), excludes)
                 .await
                 .map_err(LaunchError::Natives)?;
         }
@@ -547,6 +550,59 @@ mod forge_ignore_tests {
 
         java.arch = None;
         assert!(validate_java(&java, &profile().java).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[async_std::test]
+    async fn prepare_declines_a_redirected_instance_directory_without_writing_through_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = LauncherPaths::resolve(&crate::Config {
+            root_override: Some(temp.path().to_owned()),
+            ..crate::Config::init()
+        })
+        .await
+        .unwrap();
+        let other = paths.instances().join("other");
+        // The redirect target already has the launcher-owned layout below it.
+        std::fs::create_dir_all(other.join(".sonata-natives")).unwrap();
+        std::os::unix::fs::symlink(&other, paths.instances().join("example")).unwrap();
+        let rec = InstanceRecord {
+            id: 1.into(),
+            name: "Example".into(),
+            dir: "example".into(),
+            version: "1.20".into(),
+            loader: crate::modloader::model::LoaderKind::Forge,
+            loader_version: Some("46.0.14".into()),
+            manifest_url: String::new(),
+            meta_provider: "prism".into(),
+        };
+        let settings = EffectiveSettings {
+            java_runtime: Some(1),
+            memory_min: 512,
+            memory_max: 4096,
+            jvm_args: vec![],
+        };
+        let java = JavaRuntime {
+            id: 1,
+            version: "17".into(),
+            major: 17,
+            arch: None,
+            exec_path: "java".into(),
+            home_path: String::new(),
+            vendor: None,
+            source: Default::default(),
+        };
+        assert!(matches!(
+            prepare(&rec, &settings, &java, &paths, profile()).await,
+            Err(InstanceError::Launch(LaunchError::Natives(_)))
+        ));
+        assert_eq!(std::fs::read_dir(&other).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(other.join(".sonata-natives"))
+                .unwrap()
+                .count(),
+            0
+        );
     }
 
     #[async_std::test]

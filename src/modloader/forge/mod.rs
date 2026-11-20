@@ -101,7 +101,12 @@ pub async fn prepare<'a>(
         sha256: files::sha256(&modloader_manifest_bytes),
     });
 
-    async_std::fs::create_dir_all(&context.maven_dir).await?;
+    // The generation Maven directory is launcher-owned below its generation.
+    let maven_dir = context.maven_dir.to_path_buf();
+    async_std::task::spawn_blocking(move || {
+        files::directory::Directory::open_child_of(&maven_dir, true)
+    })
+    .await?;
 
     if modloader_manifest_value
         .get("mainClass")

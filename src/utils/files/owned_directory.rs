@@ -77,6 +77,7 @@ impl Drop for OwnedDirectory {
 
 /// Only direct children of a known scratch root are inspected. Linked roots,
 /// children and owner markers are excluded from ownership selection.
+#[cfg(test)]
 pub(crate) fn sweep(root: &Path, prefix: &str) -> io::Result<usize> {
     sweep_prefixes(root, &[prefix])
 }

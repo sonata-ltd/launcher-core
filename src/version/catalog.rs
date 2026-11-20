@@ -290,12 +290,9 @@ impl VersionCatalog {
             inner.flights.lock().unwrap().clear();
             if let Some(root) = inner.cache_root.clone() {
                 async_std::task::spawn_blocking(move || -> Result<()> {
-                    let directory = match root
-                        .canonicalize()
-                        .and_then(|root| Directory::open(&root))
-                    {
-                        Ok(directory) => directory,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    let directory = match Directory::open_child_of(&root, false) {
+                        Ok(Some(directory)) => directory,
+                        Ok(None) => return Ok(()),
                         Err(error) => return Err(VersionError::Cache(error.to_string())),
                     };
                     for provider in [MetaProvider::Prism, MetaProvider::Mojang] {

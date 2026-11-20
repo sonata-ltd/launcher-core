@@ -66,6 +66,46 @@ impl Directory {
         }))
     }
 
+    /// Open a launcher-owned `relative` path below a configured `anchor`. The
+    /// anchor may be an alias and is resolved once; components of `relative`
+    /// are never followed through links. With `create`, missing directories
+    /// (including the anchor) are created; otherwise a missing one is `None`.
+    pub(crate) fn open_beneath(
+        anchor: &Path,
+        relative: &Path,
+        create: bool,
+    ) -> io::Result<Option<Arc<Self>>> {
+        if !relative.as_os_str().is_empty() {
+            super::relative(relative).map_err(io::Error::other)?;
+        }
+        if create {
+            fs::create_dir_all(anchor)?;
+        }
+        let anchor = match fs::canonicalize(anchor) {
+            Ok(anchor) => Self::open(&anchor)?,
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if relative.as_os_str().is_empty() {
+            Ok(Some(anchor))
+        } else if create {
+            anchor.create_relative(relative).map(Some)
+        } else {
+            anchor.open_optional(relative)
+        }
+    }
+
+    /// `open_beneath` for a launcher-owned directory directly below its
+    /// configured parent.
+    pub(crate) fn open_child_of(path: &Path, create: bool) -> io::Result<Option<Arc<Self>>> {
+        match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                Self::open_beneath(parent, Path::new(name), create)
+            }
+            _ => Err(io::ErrorKind::InvalidInput.into()),
+        }
+    }
+
     pub(crate) fn open_relative(self: &Arc<Self>, relative: &Path) -> io::Result<Arc<Self>> {
         super::relative(relative).map_err(io::Error::other)?;
         let mut directory = self.clone();
@@ -769,6 +809,43 @@ fn windows_component(name: &OsStr) -> io::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_beneath_follows_the_configured_anchor_but_not_owned_components() {
+        let temp = tempfile::tempdir().unwrap();
+        let actual = temp.path().join("actual");
+        fs::create_dir_all(&actual).unwrap();
+        let configured = temp.path().join("configured");
+        std::os::unix::fs::symlink(&actual, &configured).unwrap();
+
+        let created = Directory::open_beneath(&configured, Path::new("owned/inner"), true)
+            .unwrap()
+            .unwrap();
+        assert!(actual.join("owned/inner").is_dir());
+        assert_eq!(
+            created.path(),
+            actual.canonicalize().unwrap().join("owned/inner")
+        );
+
+        let elsewhere = temp.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join("inner")).unwrap();
+        fs::rename(actual.join("owned"), temp.path().join("previous")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, actual.join("owned")).unwrap();
+        for create in [false, true] {
+            assert!(
+                Directory::open_beneath(&configured, Path::new("owned/inner"), create).is_err()
+            );
+        }
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(elsewhere.join("inner")).unwrap().count(), 0);
+        assert!(
+            Directory::open_beneath(&configured, Path::new("missing"), false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!actual.join("missing").exists());
+        assert!(Directory::open_beneath(&configured, Path::new("../escape"), true).is_err());
+    }
 
     #[test]
     fn directory_publication_declines_a_changed_destination() {

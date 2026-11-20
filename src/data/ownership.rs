@@ -75,8 +75,8 @@ pub(crate) fn ensure_instance_directory(
     if let Some(lease) = lease {
         return lease.create_instance_directory(path);
     }
-    fs::create_dir_all(path)?;
-    Directory::open(path)
+    // Without a lease only the configured instances root may be an alias.
+    Directory::open_child_of(path, true)?.ok_or_else(|| io::ErrorKind::NotFound.into())
 }
 
 fn lock(directory: &Path) -> Result<StoreLock, ContentInitError> {
