@@ -312,12 +312,13 @@ async fn install<'a>(
     complete(context.op, OperationStage::DownloadLibs, started);
 
     if let Some(prepared) = forge_installer {
+        let game_dir = crate::utils::files::child(
+            context.paths.instances(),
+            std::path::Path::new(&request.instance_dir_name),
+        )?;
         modloader::forge::finalize_retained(
             forge::FinalizeRequest {
-                game_dir: &context
-                    .paths
-                    .instances()
-                    .join(request.instance_dir_name.clone()),
+                game_dir: &game_dir,
                 game_version: &request.game_version,
                 prepared,
                 maven_dir: workspace.maven_dir(),

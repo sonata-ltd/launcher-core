@@ -158,11 +158,11 @@ impl IndexPublication {
 }
 
 fn game_directory(assets: &Path) -> Result<std::path::PathBuf, files::FileError> {
-    files::child(assets, Path::new("indexes"))
+    files::regular_directory_child(assets, Path::new("indexes"))
 }
 
 fn game_path(assets: &Path, id: &str) -> Result<std::path::PathBuf, files::FileError> {
-    files::child(assets, &Path::new("indexes").join(format!("{id}.json")))
+    files::child(&game_directory(assets)?, Path::new(&format!("{id}.json")))
 }
 
 pub(crate) async fn verify_published(

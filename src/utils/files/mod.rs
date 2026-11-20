@@ -84,6 +84,36 @@ pub fn child(root: &Path, path: &Path) -> Result<PathBuf> {
     Ok(full)
 }
 
+/// A launcher-owned child directory may be absent before creation. Configured
+/// root overrides are resolved by the caller. Internal redirects are rejected.
+pub(crate) fn regular_directory_child(root: &Path, relative: &Path) -> Result<PathBuf> {
+    let path = child(root, relative)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::MetadataExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(FileError::InvalidPath(format!(
+                        "{} is a reparse point",
+                        path.display()
+                    )));
+                }
+            }
+            if !metadata.is_dir() {
+                return Err(FileError::InvalidPath(format!(
+                    "{} is not a regular directory",
+                    path.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(path)
+}
+
 pub fn sha1_file(path: &Path) -> std::io::Result<String> {
     file_digest::<Sha1>(path, None)
 }

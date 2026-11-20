@@ -23,7 +23,7 @@ use crate::{
         assets::storage::DbAssetStore,
         sync::{SyncError, Syncer},
     },
-    utils::{cancellation::Cancellation, download::Downloadable},
+    utils::{cancellation::Cancellation, download::Downloadable, files},
 };
 
 pub(crate) mod index;
@@ -46,6 +46,9 @@ pub enum AssetSyncError {
 
     #[error(transparent)]
     Db(#[from] DbError),
+
+    #[error(transparent)]
+    File(#[from] files::FileError),
 }
 
 #[derive(Debug, Getters, Clone)]
@@ -87,7 +90,8 @@ pub struct AssetsData;
 
 impl AssetsData {
     pub(crate) async fn initialize(db: Arc<Database>, assets: PathBuf) -> Result<(), DbError> {
-        retention::attach(db, assets.join("objects"), Cancellation::new()).await?;
+        let objects = files::regular_directory_child(&assets, Path::new("objects"))?;
+        retention::attach(db, objects, Cancellation::new()).await?;
         Self::sweep_imports(assets.clone()).await;
         match retention::collect(assets, std::time::Duration::from_secs(7 * 86400)).await {
             Ok(removed) => tracing::debug!(removed, "asset CAS maintenance completed"),
@@ -143,7 +147,7 @@ impl AssetsData {
         op.start_stage_determinable(STAGE_TYPE);
         let started = Instant::now();
 
-        let objects_dir = paths.assets().join("objects");
+        let objects_dir = files::regular_directory_child(paths.assets(), Path::new("objects"))?;
         let store = DbAssetStore::new(db, objects_dir.clone(), cancel.clone());
         let outcome = Syncer::default()
             .run_with_cancellation(
@@ -177,6 +181,34 @@ mod tests {
     use super::*;
     use crate::instance::download::sync::SyncStore;
     use serde_json::json;
+
+    #[cfg(any(unix, windows))]
+    #[async_std::test]
+    async fn initialization_refuses_an_assets_objects_directory_redirect() {
+        let fixture = tempfile::tempdir().unwrap();
+        let assets = fixture.path().join("assets");
+        let separate = fixture.path().join("separate");
+        std::fs::create_dir(&assets).unwrap();
+        std::fs::create_dir(&separate).unwrap();
+        std::fs::write(separate.join("keep"), b"must remain untouched").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&separate, assets.join("objects")).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(assets.join("objects"))
+            .arg(&separate)
+            .status()
+            .unwrap()
+            .success());
+        let db = Arc::new(Database::init("sqlite::memory:").await.unwrap());
+        assert!(AssetsData::initialize(db, assets).await.is_err());
+        assert!(!separate.join(".sonata-cas").exists());
+        assert_eq!(
+            std::fs::read(separate.join("keep")).unwrap(),
+            b"must remain untouched"
+        );
+    }
 
     #[test]
     fn invalid_hashes_fail_before_building_paths() {
