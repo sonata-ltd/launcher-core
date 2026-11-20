@@ -115,4 +115,6 @@ Lock, dependency switch, GUI patches и user baseline в B06 commit не вхо�
   не является выполнением Windows tests. Уточнение от 20 ноября: real-JVM
   detection probe `probes_java_on_path` PASS на этой Linux-машине
   ([record](platform-verification.md)); live game/installer JVM и descendants
-  по-прежнему без evidence.
+  по-прежнему без evidence. Live providers — только HTTP-level observations
+  точных code-path URLs (Modrinth 200 real JSON, CurseForge 403 без `x-api-key`);
+  DTO/normalize поведение на реальных responses не выполнено, ключа на машине нет.

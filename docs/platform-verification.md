@@ -20,6 +20,7 @@
 | Windows GNU из Linux — этот commit | fmt, check --all-targets, test --no-run, build; locked/offline | Cross-compile/link PASS; Windows execution не выполнялся; lock_unchanged true |
 | Windows native — dual-boot пользователь | Command из раздела «Воспроизведение», выполняемый на Windows | **Pending**: выполнит пользователь; commit land'ится с native Windows pending |
 | Real JVM detection (real JDK) | отдельный run `--include-ignored`, документирован ниже | PASS от 20 ноября: `probes_java_on_path` 1 passed, real JDK `27.0.1.0.3` |
+| Live providers — endpoint observations от 20 ноября | точные code-path URLs через curl, без credentials/user DB | Modrinth `/v2/search` → HTTP 200 real JSON; CurseForge `/v1/mods/search` без `x-api-key` → HTTP 403 «API Key missing or invalid» |
 
 Здесь native означает ОС, на которой выполняется **core test binary**, не
 native GUI interaction. Windows GNU linking включает CLI и Rust test executables;
@@ -171,13 +172,34 @@ detached descendants, retention/ownership поведения JVM-roots, Windows/
 JVM, manual GUI и live providers остаются открытыми. Log:
 `/tmp/opencode/core-jvm-probe-20nov.log` — локальный non-durable evidence.
 
+## Live-provider endpoint observations от 20 ноября
+
+Сеть на этой машине доступна. curl проверяет **точно те URLs, которые строит код**
+(`src/instance/content/catalog/{modrinth,curseforge}/mod.rs`), без credentials и
+без user DB:
+
+- `GET https://api.modrinth.com/v2/search?mod=sodium&facets=[["project_type:mod"]]&limit=3`
+  → **HTTP 200**, real JSON hits (`project_id`/`project_type`/`slug` поля) —
+  `/tmp/opencode/live-modrinth.json`.
+- `GET https://api.curseforge.com/v1/mods/search?gameId=432&classId=6&searchFilter=sodium&gameVersion=1.21.1&modLoaderType=5&index=0&pageSize=20`
+  без `x-api-key` → **HTTP 403** `Forbidden: API Key missing or invalid` —
+  `/tmp/opencode/live-curseforge-nokey.json`. Совпадает с fail-closed контрактом:
+  код требует `CURSEFORGE_API_KEY` (`MissingCurseForgeKey`) до запроса, и без ключа
+  live path не выполняется; ключа на этой машине нет.
+
+Это **HTTP-level reachability/auth наблюдение**, не execution кодового пути:
+DTO/normalize/search поведение на реальных responses не проверено. Live providers
+этим шагом не объявляются PASS; `CURSEFORGE_API_KEY` на этой машине отсутствует.
+Raw JSON — локальный non-durable evidence.
+
 ## Что остаётся открытым
 
 P11-V02 **частичен**, не завершён: actual native Windows/macOS reports; manual
-isolated launch/install/content/recovery/normal close; реальные JVM/descendants,
-live providers и external concurrent FS/DB replacement. GUI проверка отложена
-пользователем, не отменена из критериев. Core ignore `probes_java_on_path` —
-**PASS от 20 ноября** этой секцией ниже.
+isolated launch/install/content/recovery/normal close; реальные JVM/descendants
+(detected-properties probe — PASS выше), live providers (observation-уровня выше:
+Modrinth endpoint 200, code path не выполнялся; CurseForge открыт до
+`CURSEFORGE_API_KEY`) и external concurrent FS/DB replacement. GUI проверка отложена
+пользователем, не отменена из критериев.
 Unix-only symlink/shell/crash fixtures в других модулях этим шагом не объявлены
 проверенными на Windows. Power-loss/OS/disk crash durability не обещается.
 B02/B06/D08/S05/S06 сохраняют прежние partial ownership/provenance ограничения.

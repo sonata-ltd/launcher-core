@@ -164,6 +164,10 @@ Page/headless tests используют controlled callbacks, не доказы
 - Windows/macOS CI и runtime filesystem/process semantics.
 - Manual isolated native launch/install/content/recovery/normal-close с живой игрой.
 - Live provider API, реальные game/installer JVM и detached descendants.
+  Уточнение от 20 ноября: detected-properties probe real JVM на PATH — PASS
+  ([record](../platform-verification.md)); live provider API — только HTTP-level
+  observations (Modrinth endpoint 200, code path не выполнялся; CurseForge открыт
+  до `CURSEFORGE_API_KEY`). Live game/installer JVM и descendants без evidence.
 - Concurrent external FS/DB replacement, power loss/OS crash/disk loss.
 - Abnormal renderer/process termination как graceful shutdown; News lifetime вне Tasks.
 

@@ -185,6 +185,9 @@ launch/install/content, реальные JVM/descendants, live providers, extern
 FS/DB replacement и power-loss не получили runtime evidence. Уточнение от 20 ноября:
 real-JVM detection probe `probes_java_on_path` PASS на этой машине (real JDK
 `27.0.1.0.3`); live game/installer JVM и descendants по-прежнему без evidence.
+Live providers — только endpoint observations: Modrinth `/v2/search` HTTP 200 real
+JSON, CurseForge без `x-api-key` HTTP 403 (code требует ключ до запроса); кодовый
+путь на реальных responses не выполнялся.
 Abnormal GUI process
 termination не превращается в cooperative close. Исторические string UI adapters
 вне Java runtime/settings и content recovery не объявлены полностью мигрированными.
