@@ -12,6 +12,8 @@ pub enum JsonRequestError {
     InvalidUrl(#[from] http_types::url::ParseError),
     #[error("unsupported URL scheme")]
     UnsupportedScheme,
+    #[error("credentials embedded in request URLs are unsupported")]
+    UrlCredentials,
     #[error(transparent)]
     Body(#[from] std::io::Error),
     #[error(transparent)]

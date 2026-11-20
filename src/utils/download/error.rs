@@ -16,6 +16,12 @@ pub enum DownloadError {
     #[error("unsupported URL scheme for {url} (HTTPS required: {https_only})")]
     UnsupportedScheme { url: String, https_only: bool },
 
+    #[error("credentials embedded in download URL {url} are unsupported")]
+    UrlCredentials { url: String },
+
+    #[error("download redirect cannot change the origin over HTTP: {url}")]
+    InsecureRedirect { url: String },
+
     #[error("expected {expected} bytes, received {actual}")]
     SizeMismatch { expected: u64, actual: u64 },
     #[error("request to {url} failed")]

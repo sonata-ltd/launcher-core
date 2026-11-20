@@ -85,7 +85,7 @@ pub async fn download(
                 expected.filter(|expected| !expected.eq_ignore_ascii_case(&hash))
             {
                 return Err(DownloadError::ChecksumMismatch {
-                    url: url.into(),
+                    url: super::http::diagnostic_url(url),
                     expected: expected.into(),
                     actual: hash,
                 });

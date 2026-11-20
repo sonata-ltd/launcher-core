@@ -33,18 +33,23 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub const ONESHOT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub async fn download(url: String) -> Result<Vec<u8>> {
-    let fetch = timeout(ONESHOT_TIMEOUT, surf::get(&url).recv_bytes())
-        .await
-        .map_err(|_| DownloadError::Timeout {
-            url: url.clone(),
-            phase: "response",
-            after: ONESHOT_TIMEOUT,
-        })?;
-
-    fetch.map_err(|e| DownloadError::Request {
-        url,
-        source: e.into(),
+    timeout(ONESHOT_TIMEOUT, async {
+        let (mut response, final_url) =
+            stream::response(&url, false, None, &Cancellation::new()).await?;
+        response
+            .body_bytes()
+            .await
+            .map_err(|error| DownloadError::Request {
+                url: http::diagnostic_url(final_url.as_str()),
+                source: error.into(),
+            })
     })
+    .await
+    .map_err(|_| DownloadError::Timeout {
+        url: http::diagnostic_url(&url),
+        phase: "response",
+        after: ONESHOT_TIMEOUT,
+    })?
 }
 
 /// Version and asset manifests can exceed the provider catalog response limit.
@@ -69,6 +74,9 @@ pub(crate) async fn download_manifest_bytes(url: &str) -> Result<Vec<u8>> {
         HttpError::UnsupportedScheme => DownloadError::UnsupportedScheme {
             url: http::diagnostic_url(url),
             https_only: false,
+        },
+        HttpError::UrlCredentials => DownloadError::UrlCredentials {
+            url: http::diagnostic_url(url),
         },
         other => DownloadError::Request {
             url: http::diagnostic_url(url),
@@ -189,7 +197,7 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
     async fn fetch_to(&self, temp_path: &Path, cancel: &Cancellation) -> Result<()> {
         let (mut response, url) =
             stream::response(self.object.get_url(), false, None, cancel).await?;
-        tracing::debug!(name = %self.object.get_name(), %url, "downloading");
+        tracing::debug!(name = %self.object.get_name(), url = %http::diagnostic_url(url.as_str()), "downloading");
         let mut file =
             File::create(temp_path)
                 .await
@@ -211,7 +219,7 @@ impl<T: Downloadable + Send + Sync + 'static> Download<T> {
 
         if actual != expected {
             return Err(DownloadError::ChecksumMismatch {
-                url: url.to_string(),
+                url: http::diagnostic_url(url.as_str()),
                 expected,
                 actual,
             });

@@ -16,6 +16,7 @@ pub struct JsonClient {
 
 impl JsonClient {
     pub fn get(&self, url: surf::Url) -> Result<surf::RequestBuilder, JsonRequestError> {
+        http::validate_url(&url, true).map_err(map_http_error)?;
         let client = self
             .client
             .get_or_init(|| {
@@ -69,6 +70,7 @@ fn map_http_error(error: HttpError) -> JsonRequestError {
         HttpError::Body(error) => JsonRequestError::Body(error),
         HttpError::InvalidUrl(error) => JsonRequestError::InvalidUrl(error),
         HttpError::UnsupportedScheme => JsonRequestError::UnsupportedScheme,
+        HttpError::UrlCredentials => JsonRequestError::UrlCredentials,
     }
 }
 

@@ -11,6 +11,8 @@ pub(crate) enum HttpError {
     InvalidUrl(#[from] http_types::url::ParseError),
     #[error("unsupported URL scheme")]
     UnsupportedScheme,
+    #[error("credentials embedded in download URLs are unsupported")]
+    UrlCredentials,
     #[error("HTTP request failed: {0}")]
     Request(surf::Error),
     #[error("HTTP {0}")]
@@ -35,11 +37,29 @@ impl HttpError {
 }
 
 pub(crate) fn request(url: &str) -> std::result::Result<surf::RequestBuilder, HttpError> {
+    request_with_policy(url, false)
+}
+
+pub(crate) fn request_with_policy(
+    url: &str,
+    https_only: bool,
+) -> std::result::Result<surf::RequestBuilder, HttpError> {
     let url = surf::Url::parse(url)?;
-    if !matches!(url.scheme(), "http" | "https") {
+    validate_url(&url, https_only)?;
+    Ok(surf::get(url))
+}
+
+pub(crate) fn validate_url(
+    url: &surf::Url,
+    https_only: bool,
+) -> std::result::Result<(), HttpError> {
+    if !(url.scheme() == "https" || !https_only && url.scheme() == "http") {
         return Err(HttpError::UnsupportedScheme);
     }
-    Ok(surf::get(url))
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(HttpError::UrlCredentials);
+    }
+    Ok(())
 }
 
 pub(crate) fn diagnostic_url(input: &str) -> String {
@@ -115,6 +135,7 @@ pub async fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
                     url,
                     https_only: false,
                 },
+                HttpError::UrlCredentials => TransportError::UrlCredentials { url },
                 HttpError::Status(status) => TransportError::Http { status, url },
                 source => TransportError::Request {
                     url,
@@ -130,6 +151,16 @@ pub async fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use httpmock::{Method::GET, MockServer};
+
+    #[test]
+    fn url_policy_rejects_embedded_credentials_before_client_initialization() {
+        let url = surf::Url::parse("https://fixture:placeholder@example.invalid/path").unwrap();
+        assert!(matches!(
+            validate_url(&url, false),
+            Err(HttpError::UrlCredentials)
+        ));
+        assert_eq!(diagnostic_url(url.as_str()), "https://example.invalid/path");
+    }
 
     #[async_std::test]
     async fn invalid_manifest_url_is_a_typed_error() {

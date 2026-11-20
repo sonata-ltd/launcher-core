@@ -148,7 +148,7 @@ pub(super) fn parse(
 
 async fn fetch_assets(url: &str) -> Result<serde_json::Value> {
     const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
-    let request = http::request(url)
+    let request = http::request_with_policy(url, true)
         .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Catalog, error))?;
     match http::fetch(request, MAX_CATALOG_BYTES, ONESHOT_TIMEOUT).await {
         Ok(bytes) => serde_json::from_slice(&bytes)

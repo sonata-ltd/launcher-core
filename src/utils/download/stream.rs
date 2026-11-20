@@ -1,6 +1,7 @@
 //! Streaming HTTP shared by artifact, asset and managed Java downloads.
 use super::{
     error::{transient_status, DownloadError, Result},
+    http::{diagnostic_url, validate_url, HttpError},
     MAX_REDIRECT_COUNT, READ_TIMEOUT, REQUEST_TIMEOUT,
 };
 use crate::utils::cancellation::Cancellation;
@@ -17,7 +18,7 @@ pub(crate) async fn response(
     cancel: &Cancellation,
 ) -> Result<(Response, Url)> {
     let mut current = Url::parse(url).map_err(|source| DownloadError::InvalidUrl {
-        url: url.to_owned(),
+        url: diagnostic_url(url),
         source,
     })?;
 
@@ -33,12 +34,12 @@ pub(crate) async fn response(
             .run(timeout(REQUEST_TIMEOUT, request))
             .await?
             .map_err(|_| DownloadError::Timeout {
-                url: current.to_string(),
+                url: diagnostic_url(current.as_str()),
                 phase: "response",
                 after: REQUEST_TIMEOUT,
             })?
             .map_err(|error| DownloadError::Request {
-                url: current.to_string(),
+                url: diagnostic_url(current.as_str()),
                 source: error.into(),
             })?;
 
@@ -51,12 +52,14 @@ pub(crate) async fn response(
         }
         if redirects == MAX_REDIRECT_COUNT {
             return Err(DownloadError::TooManyRedirects {
-                url: current.to_string(),
+                url: diagnostic_url(current.as_str()),
                 count: redirects,
             });
         }
 
-        current = redirect_target(&current, &response)?;
+        let next = redirect_target(&current, &response)?;
+        check_redirect(&current, &next, https_only)?;
+        current = next;
     }
     unreachable!("redirect loop always returns at the configured maximum")
 }
@@ -70,14 +73,14 @@ fn status_error(url: &Url, response: &Response) -> DownloadError {
         {
             return DownloadError::RetryAfter {
                 status,
-                url: url.to_string(),
+                url: diagnostic_url(url.as_str()),
                 after,
             };
         }
     }
     DownloadError::Http {
         status,
-        url: url.to_string(),
+        url: diagnostic_url(url.as_str()),
     }
 }
 
@@ -96,14 +99,29 @@ fn retry_after(value: &str, now: chrono::DateTime<chrono::Utc>) -> Option<Durati
 }
 
 fn check_scheme(url: &Url, https_only: bool) -> Result<()> {
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" if !https_only => Ok(()),
-        _ => Err(DownloadError::UnsupportedScheme {
-            url: url.to_string(),
+    validate_url(url, https_only).map_err(|error| match error {
+        HttpError::UnsupportedScheme => DownloadError::UnsupportedScheme {
+            url: diagnostic_url(url.as_str()),
             https_only,
-        }),
+        },
+        HttpError::UrlCredentials => DownloadError::UrlCredentials {
+            url: diagnostic_url(url.as_str()),
+        },
+        source => DownloadError::Request {
+            url: diagnostic_url(url.as_str()),
+            source: source.into(),
+        },
+    })
+}
+
+fn check_redirect(current: &Url, target: &Url, https_only: bool) -> Result<()> {
+    check_scheme(target, https_only || current.scheme() == "https")?;
+    if target.scheme() == "http" && target.origin() != current.origin() {
+        return Err(DownloadError::InsecureRedirect {
+            url: diagnostic_url(target.as_str()),
+        });
     }
+    Ok(())
 }
 
 fn redirect_target(current: &Url, response: &Response) -> Result<Url> {
@@ -111,14 +129,14 @@ fn redirect_target(current: &Url, response: &Response) -> Result<Url> {
         .header("Location")
         .map(|value| value.last().as_str())
         .ok_or_else(|| DownloadError::RedirectWithoutLocation {
-            url: current.to_string(),
+            url: diagnostic_url(current.as_str()),
             status: response.status(),
         })?;
     current
         .join(location)
         .map_err(|source| DownloadError::RedirectTargetInvalid {
-            base: current.to_string(),
-            location: location.to_owned(),
+            base: diagnostic_url(current.as_str()),
+            location: "<invalid redirect>".into(),
             source,
         })
 }
@@ -155,12 +173,12 @@ impl Stream<'_> {
                 .run(timeout(READ_TIMEOUT, reader.read(buffer)))
                 .await?
                 .map_err(|_| DownloadError::Timeout {
-                    url: self.url.to_owned(),
+                    url: diagnostic_url(self.url),
                     phase: "body chunk",
                     after: READ_TIMEOUT,
                 })?
                 .map_err(|source| DownloadError::BodyRead {
-                    url: self.url.to_owned(),
+                    url: diagnostic_url(self.url),
                     source,
                 })?;
             if count == 0 {
@@ -196,7 +214,7 @@ impl Length {
     fn check(self, url: &str, actual: u64, complete: bool) -> Result<()> {
         match self {
             Self::UpTo(limit) if actual > limit => Err(DownloadError::SizeLimit {
-                url: url.to_owned(),
+                url: diagnostic_url(url),
                 limit,
             }),
             Self::Exact(expected) if actual > expected || (complete && actual != expected) => {
@@ -251,6 +269,22 @@ mod tests {
             Err(DownloadError::UnsupportedScheme { .. })
         ));
         assert!(check_scheme(&next, false).is_ok());
+    }
+
+    #[test]
+    fn redirects_follow_the_rules_for_https_and_configured_mirrors() {
+        let https = Url::parse("https://source.invalid/file").unwrap();
+        let http = Url::parse("http://source.invalid/file").unwrap();
+        assert!(check_redirect(&https, &http, false).is_err());
+        assert!(check_redirect(&http, &http.join("/other").unwrap(), false).is_ok());
+        assert!(check_redirect(&http, &https, false).is_ok());
+        let other = Url::parse("http://other.invalid/file").unwrap();
+        assert!(matches!(
+            check_redirect(&http, &other, false),
+            Err(DownloadError::InsecureRedirect { .. })
+        ));
+        let cdn = Url::parse("https://cdn.invalid/file").unwrap();
+        assert!(check_redirect(&https, &cdn, true).is_ok());
     }
 
     #[async_std::test]
