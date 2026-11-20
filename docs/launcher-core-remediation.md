@@ -344,3 +344,52 @@ production-коде. Два из них — явная запись по пут�
   открыто.
 
 Ручные и нативные проверки: `docs/manual-verification-plan.md`.
+
+## B01. Открытые корни и удерживаемые каталоги (21.11.2026, продолжение)
+
+Решение пользователя: алиасы настроенных корней сохраняются. Контракт:
+настроенный корень (root override, `dirs.*`) может быть ссылкой и
+разрешается один раз. Всё, что лаунчер создаёт под ним, открывается
+покомпонентно от удерживаемого дескриптора без следования ссылкам.
+
+- **`95c924b`** — `ObjectStore::beneath`/`child_of`: content store, asset
+  CAS, managed Java (`.managed`, `.managed/bytes`, блокировки операций),
+  runtime blobs. Корень хранилища открывается от якоря, очистка staging
+  идёт от удерживаемого каталога. Регрессия
+  `subpath_store_follows_a_configured_alias_but_not_a_redirected_owned_component`
+  падает при прежнем разрешении по пути и проходит после исправления.
+  Существующие тесты на алиасы проходят без изменений.
+- **`ce88044`** — `Directory::open_beneath`/`open_child_of`. Через них
+  создаются каталог инстанса и natives при запуске, при этом natives
+  распаковываются в удерживаемый каталог. Тем же путём идут: ветка
+  `ensure_instance_directory` без lease, кэш каталога версий и
+  Maven-каталог поколения. Регрессии:
+  - `prepare_declines_a_redirected_instance_directory_without_writing_through_it`
+    падает с прежним созданием natives по пути;
+  - `open_beneath_follows_the_configured_anchor_but_not_owned_components`.
+- **`a3233fe`** — загрузка и распаковка установщиков Forge/NeoForge и
+  Cleanroom, перенос встроенных библиотек и рабочий каталог процессора
+  идут через удерживаемые каталоги `work` и `maven` поколения. Регрессия
+  `installer_preparation_refuses_a_replaced_work_directory`: замена пути
+  отклоняется, подложенный каталог не изменяется. Против прежнего кода
+  тест не запускался, потому что изменился API контекста.
+
+Linux: 695 passed, 0 failed, 1 ignored. fmt, check `--all-targets`, build и
+clippy прошли, число предупреждений равно базовому. `Cargo.lock` не изменился.
+
+**Статус B01 без изменений.** Остаются вызовы `Directory::ensure_path` с
+путём. Такой вызов следует через существующие промежуточные компоненты и
+отказывает только на последнем:
+
+- `utils/download/destination.rs` (`Destination::Path`);
+- `utils/process_pin.rs`, `utils/process.rs`, `utils/files/mod.rs`
+  (запись файла по пути);
+- `instance/download/artifacts/mod.rs`, `assets/storage.rs`;
+- `instance/init/generation_gc.rs`, `java/managed/extract.rs`;
+- `modloader/cleanroom/releases.rs`, `modloader/repository.rs`,
+  `modloader/forge/output.rs`;
+- `utils/files/placement.rs`, `instance/content/staging.rs`.
+
+Для каждого места нужно передать якорь или удерживаемый каталог. На Windows
+(`not(unix)`) операции `Directory` по-прежнему выполняются по пути. Нативная
+проверка Windows и macOS не выполнялась.
