@@ -26,6 +26,7 @@ use crate::{
     utils::{cancellation::Cancellation, download::Downloadable},
 };
 
+pub(crate) mod index;
 mod parse;
 mod retention;
 mod storage;
@@ -121,11 +122,18 @@ impl AssetsData {
         db: Arc<Database>,
         op: &OperationHandle,
     ) -> Result<AssetsOutcome, AssetSyncError> {
-        Self::sync_with_cancellation(manifest, paths, db, op, &Cancellation::new()).await
+        Self::sync_with_cancellation(
+            parse::extract_assets(manifest)?,
+            paths,
+            db,
+            op,
+            &Cancellation::new(),
+        )
+        .await
     }
 
     pub(crate) async fn sync_with_cancellation(
-        manifest: &serde_json::Value,
+        wanted: Vec<AssetInfo>,
         paths: &LauncherPaths,
         db: Arc<Database>,
         op: &OperationHandle,
@@ -136,8 +144,6 @@ impl AssetsData {
         let started = Instant::now();
 
         let objects_dir = paths.assets().join("objects");
-        let wanted = parse::extract_assets(manifest)?;
-
         let store = DbAssetStore::new(db, objects_dir.clone(), cancel.clone());
         let outcome = Syncer::default()
             .run_with_cancellation(

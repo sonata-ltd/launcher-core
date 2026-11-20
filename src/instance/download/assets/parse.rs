@@ -10,18 +10,20 @@ pub fn extract_assets(manifest: &serde_json::Value) -> Result<Vec<AssetInfo>, As
     let mut assets = Vec::with_capacity(objects.len());
 
     for (name, value) in objects {
-        let hash = value["hash"]
-            .as_str()
-            .filter(|hash| crate::utils::files::hash_valid(hash, 40))
-            .ok_or_else(|| AssetSyncError::InvalidHash(name.clone()))?
-            .to_ascii_lowercase();
-
-        assets.push(AssetInfo {
-            name: name.clone(),
-            url: format!("{}/{}/{}", ASSETS_BASE_URL, &hash[..2], hash),
-            hash,
-        });
+        assets.push(asset(name.clone(), value["hash"].as_str())?);
     }
 
     Ok(assets)
+}
+
+pub(super) fn asset(name: String, hash: Option<&str>) -> Result<AssetInfo, AssetSyncError> {
+    let Some(hash) = hash.filter(|hash| crate::utils::files::hash_valid(hash, 40)) else {
+        return Err(AssetSyncError::InvalidHash(name));
+    };
+    let hash = hash.to_ascii_lowercase();
+    Ok(AssetInfo {
+        name,
+        url: format!("{}/{}/{}", ASSETS_BASE_URL, &hash[..2], hash),
+        hash,
+    })
 }

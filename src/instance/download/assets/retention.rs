@@ -1,7 +1,7 @@
 //! Asset CAS retention. Minecraft never executes/reads these canonical objects:
 //! it reads isolated SHA-1 placements, which this collector never deletes.
 //! Conservative roots include every asset DB row, index checksum and placement.
-use super::storage::bytes_error;
+use super::{index::Index, storage::bytes_error};
 use crate::{
     data::db::{retention::LockedDatabases, Database, DbError},
     utils::{
@@ -22,8 +22,6 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, DbError>;
-
-mod index;
 
 pub(super) async fn attach(
     db: Arc<Database>,
@@ -135,10 +133,12 @@ fn placement_roots(assets: &Path, roots: &mut Roots) -> io::Result<()> {
     if directory(&indexes)? {
         for entry in fs::read_dir(indexes)? {
             let entry = entry?;
-            let index: index::Index =
-                serde_json::from_slice(&read_regular(&entry.path(), 32 * 1024 * 1024)?)
-                    .map_err(io::Error::other)?;
-            for object in index.objects {
+            let index: Index = serde_json::from_slice(&read_regular(
+                &entry.path(),
+                crate::utils::download::MAX_MANIFEST_BYTES as u64,
+            )?)
+            .map_err(io::Error::other)?;
+            for (_, object) in index.objects {
                 add_hash(roots, &object.hash)?;
             }
         }

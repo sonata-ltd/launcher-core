@@ -28,6 +28,15 @@ pub enum ManifestError {
 
     #[error("download failed: {0}")]
     DownloadFailed(#[source] crate::utils::download::error::DownloadError),
+
+    #[error("invalid asset index JSON: {0}")]
+    InvalidAssetIndexJson(#[source] serde_json::Error),
+
+    #[error("asset index {id:?}: {details}")]
+    AssetIndexIntegrity { id: String, details: String },
+
+    #[error("asset index filesystem error: {0}")]
+    AssetIndexFile(#[from] FileError),
 }
 
 pub async fn fetch_manifest(url: &str) -> Result<serde_json::Value, ManifestError> {
@@ -94,37 +103,14 @@ pub async fn load_cached<P: AsRef<Path>>(url: &str, save_dir: P) -> Option<serde
 }
 
 pub fn asset_index_id(version_manifest: &serde_json::Value) -> Result<&str, ManifestError> {
-    version_manifest
+    let id = version_manifest
         .get("assetIndex")
         .and_then(|v| v.get("id"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ManifestError::ManifestMalformed("missing assetIndex.id".to_string()))
-}
-
-pub async fn get_assets_manifest<'a, P: AsRef<Path>>(
-    version_manifest: &'a serde_json::Value,
-    save_dir: P,
-) -> Result<(serde_json::Value, &'a str), ManifestError> {
-    let asset_index = version_manifest
-        .get("assetIndex")
-        .and_then(|v| v.as_object())
-        .ok_or(ManifestError::ManifestMalformed(
-            "missing assetIndex".to_string(),
-        ))?;
-
-    let asset_url =
-        asset_index
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or(ManifestError::ManifestMalformed(
-                "missing assetIndex.url".to_string(),
-            ))?;
-
-    let asset_id = asset_index_id(version_manifest)?;
-
-    let manifest = fetch_and_cache_manifest(asset_url, save_dir).await?;
-
-    Ok((manifest.0, asset_id))
+        .ok_or_else(|| ManifestError::ManifestMalformed("missing assetIndex.id".to_string()))?;
+    crate::utils::files::portable_name::validate_file_name(id)
+        .map_err(|_| ManifestError::ManifestMalformed("unsafe assetIndex.id".into()))?;
+    Ok(id)
 }
 
 #[cfg(test)]

@@ -16,8 +16,10 @@ use crate::{
         self,
         download::{
             artifacts::{self, Wanted},
-            assets::AssetsData,
-            manifest::get_assets_manifest,
+            assets::{
+                index::{IndexPublication, VerifiedIndex, VERIFIED_INDEX},
+                AssetsData,
+            },
             transfer::Cancel,
         },
         init::{
@@ -135,6 +137,10 @@ pub(crate) async fn execute<'a>(
 
         context.cancel.check()?;
 
+        unvalidated_profile
+            .asset_index
+            .publish(context.paths)
+            .await?;
         init::storage::publish(&context.db, request.instance_id, &profile).await?;
 
         complete(context.op, OperationStage::VerifyFiles, started);
@@ -176,6 +182,7 @@ pub(crate) struct UnvalidatedProfile {
     libraries_root: PathBuf,
     wanted: Vec<Wanted>,
     metadata: Vec<MetadataPin>,
+    asset_index: IndexPublication,
 }
 
 async fn install<'a>(
@@ -328,16 +335,14 @@ async fn install<'a>(
 
     context.cancel.check()?;
 
-    let (assets, _) = context
+    let (asset_index, assets) = context
         .cancel
-        .run(get_assets_manifest(
-            &game_components.manifest,
-            context.paths.assets().join("indexes"),
-        ))
-        .await??;
+        .run(VerifiedIndex::download(&game_components.manifest))
+        .await??
+        .into_parts()?;
 
     AssetsData::sync_with_cancellation(
-        &assets,
+        assets,
         context.paths,
         Arc::clone(&context.db),
         context.op,
@@ -345,6 +350,7 @@ async fn install<'a>(
     )
     .await?;
 
+    game_components.manifest[VERIFIED_INDEX] = serde_json::Value::Bool(true);
     let profile = UnvalidatedProfile {
         format_version: 1,
         minecraft: request.game_version.clone(),
@@ -354,6 +360,7 @@ async fn install<'a>(
         libraries_root: workspace.relative_maven_dir().to_path_buf(),
         wanted,
         metadata: game_components.pins,
+        asset_index,
     };
 
     Ok(profile)

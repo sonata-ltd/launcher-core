@@ -8,7 +8,7 @@ use super::{
 use crate::{
     data::layout::LauncherPaths,
     instance::{
-        download::{libs::LibInfo, transfer},
+        download::{assets::index, libs::LibInfo, transfer},
         error::InstanceError,
         init::model::{InstalledArtifact, InstalledProfile},
         model::InstanceRecord,
@@ -83,6 +83,11 @@ pub async fn prepare(
     }
 
     validate_java(java, &profile.java)?;
+    if profile.manifest[index::VERIFIED_INDEX].as_bool() == Some(true) {
+        index::verify_published(&profile.manifest, paths.assets())
+            .await
+            .map_err(InstanceError::Manifest)?;
+    }
     let maven = files::child(paths.libraries(), &profile.libraries_root)?;
     prepare_command(rec, settings, java, paths, &maven, profile, false).await
 }

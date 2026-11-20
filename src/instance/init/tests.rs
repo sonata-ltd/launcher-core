@@ -31,6 +31,237 @@ use crate::{
 };
 use serde_json::json;
 
+async fn install_asset_fixture(
+    paths: &LauncherPaths,
+    db: Arc<Database>,
+    server: &httpmock::MockServer,
+    route: &str,
+    id: &str,
+    body: &str,
+    expectation: (usize, String),
+) -> Result<InstalledProfile, InitError> {
+    let (size, sha1) = expectation;
+    let index_path = format!("/{route}/index.json");
+    let version_path = format!("/{route}/version.json");
+    let _index = server.mock(|when, then| {
+        when.path(&index_path);
+        then.status(200).body(body);
+    });
+    let _version = server.mock(|when, then| {
+        when.path(&version_path);
+        then.status(200).json_body(json!({
+            "mainClass": "Fixture",
+            "javaVersion": {"majorVersion": 17},
+            "arguments": {"game": ["--assetIndex", "${assets_index_name}"]},
+            "assetIndex": {"id": id, "url": server.url(index_path), "size": size, "sha1": sha1},
+        }));
+    });
+    let operations = OperationRegistry::new(EventBus::new(32));
+    let op = operations.begin("instance.install".into(), vec![]);
+    let cancel = Cancel::new();
+    let java_use = crate::java::managed::process::JavaRetention::new(
+        db.clone(),
+        paths.java_runtimes().clone(),
+    )
+    .begin(&cancel)
+    .await
+    .unwrap();
+    let request = InstallRequest {
+        meta_provider: MetaProvider::Mojang,
+        manifest_url: server.url(version_path),
+        ..vanilla_request()
+    };
+    let catalog = ModloaderCatalog::new(paths.meta().join("modloader-catalog"));
+    let result = install::execute(
+        &request,
+        &InstallContext {
+            paths,
+            db,
+            catalog: &catalog,
+            modloader_java_runtimes: &[],
+            java_use: &java_use,
+            op: &op,
+            cancel: &cancel,
+        },
+    )
+    .await;
+    java_use.finish(true);
+    op.finish(if result.is_ok() {
+        Outcome::Completed
+    } else {
+        Outcome::Failed
+    });
+    result
+}
+
+fn fixture_sha1(body: &str) -> String {
+    use sha1::{Digest, Sha1};
+    format!("{:x}", Sha1::digest(body.as_bytes()))
+}
+
+#[async_std::test]
+async fn asset_index_install_publication_matches_prepared_game_id_after_restart() {
+    use crate::{instance::model::InstanceRecord, java::model::JavaRuntime};
+    const BODY: &str = "{ \"objects\": {}, \"virtual\": false }\n";
+    let (temp, paths, _, _) = empty_installation().await;
+    let url = format!("sqlite://{}", temp.path().join("test.sqlite").display());
+    let db = Arc::new(Database::init(&url).await.unwrap());
+    sqlx::query(
+        "INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider)
+         VALUES(1,'test','test','1.20.1','vanilla','fixture','prism')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let server = httpmock::MockServer::start();
+    install_asset_fixture(
+        &paths,
+        db.clone(),
+        &server,
+        "first",
+        "actual-game-id",
+        BODY,
+        (BODY.len(), fixture_sha1(BODY)),
+    )
+    .await
+    .unwrap();
+    drop(db);
+    let db = Arc::new(Database::init(&url).await.unwrap());
+    let record = InstanceRecord {
+        id: 1.into(),
+        name: "test".into(),
+        dir: "test".into(),
+        version: "1.20.1".into(),
+        loader: LoaderKind::Vanilla,
+        loader_version: None,
+        manifest_url: String::new(),
+        meta_provider: "prism".into(),
+    };
+    let profile = storage::load(&db, record.id).await.unwrap().unwrap();
+    let command = crate::instance::launch::resolved::prepare(
+        &record,
+        &crate::instance::settings::EffectiveSettings {
+            java_runtime: Some(1),
+            memory_min: 512,
+            memory_max: 1024,
+            jvm_args: vec![],
+        },
+        &JavaRuntime {
+            id: 1,
+            major: 17,
+            version: "17".into(),
+            arch: None,
+            exec_path: "java".into(),
+            home_path: String::new(),
+            vendor: None,
+            source: Default::default(),
+        },
+        &paths,
+        profile.clone(),
+    )
+    .await
+    .unwrap();
+    let game_id = &command
+        .args
+        .windows(2)
+        .find(|pair| pair[0] == "--assetIndex")
+        .unwrap()[1];
+    assert_eq!(game_id, "actual-game-id");
+    let published = paths
+        .assets()
+        .join("indexes")
+        .join(format!("{game_id}.json"));
+    assert_eq!(std::fs::read(&published).unwrap(), BODY.as_bytes());
+
+    const OTHER: &str = "{\"objects\":{}}";
+    for (route, id, size, sha1, succeeds) in [
+        (
+            "bad-size",
+            "actual-game-id",
+            OTHER.len() + 1,
+            fixture_sha1(OTHER),
+            false,
+        ),
+        (
+            "bad-hash",
+            "actual-game-id",
+            OTHER.len(),
+            fixture_sha1("different"),
+            false,
+        ),
+        (
+            "conflict",
+            "actual-game-id",
+            OTHER.len(),
+            fixture_sha1(OTHER),
+            false,
+        ),
+        (
+            "second",
+            "second-game-id",
+            OTHER.len(),
+            fixture_sha1(OTHER),
+            true,
+        ),
+    ] {
+        let result =
+            install_asset_fixture(&paths, db.clone(), &server, route, id, OTHER, (size, sha1))
+                .await;
+        assert_eq!(result.is_ok(), succeeds, "{result:?}");
+        assert_eq!(std::fs::read(&published).unwrap(), BODY.as_bytes());
+        let current = storage::load(&db, record.id).await.unwrap().unwrap();
+        if !succeeds {
+            assert_eq!(current.libraries_root, profile.libraries_root);
+        } else {
+            assert_eq!(
+                std::fs::read(paths.assets().join("indexes/second-game-id.json")).unwrap(),
+                OTHER.as_bytes()
+            );
+            assert_ne!(current.libraries_root, profile.libraries_root);
+        }
+    }
+}
+
+#[async_std::test]
+async fn asset_index_install_rejects_duplicate_keys_before_persistence() {
+    use crate::instance::download::manifest::ManifestError;
+
+    let (_temp, paths, db, _) = empty_installation().await;
+    sqlx::query(
+        "INSERT INTO instances(id,name,dir,version,loader,manifest_url,meta_provider)
+         VALUES(1,'test','test','1.20.1','vanilla','fixture','prism')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+    let server = httpmock::MockServer::start();
+    for body in [
+        r#"{"objects":{"foo":{"hash":"0000000000000000000000000000000000000000"}},"objects":{}}"#,
+        r#"{"objects":{"foo":{"hash":"0000000000000000000000000000000000000000"},"foo":{"hash":"0000000000000000000000000000000000000000"}}}"#,
+        r#"{"objects":{"foo":{"hash":"0000000000000000000000000000000000000000","hash":"0000000000000000000000000000000000000000"}}}"#,
+    ] {
+        let result = install_asset_fixture(
+            &paths,
+            db.clone(),
+            &server,
+            &format!("bad-{}", body.len()),
+            "invalid",
+            body,
+            (body.len(), fixture_sha1(body)),
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(InitError::Manifest(ManifestError::InvalidAssetIndexJson(_)))
+            ),
+            "{result:?}"
+        );
+    }
+    assert!(storage::load(&db, 1.into()).await.unwrap().is_none());
+    assert!(!paths.assets().join("indexes").exists());
+}
+
 #[async_std::test]
 async fn failed_reinstall_removes_new_generation_and_preserves_published_installation() {
     let temp = tempfile::tempdir().unwrap();

@@ -49,9 +49,18 @@ pub async fn download(url: String) -> Result<Vec<u8>> {
 
 /// Version and asset manifests can exceed the provider catalog response limit.
 pub async fn download_in_json(url: &str) -> Result<serde_json::Value> {
+    let bytes = download_manifest_bytes(url).await?;
+    serde_json::from_slice(&bytes).map_err(|source| DownloadError::MalformedJson {
+        url: url.to_owned(),
+        source: source.into(),
+    })
+}
+
+pub(crate) const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
+
+pub(crate) async fn download_manifest_bytes(url: &str) -> Result<Vec<u8>> {
     use http::HttpError;
 
-    const MAX_MANIFEST_BYTES: usize = 32 * 1024 * 1024;
     let request = http::request(url).map_err(|error| match error {
         HttpError::InvalidUrl(source) => DownloadError::InvalidUrl {
             url: url.to_owned(),
@@ -73,7 +82,7 @@ pub async fn download_in_json(url: &str) -> Result<serde_json::Value> {
             url: url.to_owned(),
             source: error.into(),
         })?;
-    let bytes = timeout(
+    timeout(
         ONESHOT_TIMEOUT,
         http::read_response(response, MAX_MANIFEST_BYTES),
     )
@@ -100,10 +109,6 @@ pub async fn download_in_json(url: &str) -> Result<serde_json::Value> {
             url: url.to_owned(),
             source: other.into(),
         },
-    })?;
-    serde_json::from_slice(&bytes).map_err(|source| DownloadError::MalformedJson {
-        url: url.to_owned(),
-        source: source.into(),
     })
 }
 
