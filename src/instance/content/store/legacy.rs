@@ -12,7 +12,7 @@ use crate::{
         content::{error::Result, inventory, journal::Placement, model::ContentKind},
         model::InstanceId,
     },
-    utils::files::{self, digest::FileStamp},
+    utils::files::{self, digest::FileStamp, identity::FileIdentity},
     utils::{cancellation::Cancellation, jobs::supervisor::Tasks, object_store::ObjectStore},
 };
 
@@ -150,7 +150,7 @@ async fn migrate(
         let outcome = async_std::task::spawn_blocking(move || {
             let _access = access;
             let path = files::child(&instance, &plan.relative_path)?;
-            Ok::<_, crate::utils::files::FileError>(detach(&path, &expected, &plan.stamp)?)
+            Ok::<_, crate::utils::files::FileError>(detach(&path, &expected, &plan)?)
         })
         .await;
         match outcome {
@@ -202,6 +202,9 @@ struct MigrationPlan {
     relative_path: PathBuf,
     stamp: FileStamp,
     mod_enabled: Option<bool>,
+    object: PathBuf,
+    identity: FileIdentity,
+    _object_handle: fs::File,
 }
 
 fn find_placement(
@@ -212,18 +215,12 @@ fn find_placement(
     store: &ObjectStore,
 ) -> Result<Option<MigrationPlan>> {
     let path = files::child(instance, recorded)?;
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() => {
-            return Ok(Some(MigrationPlan {
-                relative_path: recorded.to_owned(),
-                stamp: FileStamp::from_metadata(&metadata),
-                mod_enabled: None,
-            }))
-        }
+    let recorded_stamp = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Some(FileStamp::from_metadata(&metadata)),
         Ok(_) => return Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
-    }
+    };
     let object = store.path_for(expected)?;
     let object = files::child(store.root(), object.strip_prefix(store.root()).unwrap())?;
     match fs::symlink_metadata(&object) {
@@ -232,75 +229,59 @@ fn find_placement(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     }
+    let object_handle = fs::File::open(&object)?;
+    let identity = FileIdentity::from_handle(&object_handle)?;
+    if FileIdentity::at(&object)? != identity {
+        return Ok(None);
+    }
+    if let Some(stamp) = recorded_stamp {
+        if FileIdentity::at(&path)? != identity {
+            return Ok(None);
+        }
+        return Ok(Some(MigrationPlan {
+            relative_path: recorded.to_owned(),
+            stamp,
+            mod_enabled: None,
+            object,
+            identity,
+            _object_handle: object_handle,
+        }));
+    }
+    let candidates = inventory::inventory_scope(instance, kind)?.entries;
+    #[cfg(test)]
+    async_std::task::block_on(crate::instance::content::install::checkpoints::wait(
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &files::path_key(instance)),
+        "legacy-before-identity",
+    ));
     let mut found = None;
-    for entry in inventory::inventory_scope(instance, kind)?.entries {
+    for entry in candidates {
         if let inventory::ObservedType::Archive(candidate) = entry.entry_type {
-            if same_physical_file(&object, &files::child(instance, &entry.relative_path)?) {
+            // Treat an unobservable candidate as unknown, including a file
+            // that went away after scanning the scope. It cannot prove uniqueness.
+            let candidate_path = files::child(instance, &entry.relative_path)?;
+            if FileIdentity::at(&candidate_path)? == identity {
                 if found.is_some() {
                     return Ok(None); // Multiple aliases do not identify a unique binding.
                 }
-                found = Some(MigrationPlan {
-                    relative_path: entry.relative_path,
-                    stamp: candidate,
-                    mod_enabled: entry.mod_enabled,
-                });
+                found = Some((entry.relative_path, candidate, entry.mod_enabled));
             }
         }
     }
-    Ok(found)
+    Ok(
+        found.map(|(relative_path, stamp, mod_enabled)| MigrationPlan {
+            relative_path,
+            stamp,
+            mod_enabled,
+            object,
+            identity,
+            _object_handle: object_handle,
+        }),
+    )
 }
 
+#[cfg(test)]
 pub(in crate::instance::content) fn same_physical_file(left: &Path, right: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let left = fs::symlink_metadata(left);
-        let right = fs::symlink_metadata(right);
-        match (left, right) {
-            (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
-            _ => false,
-        }
-    }
-    #[cfg(windows)]
-    {
-        match (file_id(left), file_id(right)) {
-            (Some(left), Some(right)) => left == right,
-            _ => false,
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = (left, right);
-        false
-    } // Size/timestamps are not physical identity.
-}
-
-/// The (volume, 128-bit file ID) pair Windows treats as physical identity.
-/// Query failures return `None`: an unknown identity must fail closed, and the
-/// handle mirrors `symlink_metadata` semantics by not following reparse points.
-#[cfg(windows)]
-fn file_id(path: &Path) -> Option<(u64, [u8; 16])> {
-    use std::{os::windows::fs::OpenOptionsExt, os::windows::io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileIdInfo, GetFileInformationByHandleEx, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-    let mut options = std::fs::OpenOptions::new();
-    options
-        .access_mode(FILE_READ_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    let file = options.open(path).ok()?;
-    let mut info: FILE_ID_INFO = Default::default();
-    let queried = unsafe {
-        GetFileInformationByHandleEx(
-            file.as_raw_handle(),
-            FileIdInfo,
-            &mut info as *mut _ as *mut core::ffi::c_void,
-            size_of::<FILE_ID_INFO>() as u32,
-        )
-    };
-    (queried != 0).then(|| (info.VolumeSerialNumber, info.FileId.Identifier))
+    matches!((FileIdentity::at(left), FileIdentity::at(right)), (Ok(left), Ok(right)) if left == right)
 }
 
 #[cfg(test)]
@@ -312,20 +293,22 @@ pub(in crate::instance::content) fn checkpoint(instances: &Path, dir: &str) -> u
 }
 
 /// Returns whether the isolated bytes still match the registered object.
-fn detach(path: &Path, expected: &str, planned: &FileStamp) -> io::Result<Option<bool>> {
+fn detach(path: &Path, expected: &str, planned: &MigrationPlan) -> io::Result<Option<bool>> {
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => FileStamp::from_metadata(&metadata),
         Ok(_) => return Ok(None),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
-    if before != *planned {
+    if before != planned.stamp || FileIdentity::at(&planned.object)? != planned.identity {
         return Err(io::Error::other(
             "legacy mod changed after identity verification",
         ));
     }
     let mut file = fs::File::open(path)?;
-    if before != FileStamp::from_metadata(&file.metadata()?) {
+    if before != FileStamp::from_metadata(&file.metadata()?)
+        || FileIdentity::from_handle(&file)? != planned.identity
+    {
         return Err(io::Error::other("legacy mod changed before copying"));
     }
     let parent = path
@@ -337,9 +320,12 @@ fn detach(path: &Path, expected: &str, planned: &FileStamp) -> io::Result<Option
         .set_permissions(file.metadata()?.permissions())?;
     copy.as_file().sync_all()?;
     let matches = files::sha256_file(copy.path())?.eq_ignore_ascii_case(expected);
-    drop(file);
     let current = fs::symlink_metadata(path)?;
-    if !current.is_file() || before != FileStamp::from_metadata(&current) {
+    if !current.is_file()
+        || before != FileStamp::from_metadata(&current)
+        || FileIdentity::at(path)? != planned.identity
+        || FileIdentity::at(&planned.object)? != planned.identity
+    {
         return Err(io::Error::other("legacy mod changed while copying"));
     }
     copy.persist(path).map_err(|error| error.error)?;

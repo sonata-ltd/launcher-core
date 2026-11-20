@@ -9,12 +9,21 @@ pub(crate) struct FileIdentity {
 impl FileIdentity {
     #[cfg(unix)]
     pub(crate) fn at(path: &Path) -> io::Result<Self> {
+        Ok(Self::from_metadata(&fs::symlink_metadata(path)?))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn from_handle(file: &fs::File) -> io::Result<Self> {
+        Ok(Self::from_metadata(&file.metadata()?))
+    }
+
+    #[cfg(unix)]
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
-        let metadata = fs::symlink_metadata(path)?;
-        Ok(Self {
+        Self {
             device: metadata.dev(),
             file: metadata.ino().into(),
-        })
+        }
     }
 
     #[cfg(windows)]
@@ -59,6 +68,11 @@ impl FileIdentity {
 
     #[cfg(not(any(unix, windows)))]
     pub(crate) fn at(_: &Path) -> io::Result<Self> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    pub(crate) fn from_handle(_: &fs::File) -> io::Result<Self> {
         Err(io::ErrorKind::Unsupported.into())
     }
 }

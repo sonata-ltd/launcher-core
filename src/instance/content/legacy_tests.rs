@@ -308,14 +308,50 @@ async fn aliases_outside_the_known_archive_inventory_are_left_untouched() {
 }
 
 #[async_std::test]
-async fn a_recorded_path_can_be_isolated_even_when_cas_is_missing() {
+async fn absent_cas_cannot_prove_ownership_of_a_recorded_path() {
     let f = fixture().await;
     let (_, object, target) = registered_link(&f).await;
     fs::remove_file(&object).unwrap();
+    let before = stamp(&target);
+    let rows = bindings(&f).await;
     let service = startup(&f).await;
-    assert_eq!(bindings(&f).await[0].placement, "copy");
+    assert_eq!(bindings(&f).await, rows);
+    assert_eq!(stamp(&target), before);
     assert_eq!(fs::read(target).unwrap(), b"verified bytes");
     assert!(!object.exists());
+    drop(service);
+    f.operations.tasks.shutdown().await;
+}
+
+#[cfg(any(unix, windows))]
+#[async_std::test]
+async fn unknown_candidate_identity_defers_even_when_one_legacy_alias_is_identified() {
+    let f = fixture().await;
+    let (_, object, target) = registered_link(&f).await;
+    let alias = f.root.join("mods/renamed.jar");
+    fs::rename(target, &alias).unwrap();
+    let unknown = f.root.join("mods/unknown.jar");
+    fs::write(&unknown, b"independent file").unwrap();
+    let rows = bindings(&f).await;
+    let mut pause = Pause::new(
+        legacy::checkpoint(
+            f.paths.instances(),
+            f.root.file_name().unwrap().to_str().unwrap(),
+        ),
+        "legacy-before-identity",
+    );
+    let inspect = async {
+        pause.entered().await;
+        fs::rename(&unknown, f.root.join("kept.jar")).unwrap();
+        pause.resume();
+    };
+    let (service, ()) = futures::join!(startup(&f), inspect);
+    assert_eq!(bindings(&f).await, rows);
+    assert!(legacy::same_physical_file(&object, &alias));
+    assert_eq!(
+        fs::read(f.root.join("kept.jar")).unwrap(),
+        b"independent file"
+    );
     drop(service);
     f.operations.tasks.shutdown().await;
 }
