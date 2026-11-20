@@ -118,6 +118,8 @@ Containment проверяется только при `full.exists()`. Для `
 
 **Последствие:** файловая граница не выполняется при создании новых файлов; helper используется загрузкой артефактов и ZIP extraction. **Исправление:** проверка существующих предков и явная политика symlink; для конкурентно изменяемых деревьев — directory handles/no-follow, где доступно. Canonicalize перед записью всё ещё оставляет TOCTOU. Regression: missing target, broken symlink, подмена предка.
 
+**Наблюдение (20 ноября, этот commit):** внешний scratch-потребитель против shipped `child()` из `utils::files`: статичная проверка — 7/7 отсутствующих targets под escaping symlink отклонены обычным путём; при конкурентной подмене предка 7/7 записей физически оказались вне корня — documented window подтверждён наблюдением, исправление конкурентного пути не заявляется. Статус B01 без изменений. Локальный non-durable log: `/tmp/opencode/core-wine-evidence/e_prefix_race.log`.
+
 ### B02. P1 — Hardlink делает CAS изменяемым из экземпляра
 
 **Места:** [src/instance/content/install.rs:128](/home/quartix/Projects/launcher/core/src/instance/content/install.rs:128), [src/utils/files/placement.rs:42](/home/quartix/Projects/launcher/core/src/utils/files/placement.rs:42), [src/instance/content/tests.rs:98](/home/quartix/Projects/launcher/core/src/instance/content/tests.rs:98). **Воспроизведено на исходной place_new.**

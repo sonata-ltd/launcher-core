@@ -225,6 +225,27 @@ Closes the observation-only gap для Modrinth-ветки; CurseForge success p
 `CURSEFORGE_API_KEY` (keyless fail-closed и invalid-key `Err` execution — закрыты этим
 шагом). Live providers этим шагом не объявляются полностью закрытыми.
 
+## B01-спостереження: конкурентна підміна предка (20 ноября, этот commit)
+
+Scratch-потребитель `/tmp/opencode/core-scenarios` (path-dep на core, scratch lock
+изменён, repo lock не двигался) выполнил против shipped кода `utils::files::child`
+два сценария по 7 повторов каждый, только через public API:
+
+- **Static:** 7/7 отсутствующих targets под escaping symlink отклонены обычным
+  путём shipped `child()` — Regression-контракт (missing target, broken symlink)
+  работает.
+- **Race:** при конкурентной подмене предка 7/7 записей физически landed
+  вне корня — documented window (коммент в `src/utils/files/mod.rs`: "This check
+  assumes another process isn't replacing directories during I/O") подтверждён
+  наблюдением. Исправление конкурентного пути не заявляется; статус B01 без
+  изменений («Исправлен обычный путь»).
+
+Стандартный Linux pipeline не пере-запускался: `620 library + 2 CLI + 2 integration
++ 18 doctests, 0 failed, 1 ignored` сохраняются; новых core-тестов этот шаг не
+добавляет (scratch binaries — не core tests). Log:
+`/tmp/opencode/core-wine-evidence/e_prefix_race.log` — локальный non-durable
+evidence (`OBS static-prefix-rejected: 7/7`; `OBS race-bytes-landed-outside-root: 7/7`).
+
 ## Что остаётся открытым
 
 P11-V02 **частичен**, не завершён: actual native Windows/macOS reports; manual

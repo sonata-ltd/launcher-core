@@ -190,7 +190,9 @@ JSON, CurseForge без `x-api-key` HTTP 403 (code требует ключ до 
 путь по Modrinth-ветке выполнен против live responses от 20 ноября (search/dispatch,
 normalize по top hit, exact_release; CurseForge — keyless fail-closed in-code и
 execution с invalid key → `Err Http(403)`); success path CurseForge открыт до
-`CURSEFORGE_API_KEY`.
+`CURSEFORGE_API_KEY`. Конкурентна підміна зовнішніх writers підтверджена спостереженням
+від 20 листопада (B01-сімейство): static — 7/7 відхилено shipped кодом, race —
+7/7 записей опинилися поза коренем; виправлення конкурентного шляху не заявляється.
 Abnormal GUI process
 termination не превращается в cooperative close. Исторические string UI adapters
 вне Java runtime/settings и content recovery не объявлены полностью мигрированными.
