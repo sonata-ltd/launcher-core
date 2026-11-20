@@ -23,14 +23,14 @@ Linux x86-64, Rust 1.98.1. Штатный runner использовал `--locke
 | F02 | 3 | CONFIRMED | BLOCKED |
 | F03 | 3 | CONFIRMED | FIXED / VERIFIED |
 | F04 | 3 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
-| F07 | 3 | CONFIRMED | BLOCKED |
-| F14 | 3 | PARTIALLY CONFIRMED | BLOCKED |
+| F07 | 3 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
+| F14 | 3 | PARTIALLY CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
 | F05 | 4 | CONFIRMED | FIXED / VERIFIED |
 | F08 | 4 | CONFIRMED | FIXED / VERIFIED |
 | F17 | 4 | CONFIRMED | FIXED / VERIFIED |
 | F19 | 4 | CONFIRMED | FIXED / VERIFIED |
 | F10 | 5 | CONFIRMED | FIXED / VERIFIED |
-| F11 | 5 | PARTIALLY CONFIRMED | BLOCKED |
+| F11 | 5 | PARTIALLY CONFIRMED | FIXED / VERIFIED |
 | F12 | 5 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
 | F16 | 5 | PARTIALLY CONFIRMED | FIXED / VERIFIED |
 | F18 | 5 | PARTIALLY CONFIRMED | FIXED / VERIFIED |
@@ -38,7 +38,7 @@ Linux x86-64, Rust 1.98.1. Штатный runner использовал `--locke
 
 Из 23 находок подтверждено 19, частично подтверждено 4. Вердикты FALSE POSITIVE,
 OBSOLETE и NOT VERIFIED не присваивались. Состояние и вердикт отражают разные
-результаты проверки. Для F16 и F18 состояние относится к подтверждённой части.
+результаты проверки. Для F11, F16 и F18 состояние относится к подтверждённой части.
 
 ## Группа 1. Asset index и managed Java
 
@@ -64,8 +64,8 @@ OBSOLETE и NOT VERIFIED не присваивались. Состояние и 
 - **F02 — CONFIRMED, частичное исправление `8795203`.** Добавлена проверка границ путей assets и Forge. Linux-регрессия `initialization_refuses_an_assets_objects_directory_redirect` прошла. Windows-фикстура слинкована. Общая гарантия при конкурентных изменениях дерева требует операций от удерживаемого каталога на каждой целевой ОС.
 - **F03 — CONFIRMED, `5d2cd98`.** `modified_cas_bytes_are_never_published_under_the_registered_digest` меняет подконтрольный источнику файл после его исходной проверки и до копирования. До исправления SQL зарегистрировала старый digest для других байтов. `content/install.rs` проверяет digest и размер при staging, проверяет SHA-256 перед rename и освобождает preparation при отказе. Кооперативные процессы блокируются admission. Подмена файлов внешним writer после последней проверки остаётся областью F02.
 - **F04 — CONFIRMED, `43761e9`.** `legacy.rs` отделяет неизвестную identity от несовпадения и повторно проверяет физическую identity перед заменой. Linux-регрессии `unknown_candidate_identity_defers_even_when_one_legacy_alias_is_identified` и `absent_cas_cannot_prove_ownership_of_a_recorded_path` прошли. Нужна нативная проверка Win32 file ID и sharing. Копирование сохраняет обычные permissions. Сохранение ACL и xattrs остаётся неподтверждённым.
-- **F07 — CONFIRMED, BLOCKED.** `sql_failure_after_isolation_preserves_bytes_cas_and_original_binding` подтверждает FS success → SQL failure. При повторном запуске в `legacy.rs` зарегистрированное имя уже отсутствует, а новая копия имеет собственный inode и не соответствует открытому CAS. Digest мог остаться прежним и не подтверждает, кто опубликовал файл. Вариант восстановления требует durable intent до rename, удостоверяемую identity опубликованного файла и сохранение изменённых файлов на отказе. Выдавать новый journal за защиту без согласованного контракта F02/F04 было бы некорректно.
-- **F14 — PARTIALLY CONFIRMED, BLOCKED.** SQL сравнивает точное представление пути, тогда как эквивалентность зависит от тома. На NTFS и APFS требуются нативные проверки, инвентаризация исторических конфликтов и правила их разрешения до миграции.
+- **F07 — CONFIRMED.** `sql_failure_after_isolation_preserves_bytes_cas_and_original_binding` подтверждает FS success → SQL failure. Для восстановления требуется долговременное подтверждение опубликованной копии. Решение описано в продолжении ниже.
+- **F14 — PARTIALLY CONFIRMED.** SQL сравнивал точное представление пути, тогда как эквивалентность зависит от тома. Для неоднозначных исторических записей добавлен безопасный отказ. Нативные проверки NTFS и APFS остаются открытыми.
 
 Протоколы `group3-before-retry.log`, `group3-focused-retry.log`, `group3-linux`, `group3-windows-gnu` и `group3-clippy.log`. На Linux прошли 628 библиотечных, 2 CLI, 6 интеграционных и 18 doctests, один ignored. Windows GNU подтвердил компиляцию и линковку.
 
@@ -78,7 +78,7 @@ OBSOLETE и NOT VERIFIED не присваивались. Состояние и 
 ## Группа 5. Надёжность и ограничения ресурсов
 
 - **F10 — CONFIRMED, `2002dc6`.** Recovery и retention в `java/managed` получили общий строгий декодер. Тест `duplicate_managed_record_keys_defer_recovery_and_collection` прошёл после исходного отказа проверки. Запись сохраняется и появляется в диагностике, сборка откладывается.
-- **F11 — PARTIALLY CONFIRMED, частичное исправление `7accf62`.** В метаданных проверяется схема URL и сохраняются типизированные транспортные ошибки. Диагностический URL ограничен. Тесты `metadata_rejects_unsupported_schemes_without_exposing_url_secrets` и `preserves_http_failure_as_download_error` прошли. Единая политика доверия к зеркалам и перенаправлениям остаётся открытой. Разные правила для публичного каталога, настроенного зеркала и pinned Java сами по себе допустимы.
+- **F11 — PARTIALLY CONFIRMED, первое исправление `7accf62`.** В метаданных проверяется схема URL, сохраняются типизированные транспортные ошибки, диагностический URL ограничен. Политика источников и перенаправлений описана в продолжении ниже.
 - **F12 — CONFIRMED, `7accf62` и `d6d3fd9`.** `metadata_cache` ограничивает чтение с диска. Cleanroom ограничивает размер метаданных пакета и совокупных patches. ZIP-распаковка ограничивает фактические байты, managed Java также ограничивает число записей. `forge` пишет объединённый лог до 32 МиБ и продолжает читать вывод после исчерпания лимита. Прошли `oversized_cached_metadata_is_refused_before_it_reaches_the_repository_caller`, `zip_entry_budget_is_enforced_before_creating_outputs`, `processor_log_limit_drains_output_without_blocking_child_completion` и `the_platform_pipe_finishes_and_keeps_one_truncation_notice`. Последний тест ожидает нативного Windows/macOS прогона.
 - **F16 — PARTIALLY CONFIRMED, `75d80ee` и `37020a0`.** Обратный индекс digest устраняет повторный обход архива для каждой записи planner reconciliation. `object_store/collection.rs` считает SHA-1 и SHA-256, используемые retention. Прежние тесты корней и replay прошли. Задержки на больших деревьях и продолжительность удержания SQLite locks не измерялись. Объём одного прохода GC и повторные обходы legacy migration открыты для измерений.
 - **F18 — PARTIALLY CONFIRMED, `7accf62`.** Типизированные причины сохранены на границах metadata HTTP, legacy launch и ZIP. `malformed_zip_preserves_the_archive_parser_cause` и тесты HTTP ошибок прошли. Остаточные предупреждения и совместимость опубликованных Rust-конструкторов требуют отдельного разбора перед удалением legacy helpers.
@@ -111,9 +111,8 @@ OBSOLETE и NOT VERIFIED не присваивались. Состояние и 
 GUI, аварийное отключение питания и сетевые тома вне данного покрытия.
 
 **Подключение к реальным пользовательским данным пока заблокировано.**
-До релиза остаются гарантии границ файловых путей F02, восстановление
-legacy migration F07, идентичность путей F14 и решение по транспортной
-политике F11. На время проверки операции записи и GC на исторических
+До релиза остаются полная гарантия границ файловых путей F02 и нативная
+валидация исправлений, включая F07 и F14. На время проверки операции записи и GC на исторических
 данных следует ограничить изолированными копиями. Обязательны нативные
 Windows и macOS проверки, включая Windows managed Java, а также чистый
 install → prepare → launch с отдельными тестовыми roots.
@@ -121,3 +120,23 @@ install → prepare → launch с отдельными тестовыми roots.
 `.cargo/config.toml`, `Cargo.lock` и `not-a-database-url` сохранили исходные
 контрольные суммы. Изменение `Cargo.toml` добавляет только Win32 Pipes feature.
 Проверки выполнялись на временных SQLite и файловых деревьях. Коммиты локальные.
+
+## Продолжение по F02, F07, F11 и F14
+
+- **F02 — частичное исправление.** `files::directory` добавляет операции от удерживаемого каталога. Публикация и recovery контента используют корень, открытый при bootstrap, а CAS удаляет объекты и записи через удерживаемый каталог. `directory_publication_declines_a_changed_destination` прошёл на Linux. Остаются файловые вызовы вне этого контракта, включая части staging, распаковку и внешние установщики. Полная гарантия для них требует отдельного контракта владения и нативной проверки.
+- **F07 — исправление, нативная валидация ожидается.** Миграция SQLite 0016 хранит намерение до файлового шага. Повторное открытие продолжает регистрацию только после подтверждения физической идентичности и содержимого собственной копии. `legacy_reopens_the_intent_and_recovers_only_the_published_file` проверяет повтор после сбоя SQLite и сохранение последующей пользовательской правки. При неопределённости намерение и файл остаются на месте.
+- **F11 — подтверждённая часть исправлена.** Публичные каталоги провайдеров и каталог managed Java требуют HTTPS. HTTP сохраняется для явно переданного URL зеркала. Переход на HTTPS и перенаправление в пределах того же HTTP-origin допускаются. Сетевой клиент каталогов с ключами продолжает использовать прямые запросы. `redirects_follow_the_rules_for_https_and_configured_mirrors` и `url_policy_rejects_embedded_credentials_before_client_initialization` прошли.
+- **F14 — исправление с консервативной стратегией, нативная валидация ожидается.** Эквивалентные исторические пути повторно используют существующую запись. Публикация и reconciliation откладывают неоднозначную привязку. Автоматического объединения исторических строк нет. `publication_reuses_the_binding_for_an_equivalent_historical_path` прошёл на Linux. Тест фактической эквивалентности имён для Windows и macOS ожидает нативного запуска.
+
+Коммиты продолжения `64287b4` для F11 и `5a0b0ed` для файловой группы.
+Намерение F07 создаётся для операций новой версии. Исторические операции,
+завершившие файловый шаг до внедрения журнала, по-прежнему требуют
+доказательства принадлежности копии.
+
+Итоговый Linux-прогон продолжения прошёл с 672 тестами и одним ignored.
+Форматирование, all-target check и сборка прошли. Clippy завершился с
+предупреждениями. Windows GNU прошёл проверку, линковку тестов и сборку.
+Нативные Windows и macOS остаются открытыми. В целевом прогоне прошли
+24 проверки, а Python runner прошёл 8. Протоколы сохранены в
+`/tmp/launcher-followup.ODRMTUVJ`. Контрольные суммы трёх ранее изменённых
+пользовательских файлов совпали.
