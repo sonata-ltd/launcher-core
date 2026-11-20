@@ -19,6 +19,7 @@
 | Linux x86_64, core — этот commit (`fix(content): resolve Windows physical file identity…`) | fmt, check --all-targets, test, build; locked/offline | PASS: 620 library + 2 CLI + 2 integration + 18 doctests; 0 failed, 1 ignored; lock_unchanged true |
 | Windows GNU из Linux — этот commit | fmt, check --all-targets, test --no-run, build; locked/offline | Cross-compile/link PASS; Windows execution не выполнялся; lock_unchanged true |
 | Windows native — dual-boot пользователь | Command из раздела «Воспроизведение», выполняемый на Windows | **Pending**: выполнит пользователь; commit land'ится с native Windows pending |
+| Real JVM detection (real JDK) | отдельный run `--include-ignored`, документирован ниже | PASS от 20 ноября: `probes_java_on_path` 1 passed, real JDK `27.0.1.0.3` |
 
 Здесь native означает ОС, на которой выполняется **core test binary**, не
 native GUI interaction. Windows GNU linking включает CLI и Rust test executables;
@@ -148,12 +149,35 @@ lock сохранены. Lock SHA-256:
 `45a050b11dd430a83528d17c98f474c26f767a039eebec35dac61df3951cf2a3`.
 `Cargo.lock` и ранее существовавший `not-a-database-url` не входят в этот commit.
 
+## Real-JVM probe от 20 ноября
+
+Единственный core ignore, `java::utils::tests::probes_java_on_path`, выполнен на
+этой Linux-машине с real JDK `27.0.1.0.3`: отдельный run по documented env
+`docs/check.sh` (SQLx offline, locked, без GUI config hierarchy):
+
+```sh
+bash docs/check.sh test -- --include-ignored java::utils::tests::probes_java_on_path
+```
+
+Результат: **1 passed, 0 failed** (`620 filtered out`; остальные targets — 0 tests).
+`detect_properties("java")` вернул `Some` major, arch и home_path — контракт
+детекта real JVM на PATH выполнен кодом core, не fixture. Полный стандартный
+Linux pipeline этого commit сохраняет прежние numbers: `620 library + 2 CLI + 2
+integration + 18 doctests, 0 failed, 1 ignored` — probe запускался отдельно,
+standard run не пере-запускался этим шагом.
+
+Это **только** real-JVM detection на PATH этой машины: live game/installer JVM,
+detached descendants, retention/ownership поведения JVM-roots, Windows/macOS
+JVM, manual GUI и live providers остаются открытыми. Log:
+`/tmp/opencode/core-jvm-probe-20nov.log` — локальный non-durable evidence.
+
 ## Что остаётся открытым
 
 P11-V02 **частичен**, не завершён: actual native Windows/macOS reports; manual
 isolated launch/install/content/recovery/normal close; реальные JVM/descendants,
 live providers и external concurrent FS/DB replacement. GUI проверка отложена
-пользователем, не отменена из критериев. Core ignore `probes_java_on_path` не PASS.
+пользователем, не отменена из критериев. Core ignore `probes_java_on_path` —
+**PASS от 20 ноября** этой секцией ниже.
 Unix-only symlink/shell/crash fixtures в других модулях этим шагом не объявлены
 проверенными на Windows. Power-loss/OS/disk crash durability не обещается.
 B02/B06/D08/S05/S06 сохраняют прежние partial ownership/provenance ограничения.

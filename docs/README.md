@@ -143,6 +143,8 @@ jobs ещё не запускались. Linux core fmt/all-target check/test/bu
 check/test --no-run/build прошли из Linux — **compile/link, не execution**. MSVC
 cross-check заблокирован C toolchain; macOS runner отсутствует. Четыре process
 regressions теперь используют controlled Rust child вместо Unix shell/sleep.
+Real-JVM detection probe `probes_java_on_path` PASS от 20 ноября на этой машине
+(real JDK `27.0.1.0.3`; отдельный run, стандартный suite сохраняет 1 ignored).
 [Команды, reports и ограничения](platform-verification.md). GUI запуск/явная
 проверка отложены пользователем; GUI runtime/manual не PASS.
 
@@ -180,7 +182,10 @@ Refresh от 20 ноября против текущего core `4f4f3b2` тем
 недостающие dependency metadata, ownership/placement migration и более агрессивный
 GC не угадываются автоматически. **P11-V02 частичен:** native Windows/macOS, manual isolated
 launch/install/content, реальные JVM/descendants, live providers, external concurrent
-FS/DB replacement и power-loss не получили runtime evidence. Abnormal GUI process
+FS/DB replacement и power-loss не получили runtime evidence. Уточнение от 20 ноября:
+real-JVM detection probe `probes_java_on_path` PASS на этой машине (real JDK
+`27.0.1.0.3`); live game/installer JVM и descendants по-прежнему без evidence.
+Abnormal GUI process
 termination не превращается в cooperative close. Исторические string UI adapters
 вне Java runtime/settings и content recovery не объявлены полностью мигрированными.
 

@@ -167,7 +167,10 @@ Page/headless tests используют controlled callbacks, не доказы
 - Concurrent external FS/DB replacement, power loss/OS crash/disk loss.
 - Abnormal renderer/process termination как graceful shutdown; News lifetime вне Tasks.
 
-Core ignore — `java::utils::tests::probes_java_on_path`. GUI ignores: один manual
+Core ignore — `java::utils::tests::probes_java_on_path`: **PASS от 20 ноября** на
+этой машине с real JDK `27.0.1.0.3` ([record](../platform-verification.md)); это
+detected-properties probe реального JVM на PATH, не live game/installer JVM.
+GUI ignores: один manual
 news preview, три Wayland/X11 activation/shadow fixtures и три explicit performance
 measurements. Они **не PASS**. Existing dead-code/unreachable/future-compatibility
 warnings сохраняются; warning-free build и native presentation не заявлены.

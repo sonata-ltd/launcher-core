@@ -112,4 +112,7 @@ Lock, dependency switch, GUI patches и user baseline в B06 commit не вхо�
   и внешние writers, не соблюдающие admission, не объявлены безопасными.
 - Native Windows/macOS execution, GUI runtime/manual verification, live providers,
   реальные JVM/descendants и power-loss остаются без evidence. Cross `--no-run`
-  не является выполнением Windows tests.
+  не является выполнением Windows tests. Уточнение от 20 ноября: real-JVM
+  detection probe `probes_java_on_path` PASS на этой Linux-машине
+  ([record](platform-verification.md)); live game/installer JVM и descendants
+  по-прежнему без evidence.
