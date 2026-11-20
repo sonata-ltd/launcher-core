@@ -1,6 +1,7 @@
 pub(crate) mod discovery;
 pub mod error;
 pub mod model;
+mod paths;
 pub mod policy;
 pub(crate) mod registry;
 pub(crate) mod select;

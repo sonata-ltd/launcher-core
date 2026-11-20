@@ -138,6 +138,40 @@ fn bytes(runtime: &NewJavaRuntime) {
     fs::write(exec, b"Java bytes").unwrap();
 }
 
+#[async_std::test]
+async fn managed_sql_encodes_nested_native_paths_as_portable_relative_paths() {
+    let (_dir, db, root) = fixture().await;
+    let mut runtime = managed(&root);
+    let home = root
+        .join("managed")
+        .join("package")
+        .join("generation")
+        .join("nested")
+        .join("jre");
+    let exec = home
+        .join("bin")
+        .join(if cfg!(windows) { "java.exe" } else { "java" });
+    runtime.home_path = Some(home.clone());
+    runtime.exec_path = Some(exec.clone());
+    bytes(&runtime);
+    let store = DbJavaStore::at(db.clone(), root.clone());
+    let row = store.insert(&runtime).await.unwrap();
+    assert_eq!(
+        snapshot(&db).await[0].5,
+        "managed/package/generation/nested/jre"
+    );
+    let reopened = DbJavaStore::at(db, root);
+    let runtime = reopened.get_by_id(row.id).await.unwrap().unwrap();
+    assert_eq!(
+        Path::new(&runtime.exec_path).canonicalize().unwrap(),
+        exec.canonicalize().unwrap()
+    );
+    assert_eq!(
+        Path::new(&runtime.home_path).canonicalize().unwrap(),
+        home.canonicalize().unwrap()
+    );
+}
+
 async fn snapshot(
     db: &Database,
 ) -> Vec<(

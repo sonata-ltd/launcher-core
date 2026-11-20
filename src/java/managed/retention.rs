@@ -326,10 +326,7 @@ fn directory(path: &Path) -> Result<bool> {
 }
 
 fn generation(path: &Path) -> Result<PathBuf> {
-    files::relative(path).map_err(storage)?;
-    if path.to_str().is_none_or(|path| path.contains('\\')) {
-        return Err(storage("unsafe managed Java generation"));
-    }
+    crate::java::paths::portable(path).map_err(storage)?;
     let parts: Vec<_> = path.iter().collect();
     if parts.len() < 3 || parts[0] != "managed" {
         return Err(storage("unknown managed Java generation layout"));

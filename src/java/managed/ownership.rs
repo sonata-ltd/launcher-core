@@ -68,6 +68,11 @@ impl HomeOwner {
         home: PathBuf,
         database: Option<String>,
     ) -> Result<Self> {
+        let home = if home.as_os_str().is_empty() {
+            home
+        } else {
+            crate::java::paths::portable(&home).map_err(storage)?.into()
+        };
         Ok(Self {
             version: 1,
             operation,
@@ -103,8 +108,8 @@ impl HomeOwner {
             || self.package.contains(['/', '\\', ':'])
             || self.package == "."
             || self.package == ".."
-            || self.home.to_str().is_none_or(|home| home.contains('\\'))
-            || (!self.home.as_os_str().is_empty() && files::relative(&self.home).is_err())
+            || (!self.home.as_os_str().is_empty()
+                && crate::java::paths::portable(&self.home).is_err())
             || self.created
                 > SystemTime::now()
                     .duration_since(UNIX_EPOCH)

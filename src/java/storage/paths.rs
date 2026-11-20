@@ -27,14 +27,12 @@ pub(super) fn relative(root: &Path, path: &Path) -> Option<PathBuf> {
     } else {
         path
     };
-    if !relative.starts_with("managed")
-        || relative == Path::new("managed")
-        || relative.to_str()?.contains('\\')
-    {
+    if !relative.starts_with("managed") || relative == Path::new("managed") {
         return None;
     }
-    files::child(root, relative).ok()?;
-    Some(relative.to_owned())
+    let relative = PathBuf::from(crate::java::paths::portable(relative).ok()?);
+    files::child(root, &relative).ok()?;
+    Some(relative)
 }
 
 pub(in crate::java) fn pair(root: &Path, exec: &Path, home: &Path) -> Option<(String, String)> {

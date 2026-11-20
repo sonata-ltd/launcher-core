@@ -5,7 +5,10 @@ use super::{
     Result,
 };
 use crate::utils::{files, object_store::catalog::read_regular};
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 pub(super) struct Report {
@@ -78,14 +81,25 @@ pub(super) fn decode_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<Rec
             return Err(storage("unknown managed operation record schema"));
         }
     }
-    let record: Record = serde_json::from_value(json).map_err(storage)?;
-    if path.file_name().and_then(|name| name.to_str())
-        != Some(&format!("{}.json", record.snapshot.id))
-        || record.home.as_ref().is_some_and(|home| {
-            home.to_string_lossy().contains('\\') || files::child(root, home).is_err()
-        })
-    {
+    let mut record: Record = serde_json::from_value(json).map_err(storage)?;
+    let id = record.snapshot.id;
+    if path.file_name().and_then(|name| name.to_str()) != Some(&format!("{id}.json")) {
         return Err(storage("invalid managed operation identity or home"));
+    }
+    if let Some(home) = &mut record.home {
+        let portable = crate::java::paths::portable(home).map_err(storage)?;
+        if cfg!(windows) && home.to_string_lossy().contains('\\') {
+            let package = &record.snapshot.package.id;
+            files::portable_name::validate_file_name(package).map_err(storage)?;
+            let generation = PathBuf::from("managed").join(package).join(id.to_string());
+            if !home.starts_with(generation) {
+                return Err(storage(
+                    "legacy Windows home does not match operation generation",
+                ));
+            }
+        }
+        *home = portable.into();
+        files::child(root, home).map_err(storage)?;
     }
     Ok(record)
 }

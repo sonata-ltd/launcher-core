@@ -261,6 +261,10 @@ async fn write_errors_reach_the_caller_without_false_progress() {
 }
 
 pub(in crate::java::managed) fn tar_fixture(path: &Path) {
+    tar_fixture_at(path, "jre");
+}
+
+fn tar_fixture_at(path: &Path, home: &str) {
     let encoder = flate2::write::GzEncoder::new(
         std::fs::File::create(path).unwrap(),
         flate2::Compression::default(),
@@ -274,7 +278,7 @@ pub(in crate::java::managed) fn tar_fixture(path: &Path) {
     tar.append_data(
         &mut header,
         format!(
-            "jre/bin/{}",
+            "{home}/bin/{}",
             if cfg!(windows) { "java.exe" } else { "java" }
         ),
         &content[..],
@@ -463,6 +467,71 @@ async fn installation_waits_for_explicit_validation_and_survives_restart() {
         .unwrap();
     assert_eq!(recovered.stage, ManagedJavaStage::AwaitingValidation);
     assert_eq!(recovered.runtime_id, None);
+}
+
+#[async_std::test]
+async fn nested_managed_home_uses_portable_paths_through_publication_and_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let service = ManagedJavaService::new(dir.path().into());
+    service.initialize().await.unwrap();
+    let archive = dir.path().join("nested.tar.gz");
+    tar_fixture_at(&archive, "jdk/Contents/Home");
+    let package = pin_archive(package(), &archive);
+    let id = insert(
+        &service,
+        record(package.clone(), ManagedJavaStage::Downloading),
+    );
+    create_staging(&service, id);
+    let staging = service.staging(id).join("archive.part");
+    std::fs::copy(archive, &staging).unwrap();
+    service
+        .install_archive(
+            id,
+            &package,
+            &Cancellation::new(),
+            staging,
+            package.sha256.clone(),
+        )
+        .await
+        .unwrap();
+
+    let generation = format!("managed/{}/{id}", package.id);
+    let home = format!("{generation}/jdk/Contents/Home");
+    let record_path = dir.path().join(format!(".managed/operations/{id}.json"));
+    let marker_path = dir.path().join(&generation).join(ownership::HOME_MARKER);
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let marker: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&marker_path).unwrap()).unwrap();
+    assert_eq!(record["home"], home);
+    assert_eq!(marker["home"], "jdk/Contents/Home");
+    assert_eq!(
+        std::fs::read(extract::executable(&dir.path().join(&home))).unwrap(),
+        b"placeholder"
+    );
+
+    #[cfg(windows)]
+    {
+        // Previous releases could serialize a native Windows operation path.
+        let mut historical = record;
+        historical["home"] = home.replace('/', "\\").into();
+        std::fs::write(&record_path, serde_json::to_vec(&historical).unwrap()).unwrap();
+        assert_eq!(
+            read_record(dir.path(), id).unwrap().unwrap().home.unwrap(),
+            Path::new(&home)
+        );
+    }
+    let recovered = ManagedJavaService::new(dir.path().into());
+    assert_eq!(
+        recovered.installation(id).await.unwrap().stage,
+        ManagedJavaStage::AwaitingValidation
+    );
+    assert!(recovered
+        .installations_report()
+        .await
+        .unwrap()
+        .diagnostics
+        .is_empty());
 }
 
 #[async_std::test]

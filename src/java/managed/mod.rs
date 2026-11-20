@@ -578,12 +578,14 @@ impl ManagedJavaService {
             None => None,
         };
         let owner = ownership::HomeOwner::new(id, package, relative_home.to_owned(), database)?;
+        let portable_home =
+            crate::java::paths::portable(&final_relative.join(relative_home)).map_err(storage)?;
         let owner_path = destination.clone();
         task::spawn_blocking(move || owner.write(&owner_path)).await?;
         #[cfg(test)]
         tests::ownership_checkpoint(&self.root, "home-owned");
         self.update(id, |record| {
-            record.home = Some(final_relative.join(relative_home))
+            record.home = Some(PathBuf::from(portable_home))
         });
         self.persist(id).await?;
         fs::create_dir_all(final_path.parent().expect("installation has parent"))
