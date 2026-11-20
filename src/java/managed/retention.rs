@@ -1,14 +1,11 @@
 //! Conservative Java domain roots, protected by managed admission and every
 //! catalogued database write lock. Inspection never deletes homes or archives.
-use super::{ownership::HomeOwner, storage, ManagedJavaError, Record, Result};
+use super::{ownership::HomeOwner, recovery, storage, ManagedJavaError, Result};
 use crate::{
     data::db::{retention::LockedDatabases, Database},
     utils::{
         files,
-        object_store::{
-            catalog::{read_regular, RootCatalog},
-            ObjectStore, StoreMaintenance,
-        },
+        object_store::{catalog::RootCatalog, ObjectStore, StoreMaintenance},
         process_pin,
     },
 };
@@ -191,57 +188,9 @@ pub(crate) async fn snapshot(configured: &Path) -> Result<Snapshot> {
             if entry.file_name() == ".locks" && entry.file_type().map_err(storage)?.is_dir() {
                 continue;
             }
-            let json: serde_json::Value =
-                serde_json::from_slice(&read_regular(&entry.path(), 1024 * 1024).map_err(storage)?)
-                    .map_err(storage)?;
-            if json.as_object().is_none_or(|object| {
-                object
-                    .keys()
-                    .any(|key| !["snapshot", "home", "owner"].contains(&key.as_str()))
-            }) {
-                return Err(storage("unknown managed operation record fields"));
-            }
-            for (body, fields) in [
-                (
-                    &json["snapshot"],
-                    &[
-                        "id",
-                        "created_at",
-                        "package",
-                        "stage",
-                        "downloaded_bytes",
-                        "total_bytes",
-                        "runtime_id",
-                        "error",
-                    ][..],
-                ),
-                (
-                    &json["snapshot"]["package"],
-                    &[
-                        "id",
-                        "version",
-                        "major",
-                        "target",
-                        "image_type",
-                        "url",
-                        "size",
-                        "sha256",
-                        "format",
-                    ][..],
-                ),
-                (&json["snapshot"]["package"]["target"], &["os", "arch"][..]),
-            ] {
-                if body
-                    .as_object()
-                    .is_none_or(|object| object.keys().any(|key| !fields.contains(&key.as_str())))
-                {
-                    return Err(storage("unknown managed operation snapshot/package fields"));
-                }
-            }
-            let record: Record = serde_json::from_value(json).map_err(storage)?;
+            let record = recovery::decode(root, &entry.path())?;
             let id = record.snapshot.id;
-            if entry.file_name() != format!("{id}.json").as_str()
-                || record.snapshot.stage.is_active()
+            if record.snapshot.stage.is_active()
                 || !record.owner.as_ref().is_some_and(|owner| owner.valid(id))
                 || record.snapshot.created_at > chrono::Utc::now()
                 || !files::hash_valid(&record.snapshot.package.sha256, 64)

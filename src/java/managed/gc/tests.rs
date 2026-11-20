@@ -69,6 +69,52 @@ async fn fixture() -> Fixture {
     }
 }
 
+#[async_std::test]
+async fn duplicate_managed_record_keys_defer_recovery_and_collection() {
+    use crate::java::managed::{
+        ownership::Owner, ManagedJavaService, ManagedJavaSnapshot, ManagedJavaStage, Record,
+    };
+    for duplicate in ["home", "snapshot", "package", "target"] {
+        let f = fixture().await;
+        let (owner, archive) = home(&f).await;
+        let id = Uuid::new_v4();
+        let record = Record {
+            snapshot: ManagedJavaSnapshot {
+                id,
+                created_at: chrono::Utc::now(),
+                package: package(),
+                stage: ManagedJavaStage::AwaitingValidation,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                runtime_id: None,
+                error: None,
+            },
+            home: None,
+            owner: Some(Owner::new(id)),
+        };
+        super::super::write_record(&f.root, &record).unwrap();
+        let path = f.root.join(format!(".managed/operations/{id}.json"));
+        let canonical = serde_json::to_string(&record).unwrap();
+        let key = format!("\"{duplicate}\":");
+        let body = canonical.replacen(&key, &format!("{key}null,{key}"), 1);
+        assert_ne!(body, canonical);
+        fs::write(&path, &body).unwrap();
+        let report = ManagedJavaService::at(f.root.clone(), f.db.clone())
+            .installations_report()
+            .await
+            .unwrap();
+        let collection = collect(f.root.clone(), AGE).await;
+        assert!(
+            report.installations.is_empty() && collection.is_err(),
+            "{duplicate}: {report:?} / {collection:?}"
+        );
+        assert_eq!(report.diagnostics[0].operation, Some(id));
+        assert_eq!(fs::read_to_string(path).unwrap(), body);
+        assert!(f.root.join(owner.generation()).exists());
+        assert!(archive.is_file());
+    }
+}
+
 async fn database(path: &Path) -> Arc<Database> {
     Arc::new(
         Database::init(&format!("sqlite://{}", path.display()))

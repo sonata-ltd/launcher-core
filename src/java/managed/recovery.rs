@@ -11,6 +11,8 @@ use std::{
 };
 use uuid::Uuid;
 
+mod unique_json;
+
 pub(super) struct Report {
     pub records: Vec<Record>,
     pub diagnostics: Vec<ManagedRecoveryDiagnostic>,
@@ -42,7 +44,7 @@ pub(super) fn decode(root: &Path, path: &Path) -> Result<Record> {
 }
 
 pub(super) fn decode_bytes(root: &Path, path: &Path, bytes: &[u8]) -> Result<Record> {
-    let json: serde_json::Value = serde_json::from_slice(bytes).map_err(storage)?;
+    let json = unique_json::decode(bytes).map_err(storage)?;
     for (body, fields) in [
         (&json, &["snapshot", "home", "owner"][..]),
         (
