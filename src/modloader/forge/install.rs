@@ -1,4 +1,5 @@
 use crate::data::registry::operation::message::output::ProcessorOutput;
+use crate::utils::{download::destination::Destination, files::directory::Directory};
 use crate::{
     data::registry::operation::message::stage::OperationStage,
     modloader::{
@@ -18,12 +19,13 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-pub async fn installer(
+pub(crate) async fn installer(
     repo: &Repository,
     component: &Value,
-    destination: &Path,
+    work: &Arc<Directory>,
     cancel: &Cancel,
 ) -> Result<PathBuf> {
     let mut installers = Vec::new();
@@ -61,14 +63,22 @@ pub async fn installer(
 
     let _ = repo;
 
-    transfer::download(url, destination, Some(hash), cancel).await?;
-    Ok(destination.into())
+    transfer::download_in(
+        url,
+        Destination::Within(work.clone(), PathBuf::from(INSTALLER)),
+        Some(hash),
+        cancel,
+    )
+    .await?;
+    Ok(work.path().join(INSTALLER))
 }
+
+const INSTALLER: &str = "installer.jar";
 
 pub struct Prepared {
     pub profile: ModernInstallProfile,
     pub installer: PathBuf,
-    pub extracted: PathBuf,
+    pub(crate) extracted: Arc<Directory>,
 }
 
 impl Prepared {
@@ -80,24 +90,26 @@ impl Prepared {
     }
 }
 
-pub async fn prepare(
+pub(crate) async fn prepare(
     installer: PathBuf,
-    extracted: PathBuf,
-    maven: PathBuf,
+    work: &Arc<Directory>,
+    maven: &Arc<Directory>,
     game_version: &str,
     base: &mut components::Components,
     cancel: &Cancel,
 ) -> Result<Prepared> {
     let input = installer.clone();
-    let dir = extracted.clone();
+    let work = work.clone();
 
-    let value: Value = async_std::task::spawn_blocking(move || {
-        archive::extract(&input, &dir, &[])?;
-        Ok::<Value, ModloaderError>(serde_json::from_slice(&archive::read(
+    let (extracted, value) = async_std::task::spawn_blocking(move || {
+        let extracted = work.create_child(std::ffi::OsStr::new("installer"))?;
+        archive::extract_in(&input, &extracted, &[])?;
+        let value: Value = serde_json::from_slice(&archive::read(
             &input,
             "install_profile.json",
             4 * 1024 * 1024,
-        )?)?)
+        )?)?;
+        Ok::<_, ModloaderError>((extracted, value))
     })
     .await?;
 
@@ -144,7 +156,8 @@ pub async fn prepare(
     components::apply(base, &patch)?;
     base.maven_files.extend(profile.libraries.clone());
 
-    archive::stage_embedded_libraries(extracted.join("maven"), maven, cancel).await?;
+    archive::stage_embedded_libraries(extracted.path().join("maven"), maven.clone(), cancel)
+        .await?;
 
     Ok(Prepared {
         profile,
@@ -179,8 +192,7 @@ pub(crate) async fn run_retained(
 ) -> Result<()> {
     let extracted = prepared.extracted.clone();
     let game_root = async_std::task::spawn_blocking(move || {
-        files::directory::Directory::ensure_path(&extracted)?
-            .create_relative(Path::new(PROCESSOR_ROOT))
+        extracted.create_relative(Path::new(PROCESSOR_ROOT))
     })
     .await?
     .path()
@@ -220,7 +232,7 @@ pub(crate) async fn run_retained(
 
             files::relative(&path)?;
 
-            let path = files::child(&prepared.extracted, &path)?;
+            let path = files::child(prepared.extracted.path(), &path)?;
 
             if !path.is_file() {
                 return Err(ModloaderError::Invalid(
@@ -304,7 +316,10 @@ pub(crate) async fn run_retained(
                 classpath,
                 args,
                 cwd: prepared.extracted.clone(),
-                log: prepared.extracted.join(format!("processor-{index}.log")),
+                log: prepared
+                    .extracted
+                    .path()
+                    .join(format!("processor-{index}.log")),
                 outputs,
                 retention_root: libraries
                     .parent()
@@ -382,7 +397,7 @@ mod tests {
             }))
             .unwrap(),
             installer: temp.path().join("installer.jar"),
-            extracted: temp.path().join("work"),
+            extracted: Directory::ensure_path(&temp.path().join("work")).unwrap(),
         };
         let bus = EventBus::new(32);
         let mut receiver = bus.subscribe();
@@ -468,7 +483,7 @@ mod tests {
             }))
             .unwrap(),
             installer: temp.path().join("installer.jar"),
-            extracted: work.clone(),
+            extracted: Directory::ensure_path(&work).unwrap(),
         };
         let registry = OperationRegistry::new(EventBus::new(8));
         let op = registry.begin(
@@ -545,8 +560,8 @@ mod tests {
         };
         prepare(
             jar,
-            temp.path().join("extract"),
-            temp.path().join("maven"),
+            &Directory::ensure_path(&temp.path().join("work")).unwrap(),
+            &Directory::ensure_path(&temp.path().join("maven")).unwrap(),
             "1.20.1",
             &mut base,
             &Cancel::new(),

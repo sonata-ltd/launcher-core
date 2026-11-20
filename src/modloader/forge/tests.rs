@@ -76,6 +76,17 @@ async fn assert_preparation(
     processors: Option<Vec<Value>>,
     expect_pending_processors: bool,
 ) {
+    assert_preparation_with(kind, processors, expect_pending_processors, false).await
+}
+
+/// With `redirect`, the work directory path is replaced by a link to a decoy
+/// that already has the installer layout, after the context holds it open.
+async fn assert_preparation_with(
+    kind: LoaderKind,
+    processors: Option<Vec<Value>>,
+    expect_pending_processors: bool,
+    redirect: bool,
+) {
     let temp = tempfile::tempdir().unwrap();
     let cache = temp.path().join("metadata");
     let work = temp.path().join("work");
@@ -141,8 +152,17 @@ async fn assert_preparation(
     op.start_stage_determinable(OperationStage::FetchManifest);
     op.update_stage(OperationStage::FetchManifest, 1, 2, None);
     let cancel = Cancel::default();
+    let maven_directory = crate::utils::files::directory::Directory::ensure_path(&maven).unwrap();
+    let work_directory = crate::utils::files::directory::Directory::ensure_path(&work).unwrap();
+    let decoy = temp.path().join("decoy");
+    if redirect {
+        std::fs::create_dir_all(decoy.join("installer")).unwrap();
+        std::fs::copy(work.join("installer.jar"), decoy.join("installer.jar")).unwrap();
+        std::fs::rename(&work, temp.path().join("held-work")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &work).unwrap();
+    }
 
-    let prepared = prepare(
+    let result = prepare(
         PrepareRequest {
             game_version: "1.20.1".into(),
             loader_kind: kind,
@@ -151,8 +171,8 @@ async fn assert_preparation(
         &PrepareContext {
             repo: &catalog.repository,
             catalog: &catalog,
-            maven_dir: &maven,
-            work_dir: &work,
+            maven: &maven_directory,
+            work: &work_directory,
             op: &op,
             cancel: &cancel,
         },
@@ -164,8 +184,24 @@ async fn assert_preparation(
             ..Default::default()
         },
     )
-    .await
-    .unwrap();
+    .await;
+    if redirect {
+        // The held work directory no longer sits at its path: refuse, and
+        // never write through the replacement.
+        assert!(result.is_err());
+        let mut decoy_entries: Vec<_> = std::fs::read_dir(&decoy)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        decoy_entries.sort();
+        assert_eq!(decoy_entries, ["installer", "installer.jar"]);
+        assert_eq!(
+            std::fs::read_dir(decoy.join("installer")).unwrap().count(),
+            0
+        );
+        return;
+    }
+    let prepared = result.unwrap();
 
     assert_eq!(
         prepared.pending_processors.is_some(),
@@ -251,6 +287,18 @@ async fn assert_preparation(
         assert_eq!(processors.reason.as_deref(), Some("no client processors"));
     }
     op.finish(Outcome::Completed);
+}
+
+#[cfg(unix)]
+#[async_std::test]
+async fn installer_preparation_refuses_a_replaced_work_directory() {
+    assert_preparation_with(
+        LoaderKind::Forge,
+        Some(vec![json!({"jar": "g:processor:1"})]),
+        true,
+        true,
+    )
+    .await;
 }
 
 #[async_std::test]

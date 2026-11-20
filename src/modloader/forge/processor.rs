@@ -19,7 +19,7 @@ pub struct ProcessorCommand {
     pub main_class: String,
     pub classpath: Vec<PathBuf>,
     pub args: Vec<String>,
-    pub cwd: PathBuf,
+    pub cwd: std::sync::Arc<Directory>,
     pub log: PathBuf,
     pub outputs: Vec<(PathBuf, String)>,
     /// Entire generation, not just the extracted processor work directory.
@@ -118,8 +118,8 @@ async fn run_with_log_limit(
         return Ok(());
     }
 
-    let cwd = Directory::ensure_path(&command.cwd)?;
-    let log = command.log.strip_prefix(&command.cwd).map_err(|_| {
+    let cwd = command.cwd.clone();
+    let log = command.log.strip_prefix(cwd.path()).map_err(|_| {
         ModloaderError::Invalid("processor log is outside the work directory".into())
     })?;
     let log_directory = cwd.create_entry_parent(log)?;

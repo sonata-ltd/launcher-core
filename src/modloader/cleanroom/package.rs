@@ -40,27 +40,37 @@ struct Entry {
 pub async fn prepare(
     repo: &Repository,
     release: &CleanroomRelease,
-    temp: &Path,
-    maven: &Path,
+    work: &std::sync::Arc<crate::utils::files::directory::Directory>,
+    maven: &std::sync::Arc<crate::utils::files::directory::Directory>,
     cancel: &Cancel,
 ) -> Result<components::Components> {
-    let zip = temp.join("cleanroom.zip");
+    let zip = work.path().join("cleanroom.zip");
 
-    transfer::download(&release.archive_url, &zip, None, cancel).await?;
+    transfer::download_in(
+        &release.archive_url,
+        crate::utils::download::destination::Destination::Within(
+            work.clone(),
+            "cleanroom.zip".into(),
+        ),
+        None,
+        cancel,
+    )
+    .await?;
 
     let expected = release.archive_sha256.clone();
     let input = zip.clone();
-    let unpack = temp.join("mmc");
-    let target = unpack.clone();
+    let target = work.clone();
 
-    async_std::task::spawn_blocking(move || {
+    let unpack = async_std::task::spawn_blocking(move || {
         if files::sha256_file(&input)? != expected {
             return Err(ModloaderError::Invalid(
                 "Cleanroom archive checksum mismatch".into(),
             ));
         }
 
-        archive::extract(&input, &target, &[])
+        let target = target.create_child(std::ffi::OsStr::new("mmc"))?;
+        archive::extract_in(&input, &target, &[])?;
+        Ok(target.path().to_owned())
     })
     .await?;
 
@@ -110,7 +120,7 @@ pub async fn prepare(
         ));
     }
 
-    archive::stage_embedded_libraries(root.join("libraries"), maven.to_owned(), cancel).await?;
+    archive::stage_embedded_libraries(root.join("libraries"), maven.clone(), cancel).await?;
 
     let mut result = components::prism(
         repo,

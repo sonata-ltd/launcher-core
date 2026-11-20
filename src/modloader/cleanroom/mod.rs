@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::modloader::{
     self,
     components::Components,
@@ -20,8 +18,8 @@ pub(crate) struct PrepareRequest {
 
 pub struct PrepareContext<'a> {
     pub(crate) repo: &'a Repository,
-    pub(crate) maven_dir: &'a Path,
-    pub(crate) work_dir: &'a Path,
+    pub(crate) maven: &'a std::sync::Arc<crate::utils::files::directory::Directory>,
+    pub(crate) work: &'a std::sync::Arc<crate::utils::files::directory::Directory>,
     pub(crate) cancel: &'a Cancel,
 }
 
@@ -44,8 +42,8 @@ pub(crate) async fn prepare<'a>(
     let game_components = package::prepare(
         context.repo,
         release,
-        context.work_dir,
-        context.maven_dir,
+        context.work,
+        context.maven,
         context.cancel,
     )
     .await?;

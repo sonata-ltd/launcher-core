@@ -41,8 +41,8 @@ pub struct PrepareRequest {
 pub struct PrepareContext<'a> {
     pub repo: &'a Repository,
     pub catalog: &'a ModloaderCatalog,
-    pub maven_dir: &'a Path,
-    pub work_dir: &'a Path,
+    pub(crate) maven: &'a Arc<files::directory::Directory>,
+    pub(crate) work: &'a Arc<files::directory::Directory>,
     pub op: &'a OperationHandle,
     pub cancel: &'a Cancel,
 }
@@ -101,13 +101,6 @@ pub async fn prepare<'a>(
         sha256: files::sha256(&modloader_manifest_bytes),
     });
 
-    // The generation Maven directory is launcher-owned below its generation.
-    let maven_dir = context.maven_dir.to_path_buf();
-    async_std::task::spawn_blocking(move || {
-        files::directory::Directory::open_child_of(&maven_dir, true)
-    })
-    .await?;
-
     if modloader_manifest_value
         .get("mainClass")
         .and_then(Value::as_str)
@@ -116,7 +109,7 @@ pub async fn prepare<'a>(
         let installer_jar = install::installer(
             context.repo,
             &modloader_manifest_value,
-            &context.work_dir.join("installer.jar"),
+            context.work,
             context.cancel,
         )
         .await?;
@@ -125,8 +118,8 @@ pub async fn prepare<'a>(
 
         let prepared = install::prepare(
             installer_jar,
-            context.work_dir.join("installer"),
-            context.maven_dir.into(),
+            context.work,
+            context.maven,
             &request.game_version,
             &mut game_components,
             context.cancel,

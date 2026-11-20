@@ -10,7 +10,7 @@ fn command(root: &std::path::Path, script: &str) -> ProcessorCommand {
         main_class: "Main".into(),
         classpath: Vec::new(),
         args: Vec::new(),
-        cwd: root.into(),
+        cwd: Directory::open(root).unwrap(),
         log: root.join("processor.log"),
         outputs: Vec::new(),
         retention_root: root.into(),

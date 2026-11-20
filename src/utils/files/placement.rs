@@ -136,14 +136,24 @@ fn copy_contents(
 
 /// Copy a regular directory tree, replacing regular destination files atomically.
 /// Existing destination directories are merged. Links and special files are rejected.
+#[cfg(test)]
 pub(crate) fn copy_tree_replace(
     source: &Path,
     destination: &Path,
     cancel: &Cancellation,
 ) -> io::Result<()> {
     cancel.check()?;
+    copy_tree_replace_in(source, Directory::ensure_path(destination)?, cancel)
+}
+
+/// `copy_tree_replace` into a destination directory the caller holds open.
+pub(crate) fn copy_tree_replace_in(
+    source: &Path,
+    destination_root: std::sync::Arc<Directory>,
+    cancel: &Cancellation,
+) -> io::Result<()> {
+    cancel.check()?;
     let source_root = Directory::open(source)?;
-    let destination_root = Directory::ensure_path(destination)?;
     let mut pending = vec![std::path::PathBuf::new()];
     while let Some(relative) = pending.pop() {
         cancel.check()?;

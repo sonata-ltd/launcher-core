@@ -211,6 +211,11 @@ async fn install<'a>(
         .op
         .start_stage_indeterminable(OperationStage::FetchManifest);
 
+    // Installer downloads, extraction and processor work stay below the held
+    // generation directories.
+    let work_directory = workspace.open_work_dir()?;
+    let maven_directory = workspace.open_maven_dir()?;
+
     let mut game_components = if loader_spec.kind == LoaderKind::Cleanroom {
         cleanroom::prepare(
             cleanroom::PrepareRequest {
@@ -221,8 +226,8 @@ async fn install<'a>(
             },
             cleanroom::PrepareContext {
                 repo,
-                maven_dir: workspace.maven_dir(),
-                work_dir: workspace.work_dir(),
+                maven: &maven_directory,
+                work: &work_directory,
                 cancel: context.cancel,
             },
         )
@@ -275,8 +280,8 @@ async fn install<'a>(
             &forge::PrepareContext {
                 repo,
                 catalog: context.catalog,
-                maven_dir: workspace.maven_dir(),
-                work_dir: workspace.work_dir(),
+                maven: &maven_directory,
+                work: &work_directory,
                 op: context.op,
                 cancel: context.cancel,
             },

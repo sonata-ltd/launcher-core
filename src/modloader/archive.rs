@@ -13,12 +13,12 @@ use std::{
 
 pub(super) async fn stage_embedded_libraries(
     source: PathBuf,
-    destination: PathBuf,
+    destination: std::sync::Arc<Directory>,
     cancel: &Cancellation,
 ) -> Result<()> {
     let token = cancel.clone();
     let result = async_std::task::spawn_blocking(move || match fs::symlink_metadata(&source) {
-        Ok(_) => files::placement::copy_tree_replace(&source, &destination, &token),
+        Ok(_) => files::placement::copy_tree_replace_in(&source, destination, &token),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     })
@@ -60,6 +60,7 @@ pub fn read(archive: &Path, resource: &str, limit: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(test)]
 pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Result<()> {
     fs::create_dir_all(destination)?;
     extract_in(archive, &Directory::open(destination)?, excludes)
