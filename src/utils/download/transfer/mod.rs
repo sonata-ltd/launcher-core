@@ -28,7 +28,8 @@ mod tests;
 
 pub use crate::utils::cancellation::Cancellation as Cancel;
 
-pub async fn download(
+#[cfg(test)]
+pub(crate) async fn download(
     url: &str,
     destination: &Path,
     expected: Option<&str>,
@@ -187,7 +188,8 @@ fn map_stream_error(error: StreamError) -> DownloadError {
     }
 }
 
-pub async fn place(
+#[cfg(test)]
+pub(crate) async fn place(
     url: &str,
     path: &Path,
     expected: Option<&str>,

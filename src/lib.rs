@@ -51,6 +51,20 @@
 //! ```compile_fail
 //! use sonata_launcher_core::modloader::forge::processor;
 //! ```
+//! Path-based filesystem helpers are not public: core flows reach files
+//! through held directories, never through a caller-resolved path.
+//! ```compile_fail
+//! let _ = sonata_launcher_core::utils::files::child;
+//! ```
+//! ```compile_fail
+//! let _ = sonata_launcher_core::utils::files::atomic_write;
+//! ```
+//! ```compile_fail
+//! let _ = sonata_launcher_core::utils::download::transfer::download;
+//! ```
+//! ```compile_fail
+//! let _ = sonata_launcher_core::utils::download::transfer::place;
+//! ```
 //! Composition aliases and the old managed validation shim are removed:
 //! ```compile_fail
 //! use sonata_launcher_core::data::GlobalState;

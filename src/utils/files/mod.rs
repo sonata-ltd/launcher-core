@@ -39,7 +39,7 @@ pub fn relative(path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn child(root: &Path, path: &Path) -> Result<PathBuf> {
+pub(crate) fn child(root: &Path, path: &Path) -> Result<PathBuf> {
     relative(path)?;
     let full = root.join(path);
     // Resolve existing prefixes even when the final destination is absent.
@@ -198,7 +198,8 @@ pub fn sha256(bytes: &[u8]) -> String {
 
 /// Atomically replaces a file after syncing its bytes. This does not sync the
 /// parent directory and is not a power-loss durable filesystem transaction.
-pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+#[cfg(test)]
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| FileError::InvalidPath("path has no parent".into()))?;
