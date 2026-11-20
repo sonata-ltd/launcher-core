@@ -1,30 +1,75 @@
 //! Private scratch directories, never runtime roots. A dead owner is required
 //! for crash cleanup; names and age alone do not establish ownership.
-use std::{fs, io, path::Path};
+use std::{
+    ffi::OsStr,
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+use super::directory::Directory;
 
 const OWNER: &str = ".sonata-owner";
 
-pub(crate) struct OwnedDirectory(tempfile::TempDir);
+pub(crate) struct OwnedDirectory {
+    path: PathBuf,
+    directory: Option<Arc<Directory>>,
+}
 
 impl OwnedDirectory {
+    #[cfg(test)]
     pub(crate) fn create(root: &Path, prefix: &str) -> io::Result<Self> {
         fs::create_dir_all(root)?;
-        if !fs::symlink_metadata(root)?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "scratch root is not a directory",
-            ));
-        }
-        let directory = tempfile::Builder::new().prefix(prefix).tempdir_in(root)?;
+        Self::create_in(&Directory::open(root)?, prefix)
+    }
+
+    pub(crate) fn create_in(root: &Arc<Directory>, prefix: &str) -> io::Result<Self> {
+        let name = format!("{prefix}{}", uuid::Uuid::new_v4());
+        let directory = root.create_private_child(OsStr::new(&name))?;
+        let owned = Self {
+            path: directory.path().to_owned(),
+            directory: Some(directory),
+        };
         // Publish the complete PID atomically: a concurrent sweep must not see
         // a numeric prefix of a still-being-written PID as a different dead PID.
         // Exit before publication leaves an unknown directory, which is kept.
-        crate::utils::process::write_owner(&directory.path().join(OWNER))?;
-        Ok(Self(directory))
+        let directory = owned.directory();
+        directory.with_staged_file(
+            |file| {
+                file.write_all(std::process::id().to_string().as_bytes())?;
+                file.sync_all()
+            },
+            |staged, ()| directory.publish(staged, directory, OsStr::new(OWNER)),
+        )?;
+        Ok(owned)
     }
 
+    #[cfg(test)]
     pub(crate) fn path(&self) -> &Path {
-        self.0.path()
+        &self.path
+    }
+
+    pub(crate) fn directory(&self) -> &Arc<Directory> {
+        self.directory
+            .as_ref()
+            .expect("owned directory stays open until drop")
+    }
+}
+
+impl Drop for OwnedDirectory {
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        if directory.verify_location().is_err() {
+            return;
+        }
+        // Windows has to release its directory handle before deleting it.
+        drop(directory);
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            tracing::debug!(path = %self.path.display(), %error, "could not remove scratch directory");
+        }
     }
 }
 
@@ -96,6 +141,23 @@ mod tests {
         assert!(result.is_err());
         assert!(!path.unwrap().exists());
         assert!(previous.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scratch_cleanup_preserves_a_replacement_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = OwnedDirectory::create(root.path(), "scratch-").unwrap();
+        let path = scratch.path().to_owned();
+        let moved = root.path().join("moved");
+        fs::rename(&path, &moved).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("keep"), b"user bytes").unwrap();
+
+        drop(scratch);
+
+        assert_eq!(fs::read(path.join("keep")).unwrap(), b"user bytes");
+        assert!(moved.is_dir());
     }
 
     #[test]

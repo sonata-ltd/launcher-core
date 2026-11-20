@@ -1,7 +1,9 @@
 //! Neutral immutable byte store. Roles, placements and provider provenance live
 //! in domain repositories. Digest aliases are lookup hints, not semantic IDs.
 use std::{
+    ffi::OsStr,
     fs, io,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -231,6 +233,7 @@ impl ObjectStore {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn import_checked<E: From<io::Error>>(
         &self,
         source: &Path,
@@ -238,44 +241,63 @@ impl ObjectStore {
         validate: impl FnOnce(&FileDigests) -> Result<(), E>,
     ) -> Result<StoredObject, E> {
         cancellation.check().map_err(io::Error::from)?;
-        let _access = self.try_access()?;
-        let staging = OwnedDirectory::create(&self.root.join("staging"), IMPORT_PREFIX)?;
-        let mut temporary = tempfile::NamedTempFile::new_in(staging.path())?;
-        let digests = copy_and_digest(source, &mut temporary, cancellation)?;
-        validate(&digests)?;
-        temporary.as_file().sync_all()?;
-
-        let destination = self.path_for(&digests.sha256)?;
-        let parent = destination
-            .parent()
-            .ok_or_else(|| io::Error::other("missing parent"))?;
-
-        fs::create_dir_all(parent)?;
-        cancellation.check().map_err(io::Error::from)?;
-
-        match temporary.persist_noclobber(&destination) {
-            Ok(_) => {}
-            Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => {
-                let (existing_digests, _) = digest_file(&destination, cancellation, |_| {})?;
-
-                if existing_digests != digests {
-                    return Err(io::Error::other("existing CAS object is corrupt").into());
-                }
-            }
-            Err(e) => return Err(e.error.into()),
-        }
-
-        crate::utils::files::atomic_write(
-            &self.alias_path(&digests.sha1)?,
-            digests.sha256.as_bytes(),
-        )
-        .map_err(io::Error::other)?;
-        Ok(StoredObject {
-            digests,
-            path: destination,
-        })
+        self.try_access()?
+            .import_checked(source, cancellation, validate)
     }
+}
 
+impl StoreAccess {
+    pub(crate) fn import_checked<E: From<io::Error>>(
+        &self,
+        source: &Path,
+        cancellation: &Cancellation,
+        validate: impl FnOnce(&FileDigests) -> Result<(), E>,
+    ) -> Result<StoredObject, E> {
+        cancellation.check().map_err(io::Error::from)?;
+        let root = &self.directory;
+        let staging =
+            OwnedDirectory::create_in(&root.create_child(OsStr::new("staging"))?, IMPORT_PREFIX)?;
+        let staging = staging.directory();
+        staging.with_staged_file(
+            |temporary| {
+                let digests = copy_and_digest(source, temporary, cancellation)?;
+                validate(&digests)?;
+                temporary.sync_all()?;
+                Ok(digests)
+            },
+            |temporary, digests| {
+                let path = self.path_for(&digests.sha256)?;
+                let parent =
+                    root.create_relative(&Path::new("objects/sha256").join(&digests.sha256[..2]))?;
+                let aliases = root.create_relative(Path::new("aliases/sha1"))?;
+                let name = OsStr::new(&digests.sha256);
+                let destination = parent.path().join(name);
+                cancellation.check().map_err(io::Error::from)?;
+                match staging.publish(temporary, &parent, name) {
+                    Ok(()) => (),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        parent.verify_location()?;
+                        let (existing, _) = digest_file(&destination, cancellation, |_| {})?;
+                        if existing != digests {
+                            return Err(io::Error::other("existing CAS object is corrupt").into());
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                aliases.with_staged_file(
+                    |file| {
+                        file.write_all(digests.sha256.as_bytes())?;
+                        file.sync_all()
+                    },
+                    |temporary, ()| aliases.replace(temporary, OsStr::new(&digests.sha1)),
+                )?;
+                Ok(StoredObject { digests, path })
+            },
+        )
+    }
+}
+
+impl ObjectStore {
     fn alias_path(&self, sha1: &str) -> io::Result<PathBuf> {
         if !crate::utils::files::hash_valid(sha1, 40) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid SHA-1"));

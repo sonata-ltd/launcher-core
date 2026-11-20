@@ -1,4 +1,7 @@
-use crate::utils::{cancellation::Cancellation, files};
+use crate::utils::{
+    cancellation::Cancellation,
+    files::{self, directory::Directory},
+};
 
 use super::error::{ModloaderError, Result};
 use std::{
@@ -61,6 +64,7 @@ pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Resul
     const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
     const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
     fs::create_dir_all(destination)?;
+    let destination = Directory::open(destination)?;
 
     let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
 
@@ -99,28 +103,41 @@ pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Resul
             continue;
         }
 
-        let path = files::child(destination, &relative)?;
         if entry.is_dir() {
-            fs::create_dir_all(&path)?;
+            destination.create_relative(&relative)?;
             continue;
         }
 
-        fs::create_dir_all(
-            path.parent()
-                .ok_or_else(|| zip_error("entry has no parent"))?,
+        let parent = destination.create_entry_parent(&relative)?;
+        let name = relative
+            .file_name()
+            .ok_or_else(|| zip_error("entry has no filename"))?;
+        parent.with_staged_file(
+            |output| -> Result<()> {
+                let limit = remaining.min(MAX_ENTRY_BYTES);
+                let copied = std::io::copy(&mut entry.by_ref().take(limit), output)?;
+                if entry.read(&mut [0; 1])? != 0 {
+                    return Err(zip_error(
+                        "ZIP output exceeds the file or archive byte limit",
+                    ));
+                }
+                remaining -= copied;
+                output.flush()?;
+                Ok(())
+            },
+            |staged, ()| {
+                match fs::symlink_metadata(parent.path().join(name)) {
+                    Ok(metadata) if !metadata.is_file() => {
+                        return Err(zip_error("ZIP output is not a regular file"));
+                    }
+                    Ok(_) => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(error) => return Err(error.into()),
+                }
+                parent.replace(staged, name)?;
+                Ok(())
+            },
         )?;
-
-        let mut output = fs::File::create(&path)?;
-        let limit = remaining.min(MAX_ENTRY_BYTES);
-        let copied = std::io::copy(&mut entry.by_ref().take(limit), &mut output)?;
-        if entry.read(&mut [0; 1])? != 0 {
-            return Err(zip_error(
-                "ZIP output exceeds the file or archive byte limit",
-            ));
-        }
-        remaining -= copied;
-
-        output.flush()?;
     }
 
     Ok(())
@@ -156,4 +173,31 @@ pub fn main_class(jar: &Path) -> Result<String> {
         })
         .filter(|s| !s.is_empty())
         .ok_or_else(|| zip_error("processer JAR has Main-Class"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merging_archives_replaces_the_directory_entry_without_changing_linked_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let destination = root.path().join("natives");
+        let previous = root.path().join("previous");
+        fs::create_dir_all(destination.join("nested")).unwrap();
+        fs::write(&previous, b"previous").unwrap();
+        let output = destination.join("nested/library");
+        fs::hard_link(&previous, &output).unwrap();
+        let archive = root.path().join("natives.jar");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        zip.start_file("nested/library", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"new library").unwrap();
+        zip.finish().unwrap();
+
+        extract(&archive, &destination, &[]).unwrap();
+
+        assert_eq!(fs::read(previous).unwrap(), b"previous");
+        assert_eq!(fs::read(output).unwrap(), b"new library");
+    }
 }

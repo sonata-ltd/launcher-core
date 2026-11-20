@@ -3,14 +3,14 @@ use serde::{
     de::{self, MapAccess, Visitor},
     Deserialize, Deserializer,
 };
-use std::{collections::BTreeMap, fmt, fs, io::Write, path::Path};
+use std::{collections::BTreeMap, ffi::OsStr, fmt, fs, io, io::Write, path::Path};
 
 use crate::{
     data::layout::LauncherPaths,
     instance::download::manifest::{asset_index_id, ManifestError},
     utils::{
         download::{download_manifest_bytes, metadata_cache, MAX_MANIFEST_BYTES},
-        files,
+        files::{self, directory::Directory},
         object_store::catalog::read_regular,
     },
 };
@@ -120,38 +120,48 @@ pub(crate) struct IndexPublication {
 
 impl IndexPublication {
     pub(crate) async fn publish(self, paths: &LauncherPaths) -> Result<(), ManifestError> {
-        let cache = files::child(paths.meta(), Path::new("asset-indexes"))?;
+        let meta = paths.meta().clone();
         let assets = paths.assets().clone();
         async_std::task::spawn_blocking(move || {
-            let path = game_path(&assets, &self.id)?;
-            let directory = game_directory(&assets)?;
-            fs::create_dir_all(&directory).map_err(files::FileError::from)?;
-            let mut staged =
-                tempfile::NamedTempFile::new_in(directory).map_err(files::FileError::from)?;
-            staged
-                .write_all(&self.body)
-                .map_err(files::FileError::from)?;
-            staged
-                .as_file()
-                .sync_all()
-                .map_err(files::FileError::from)?;
-            files::atomic_write(&metadata_cache::entry_path(&cache, &self.url), &self.body)?;
-            match staged.persist_noclobber(&path) {
-                Ok(_) => Ok(()),
-                Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let published = read_regular(&path, MAX_MANIFEST_BYTES as u64)
-                        .map_err(files::FileError::from)?;
-                    if published == self.body {
-                        Ok(())
-                    } else {
-                        Err(ManifestError::AssetIndexIntegrity {
-                            id: self.id,
-                            details: "game index ID already has different bytes".into(),
-                        })
+            let result = (|| -> io::Result<bool> {
+                fs::create_dir_all(&assets)?;
+                fs::create_dir_all(&meta)?;
+                let directory = Directory::open(&assets.canonicalize()?)?
+                    .create_child(OsStr::new("indexes"))?;
+                let cache = Directory::open(&meta.canonicalize()?)?
+                    .create_child(OsStr::new("asset-indexes"))?;
+                let cache_path = metadata_cache::entry_path(cache.path(), &self.url);
+                let cache_name = cache_path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+                let name = format!("{}.json", self.id);
+                let name = OsStr::new(&name);
+                let write = |file: &mut fs::File| -> io::Result<()> {
+                    file.write_all(&self.body)?;
+                    file.sync_all()
+                };
+                directory.with_staged_file(write, |staged, ()| {
+                    cache
+                        .with_staged_file(write, |staged, ()| cache.replace(staged, cache_name))?;
+                    match directory.publish(staged, &directory, name) {
+                        Ok(()) => Ok(true),
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                            directory.verify_location()?;
+                            Ok(read_regular(
+                                &directory.path().join(name),
+                                MAX_MANIFEST_BYTES as u64,
+                            )? == self.body)
+                        }
+                        Err(error) => Err(error),
                     }
-                }
-                Err(error) => Err(files::FileError::from(error.error).into()),
+                })
+            })()
+            .map_err(files::FileError::from)?;
+            if !result {
+                return Err(ManifestError::AssetIndexIntegrity {
+                    id: self.id,
+                    details: "game index ID already has different bytes".into(),
+                });
             }
+            Ok(())
         })
         .await
     }

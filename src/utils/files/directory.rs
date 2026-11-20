@@ -82,56 +82,202 @@ impl Directory {
         Ok(directory)
     }
 
-    pub(crate) fn hard_link(&self, source: &OsStr, name: &OsStr) -> io::Result<()> {
+    pub(crate) fn create_entry_parent(self: &Arc<Self>, entry: &Path) -> io::Result<Arc<Self>> {
+        super::relative(entry).map_err(io::Error::other)?;
+        match entry.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => self.create_relative(parent),
+            _ => Ok(self.clone()),
+        }
+    }
+
+    pub(crate) fn create_file(&self, name: &OsStr) -> io::Result<File> {
+        self.create_file_with_mode(name, 0o666)
+    }
+
+    fn create_file_with_mode(&self, name: &OsStr, mode: u32) -> io::Result<File> {
         self.verify_location()?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = component(name)?;
+            let fd = unsafe {
+                libc::openat(
+                    self.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    mode as libc::mode_t,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // openat returned a new descriptor owned by this file.
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+        #[cfg(windows)]
+        {
+            let _ = mode;
+            windows_component(name)?;
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(self.path.join(name))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (name, mode);
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    pub(crate) fn with_staged_file<W, T, E: From<io::Error>>(
+        &self,
+        write: impl FnOnce(&mut File) -> Result<W, E>,
+        publish: impl FnOnce(&OsStr, W) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let name = format!(".sonata-staged-{}", uuid::Uuid::new_v4());
+        let name = OsStr::new(&name);
+        let mut file = self.create_file_with_mode(name, 0o600)?;
+        let identity = FileIdentity::from_handle(&file)?;
+        let written = write(&mut file);
+        drop(file);
+        let check_identity = || -> io::Result<()> {
+            self.verify_location()?;
+            if FileIdentity::at(&self.path.join(name))? != identity {
+                return Err(io::Error::other("staged file changed"));
+            }
+            Ok(())
+        };
+        let result = written.and_then(|value| {
+            check_identity()?;
+            publish(name, value)
+        });
+        if check_identity().is_ok() {
+            let _ = self.unlink(name);
+        }
+        result
+    }
+
+    pub(crate) fn hard_link(&self, source: &OsStr, name: &OsStr) -> io::Result<()> {
+        self.link_file(source, self, name)
+    }
+
+    pub(crate) fn link_file(
+        &self,
+        source: &OsStr,
+        destination: &Self,
+        name: &OsStr,
+    ) -> io::Result<()> {
+        self.verify_location()?;
+        destination.verify_location()?;
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
             let source = component(source)?;
             let name = component(name)?;
-            let dir = self.handle.as_raw_fd();
-            if unsafe { libc::linkat(dir, source.as_ptr(), dir, name.as_ptr(), 0) } != 0 {
+            if unsafe {
+                libc::linkat(
+                    self.handle.as_raw_fd(),
+                    source.as_ptr(),
+                    destination.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    0,
+                )
+            } != 0
+            {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
         }
         #[cfg(not(unix))]
         {
+            #[cfg(windows)]
+            {
+                windows_component(source)?;
+                windows_component(name)?;
+            }
             if Path::new(source).file_name() != Some(source)
                 || Path::new(name).file_name() != Some(name)
             {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
-            fs::hard_link(self.path.join(source), self.path.join(name))
+            fs::hard_link(self.path.join(source), destination.path.join(name))
         }
     }
 
+    pub(crate) fn create_symlink(&self, target: &Path, name: &OsStr) -> io::Result<()> {
+        self.verify_location()?;
+        #[cfg(unix)]
+        {
+            use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+            let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+            let name = component(name)?;
+            if unsafe { libc::symlinkat(target.as_ptr(), self.handle.as_raw_fd(), name.as_ptr()) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        #[cfg(windows)]
+        {
+            windows_component(name)?;
+            std::os::windows::fs::symlink_file(target, self.path.join(name))
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, name);
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn set_permissions(&self, permissions: fs::Permissions) -> io::Result<()> {
+        self.handle.set_permissions(permissions)
+    }
+
     pub(crate) fn create_child(self: &Arc<Self>, name: &OsStr) -> io::Result<Arc<Self>> {
+        match self.mkdir(name, false) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        self.child(name)
+    }
+
+    pub(crate) fn create_private_child(self: &Arc<Self>, name: &OsStr) -> io::Result<Arc<Self>> {
+        self.verify_location()?;
+        self.mkdir(name, true)?;
+        self.child(name)
+    }
+
+    fn mkdir(&self, name: &OsStr, private: bool) -> io::Result<()> {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
             let name_bytes = component(name)?;
-            let result =
-                unsafe { libc::mkdirat(self.handle.as_raw_fd(), name_bytes.as_ptr(), 0o777) };
-            if result != 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(error);
-                }
+            let mode = if private { 0o700 } else { 0o777 };
+            if unsafe { libc::mkdirat(self.handle.as_raw_fd(), name_bytes.as_ptr(), mode) } != 0 {
+                return Err(io::Error::last_os_error());
             }
+            Ok(())
         }
         #[cfg(not(unix))]
         {
+            // Windows inherits the ACL of the trusted scratch root.
+            let _ = private;
+            #[cfg(windows)]
+            windows_component(name)?;
             if Path::new(name).file_name() != Some(name) {
                 return Err(io::ErrorKind::InvalidInput.into());
             }
-            if let Err(error) = fs::create_dir(self.path.join(name)) {
-                if error.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(error);
-                }
-            }
+            fs::create_dir(self.path.join(name))
         }
-        self.child(name)
     }
 
     #[cfg(unix)]
@@ -157,6 +303,7 @@ impl Directory {
 
     #[cfg(windows)]
     fn child(self: &Arc<Self>, name: &OsStr) -> io::Result<Arc<Self>> {
+        windows_component(name)?;
         let child = Self::open(&self.path.join(name))?;
         let handle = child.handle.try_clone()?;
         Ok(Arc::new(Self {
@@ -213,6 +360,11 @@ impl Directory {
         }
         #[cfg(not(unix))]
         {
+            #[cfg(windows)]
+            {
+                windows_component(source)?;
+                windows_component(destination)?;
+            }
             if Path::new(source).file_name() != Some(source)
                 || Path::new(destination).file_name() != Some(destination)
             {
@@ -305,6 +457,12 @@ impl Directory {
         super::relative(Path::new(name)).map_err(io::Error::other)?;
         super::publish::publish_new(self.path.join(source), destination.path.join(name))
     }
+}
+
+#[cfg(windows)]
+fn windows_component(name: &OsStr) -> io::Result<()> {
+    let name = name.to_str().ok_or(io::ErrorKind::InvalidInput)?;
+    super::portable_name::validate_file_name(name)
 }
 
 #[cfg(all(test, unix))]

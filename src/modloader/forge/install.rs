@@ -262,6 +262,8 @@ pub(crate) async fn run_retained(
             .collect::<Result<Vec<_>>>()?;
 
         let mut outputs = Vec::new();
+        let mut output_directories = Vec::new();
+        let maven = files::directory::Directory::open(&libraries)?;
         for (path, hash) in step.outputs {
             let path = PathBuf::from(tokens::resolve_argument(&path, &tokens, &libraries)?);
 
@@ -269,11 +271,7 @@ pub(crate) async fn run_retained(
                 ModloaderError::Invalid("processor output escapes installation Maven root".into())
             })?;
             let path = files::child(&libraries, relative)?;
-
-            if let Some(parent) = path.parent() {
-                async_std::fs::create_dir_all(parent).await?;
-            }
-
+            output_directories.push(maven.create_entry_parent(relative)?);
             outputs.push((path, tokens::expand_tokens(&hash, &tokens)?));
         }
 
@@ -287,6 +285,10 @@ pub(crate) async fn run_retained(
             });
         };
         publish_output(Vec::new());
+
+        for directory in &output_directories {
+            directory.verify_location()?;
+        }
 
         processor::run_retained(
             ProcessorCommand {
@@ -309,6 +311,10 @@ pub(crate) async fn run_retained(
             java_use,
         )
         .await?;
+
+        for directory in output_directories {
+            directory.verify_location()?;
+        }
 
         // completed += 1;
         // op.update_stage(

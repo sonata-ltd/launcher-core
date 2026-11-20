@@ -1,33 +1,60 @@
 //! Private download/publication scratch. Recovery uses CAS, never these copies.
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
-use crate::utils::files::owned_directory::{self, OwnedDirectory};
+use crate::utils::files::{
+    directory::Directory,
+    owned_directory::{self, OwnedDirectory},
+};
 
 const PREFIX: &str = ".sonata-content-";
 
 pub(super) struct ContentStaging {
-    directory: OwnedDirectory,
+    files: Arc<Directory>,
+    downloads: Arc<Directory>,
+    _directory: OwnedDirectory,
 }
 
 impl ContentStaging {
+    #[cfg(test)]
     pub(super) fn create(root: &Path) -> io::Result<Self> {
-        let directory = OwnedDirectory::create(root, PREFIX)?;
+        fs::create_dir_all(root)?;
+        Self::create_in(&Directory::open(root)?)
+    }
+
+    pub(super) fn create_in(root: &Arc<Directory>) -> io::Result<Self> {
+        let directory = OwnedDirectory::create_in(root, PREFIX)?;
         // Keep provider-controlled filenames away from the ownership marker
         // and the download namespace, even if a provider chooses a hidden name.
-        fs::create_dir(directory.path().join("files"))?;
-        fs::create_dir(directory.path().join("downloads"))?;
-        Ok(Self { directory })
+        let files = directory
+            .directory()
+            .create_private_child(OsStr::new("files"))?;
+        let downloads = directory
+            .directory()
+            .create_private_child(OsStr::new("downloads"))?;
+        Ok(Self {
+            files,
+            downloads,
+            _directory: directory,
+        })
     }
 
-    pub(super) fn files(&self) -> PathBuf {
-        self.directory.path().join("files")
+    #[cfg(test)]
+    pub(super) fn files(&self) -> &Path {
+        self.files.path()
     }
 
-    pub(super) fn downloads(&self) -> PathBuf {
-        self.directory.path().join("downloads")
+    pub(super) fn files_directory(&self) -> &Arc<Directory> {
+        &self.files
+    }
+
+    pub(super) fn downloads(&self) -> io::Result<&Path> {
+        self.downloads.verify_location()?;
+        Ok(self.downloads.path())
     }
 }
 
@@ -72,13 +99,17 @@ mod tests {
         fs::create_dir(&legacy).unwrap();
         fs::write(legacy.join("old.jar"), b"untracked staged bytes").unwrap();
         fs::write(stage.files().join(".sonata-owner"), b"provider filename").unwrap();
-        fs::write(stage.downloads().join("0.jar"), b"downloaded bytes").unwrap();
+        fs::write(
+            stage.downloads().unwrap().join("0.jar"),
+            b"downloaded bytes",
+        )
+        .unwrap();
         assert_eq!(
-            crate::utils::process::read_owner(&stage.directory.path().join(".sonata-owner")),
+            crate::utils::process::read_owner(&stage._directory.path().join(".sonata-owner")),
             Some(std::process::id())
         );
         assert_eq!(sweep(temp.path()).unwrap(), 0);
-        let directory = stage.directory.path().to_owned();
+        let directory = stage._directory.path().to_owned();
         drop(stage);
         assert!(!directory.exists());
         assert_eq!(

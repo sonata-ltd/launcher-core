@@ -61,7 +61,8 @@ pub(crate) struct Collection {
 
 impl Collection {
     pub(crate) fn new(maintenance: Arc<StoreMaintenance>) -> io::Result<Self> {
-        let directory = Directory::open(maintenance.root())?;
+        maintenance.directory.verify_location()?;
+        let directory = maintenance.directory.clone();
         Ok(Self {
             maintenance,
             directory,

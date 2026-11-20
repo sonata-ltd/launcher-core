@@ -3,7 +3,7 @@
 use std::{fs, io, ops::Deref, sync::Arc, time::Duration};
 
 use super::ObjectStore;
-use crate::utils::cancellation::Cancellation;
+use crate::utils::{cancellation::Cancellation, files::directory::Directory};
 
 const LOCK: &str = ".sonata-access.lock";
 
@@ -38,6 +38,7 @@ impl Drop for StoreLock {
 #[derive(Clone)]
 pub(crate) struct StoreAccess {
     store: Arc<ObjectStore>,
+    pub(super) directory: Arc<Directory>,
     _lock: Arc<StoreLock>,
 }
 
@@ -52,6 +53,7 @@ impl Deref for StoreAccess {
 pub(crate) struct StoreMaintenance {
     root: std::path::PathBuf,
     root_key: Vec<u8>,
+    pub(super) directory: Arc<Directory>,
     _lock: StoreLock,
 }
 
@@ -65,9 +67,10 @@ impl StoreMaintenance {
 }
 
 impl ObjectStore {
-    fn access_file(&self) -> io::Result<(ObjectStore, fs::File)> {
+    fn access_file(&self) -> io::Result<(ObjectStore, Arc<Directory>, fs::File)> {
         fs::create_dir_all(&self.root)?;
         let root = fs::canonicalize(&self.root)?;
+        let directory = Directory::open(&root)?;
         let path = root.join(LOCK);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_file() => {}
@@ -81,14 +84,16 @@ impl ObjectStore {
             .create(true)
             .truncate(false)
             .open(path)?;
-        Ok((ObjectStore::new(root), file))
+        directory.verify_location()?;
+        Ok((ObjectStore::new(root), directory, file))
     }
 
     pub(crate) fn try_access(&self) -> io::Result<StoreAccess> {
-        let (store, file) = self.access_file()?;
+        let (store, directory, file) = self.access_file()?;
         file.try_lock_shared().map_err(lock_error)?;
         Ok(StoreAccess {
             store: Arc::new(store),
+            directory,
             _lock: Arc::new(StoreLock(file)),
         })
     }
@@ -114,11 +119,12 @@ impl ObjectStore {
     /// A capability for exclusive maintenance, not proof that bytes are garbage.
     /// A collector must still validate all durable preparations/catalog roots.
     pub(crate) fn try_maintenance(&self) -> io::Result<StoreMaintenance> {
-        let (store, file) = self.access_file()?;
+        let (store, directory, file) = self.access_file()?;
         file.try_lock().map_err(lock_error)?;
         Ok(StoreMaintenance {
             root: store.root.clone(),
             root_key: store.root_key()?,
+            directory,
             _lock: StoreLock(file),
         })
     }

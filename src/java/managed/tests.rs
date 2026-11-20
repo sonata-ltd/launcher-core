@@ -323,6 +323,85 @@ fn tar_extraction_finds_java_and_preserves_executable_permission() {
     }
 }
 
+#[cfg(any(unix, windows))]
+#[test]
+fn archive_extraction_declines_a_linked_output_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let destination = root.path().join("contents");
+    let outside = root.path().join("previous");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, destination.join("jre")).unwrap();
+    #[cfg(windows)]
+    assert!(std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(destination.join("jre"))
+        .arg(&outside)
+        .status()
+        .unwrap()
+        .success());
+
+    let archive = root.path().join("java.zip");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+    zip.start_file("jre/bin/java", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"placeholder").unwrap();
+    zip.finish().unwrap();
+    for (archive, format) in [(archive, ArchiveFormat::Zip), {
+        let archive = root.path().join("java.tar.gz");
+        tar_fixture(&archive);
+        (archive, ArchiveFormat::TarGz)
+    }] {
+        assert!(extract::extract(&archive, &destination, format, &Cancellation::new()).is_err());
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn tar_extraction_preserves_relative_links_inside_a_runtime() {
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("java.tar.gz");
+    let encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&archive).unwrap(),
+        flate2::Compression::default(),
+    );
+    let mut tar = tar::Builder::new(encoder);
+    let bytes = b"java launcher";
+    let mut file = tar::Header::new_gnu();
+    file.set_mode(0o755);
+    file.set_size(bytes.len() as u64);
+    tar.append_data(&mut file, "jre/lib/launcher", &bytes[..])
+        .unwrap();
+    for (kind, path, target) in [
+        (tar::EntryType::Link, "jre/lib/copy", "jre/lib/launcher"),
+        (tar::EntryType::Symlink, "jre/bin/java", "../lib/copy"),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_entry_type(kind);
+        tar.append_link(&mut header, path, target).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap();
+
+    let home = extract::extract(
+        &archive,
+        &root.path().join("contents"),
+        ArchiveFormat::TarGz,
+        &Cancellation::new(),
+    )
+    .unwrap();
+    let exec = extract::executable(&home);
+    assert_eq!(std::fs::read_link(&exec).unwrap(), Path::new("../lib/copy"));
+    assert_eq!(std::fs::read(exec).unwrap(), bytes);
+    assert_eq!(
+        crate::utils::files::identity::FileIdentity::at(&home.join("lib/launcher")).unwrap(),
+        crate::utils::files::identity::FileIdentity::at(&home.join("lib/copy")).unwrap(),
+    );
+}
+
 #[test]
 fn zip_extraction_rejects_traversal() {
     let dir = tempfile::tempdir().unwrap();

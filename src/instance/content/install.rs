@@ -19,7 +19,7 @@ use crate::{
         },
     },
 };
-use std::{fs, path::Path, sync::Arc};
+use std::{ffi::OsStr, fs, path::Path, sync::Arc};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -84,13 +84,8 @@ async fn execute_preparing(
     let mods = files::child(root, Path::new("mods"))?;
     let mods_directory = instance_directory.create_child(std::ffi::OsStr::new("mods"))?;
     // Временные записи лежат вне mods и на том же томе, что назначения.
-    let stage = super::staging::ContentStaging::create(root)?;
-    let stage_files = stage.files();
-    let staged_directory = instance_directory.open_relative(
-        stage_files
-            .strip_prefix(root)
-            .map_err(std::io::Error::other)?,
-    )?;
+    let stage = super::staging::ContentStaging::create_in(&instance_directory)?;
+    let staged_directory = stage.files_directory();
     let mut prepared = Vec::new();
     for (index, action) in releases.iter().enumerate() {
         let release = &action.release;
@@ -157,7 +152,7 @@ async fn execute_preparing(
                     super::store::storage::register_leased(&db, &object.digests, true, id).await?;
                 (object, object_id)
             } else {
-                let download = stage.downloads().join(format!("{index}.jar"));
+                let download = stage.downloads()?.join(format!("{index}.jar"));
                 transfer::download(&file.url, &download, file.sha1.as_deref(), cancel).await?;
                 let expected = file.clone();
                 import_and_register(&db, store.clone(), download, id, cancel, move |hashes| {
@@ -172,7 +167,7 @@ async fn execute_preparing(
             };
             #[cfg(test)]
             checkpoints::wait(id, "before-content-copy").await;
-            let target = stage.files().join(&file.file_name);
+            let directory = staged_directory.clone();
             let source = object.path.clone();
             let token = cancel.clone();
             let reader = store.clone();
@@ -180,10 +175,7 @@ async fn execute_preparing(
             let name = file.file_name.clone();
             async_std::task::spawn_blocking(move || -> Result<()> {
                 let _access = reader;
-                let mut staged = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(target)?;
+                let mut staged = directory.create_file(OsStr::new(&name))?;
                 let actual = copy_and_digest(&source, &mut staged, &token)?;
                 if actual.sha256 != expected.sha256 || actual.size_bytes != expected.size_bytes {
                     return Err(ContentError::StagedDigestMismatch { name });
@@ -220,7 +212,7 @@ async fn execute_preparing(
         .iter()
         .filter(|file| file.placement != Placement::External)
     {
-        let source = stage.files().join(&file.name);
+        let source = staged_directory.path().join(&file.name);
         let publisher = store.clone();
         let from = staged_directory.clone();
         let to = mods_directory.clone();
