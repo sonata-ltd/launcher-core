@@ -1,6 +1,6 @@
 //! Real CAS/SQLite operations at deterministic admission boundaries; no network.
 use super::*;
-use crate::instance::content::{install, install::checkpoints::Pause};
+use crate::instance::content::{error::ContentError, install, install::checkpoints::Pause};
 use futures::{pin_mut, poll};
 use std::{io, task::Poll};
 
@@ -9,6 +9,48 @@ fn assert_busy(store: &ObjectStore) {
         store.try_maintenance().err().unwrap().kind(),
         io::ErrorKind::WouldBlock
     );
+}
+
+#[async_std::test]
+async fn modified_cas_bytes_are_never_published_under_the_registered_digest() {
+    let fixture = fixture().await;
+    let (store, object, release) = cached_release(&fixture).await;
+    let signature = super::super::inventory::signature(fixture.root.clone())
+        .await
+        .unwrap();
+    let operation = uuid::Uuid::new_v4();
+    let mut pause = Pause::new(operation, "before-content-copy");
+    let cancel = Cancellation::new();
+    let releases = [release];
+    let execute = install::execute(
+        fixture.db.clone(),
+        store,
+        fixture.id,
+        &fixture.root,
+        operation,
+        &releases,
+        &signature,
+        &cancel,
+        |_, _| {},
+    );
+    let modify = async {
+        pause.entered().await;
+        std::fs::write(&object.path, b"changed!!!").unwrap();
+        pause.resume();
+    };
+    let (result, ()) = futures::join!(execute, modify);
+    assert!(
+        matches!(result, Err(ContentError::StagedDigestMismatch { .. })),
+        "{result:?}"
+    );
+    assert!(!fixture.root.join("mods/cached.jar").exists());
+    assert!(!storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_content")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert_eq!(std::fs::read(&object.path).unwrap(), b"changed!!!");
 }
 
 #[async_std::test]

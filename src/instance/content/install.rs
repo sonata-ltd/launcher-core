@@ -13,7 +13,10 @@ use crate::{
     instance::model::InstanceId,
     utils::{
         download::transfer::{self, Cancel},
-        files::{self, digest::digest_file, placement},
+        files::{
+            self,
+            digest::{copy_and_digest, digest_file},
+        },
     },
 };
 use std::{fs, path::Path, sync::Arc};
@@ -156,13 +159,26 @@ async fn execute_preparing(
                 })
                 .await?
             };
+            #[cfg(test)]
+            checkpoints::wait(id, "before-content-copy").await;
             let target = stage.files().join(&file.file_name);
             let source = object.path.clone();
             let token = cancel.clone();
             let reader = store.clone();
-            async_std::task::spawn_blocking(move || {
+            let expected = object.digests.clone();
+            let name = file.file_name.clone();
+            async_std::task::spawn_blocking(move || -> Result<()> {
                 let _access = reader;
-                placement::copy_new(&source, &target, &token)
+                let mut staged = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(target)?;
+                let actual = copy_and_digest(&source, &mut staged, &token)?;
+                if actual.sha256 != expected.sha256 || actual.size_bytes != expected.size_bytes {
+                    return Err(ContentError::StagedDigestMismatch { name });
+                }
+                staged.sync_all()?;
+                Ok(())
             })
             .await?;
             (object_id, object.digests.sha256, Placement::Copy)
@@ -196,9 +212,16 @@ async fn execute_preparing(
         let source = stage.files().join(&file.name);
         let target = mods.join(&file.name);
         let publisher = store.clone();
-        async_std::task::spawn_blocking(move || {
+        let expected = file.sha256.clone();
+        let name = file.name.clone();
+        async_std::task::spawn_blocking(move || -> Result<()> {
             let _access = publisher;
-            files::publish::publish_new(source, target)
+            if !fs::symlink_metadata(&source)?.is_file() || files::sha256_file(&source)? != expected
+            {
+                return Err(ContentError::StagedDigestMismatch { name });
+            }
+            files::publish::publish_new(source, target)?;
+            Ok(())
         })
         .await?;
     }

@@ -34,6 +34,8 @@ pub enum ContentError {
     UnsupportedJournalVersion(u32),
     #[error("RecoveryConflict: {name} differs from the unfinished publication")]
     RecoveryConflict { name: String },
+    #[error("staged bytes for {name} differ from the registered content digest")]
+    StagedDigestMismatch { name: String },
     #[error("invalid content journal operation id {0:?}")]
     InvalidJournalId(String),
     #[error("CurseForge API credential is not configured")]
