@@ -272,7 +272,10 @@ async fn ephemeral_unknown_and_uncatalogued_historical_bytes_permanently_disable
                     .await
                     .unwrap();
                 attach(
-                    Arc::new(Database { pool }),
+                    Arc::new(Database {
+                        pool,
+                        layout_lease: None,
+                    }),
                     f.paths.libraries().clone(),
                     Cancellation::new(),
                 )

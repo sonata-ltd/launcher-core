@@ -39,6 +39,7 @@ pub(crate) struct RunningInstances {
     tasks: crate::utils::jobs::supervisor::Tasks,
     inner: Arc<Mutex<HashMap<InstanceId, Entry>>>,
     bus: EventBus,
+    _layout_lease: Option<Arc<crate::data::ownership::LayoutLease>>,
 }
 
 impl RunningInstances {
@@ -51,7 +52,16 @@ impl RunningInstances {
             inner: Arc::new(Mutex::new(HashMap::new())),
             bus,
             tasks,
+            _layout_lease: None,
         }
+    }
+
+    pub(super) fn with_layout_lease(
+        mut self,
+        lease: Option<Arc<crate::data::ownership::LayoutLease>>,
+    ) -> Self {
+        self._layout_lease = lease;
+        self
     }
 
     pub fn reserve(&self, id: InstanceId) -> Result<Reservation> {

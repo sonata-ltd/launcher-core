@@ -2,6 +2,7 @@ use sqlx::{
     migrate::{MigrateDatabase, MigrateError},
     Sqlite, SqlitePool,
 };
+use std::sync::Arc;
 use thiserror::Error;
 
 pub(crate) mod retention;
@@ -13,6 +14,7 @@ pub const DEFAULT_DB_NAME: &'static str = "cache.db";
 #[derive(Debug, Clone)]
 pub struct Database {
     pub pool: SqlitePool,
+    pub(crate) layout_lease: Option<Arc<super::ownership::LayoutLease>>,
 }
 
 #[derive(Debug, Error)]
@@ -31,6 +33,9 @@ pub enum DbError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    #[error("database is already bound to a different launcher resource layout")]
+    LayoutConflict,
 
     #[error("Not found: {0}")]
     NotFound(String),
@@ -81,7 +86,38 @@ impl Database {
         let pool = SqlitePool::connect(url).await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            layout_lease: None,
+        })
+    }
+
+    pub(crate) async fn init_owned(
+        url: &str,
+        paths: &super::layout::LauncherPaths,
+        lease: Arc<super::ownership::LayoutLease>,
+    ) -> Result<Self> {
+        let key =
+            super::ownership::layout_key(paths).map_err(crate::utils::files::FileError::from)?;
+        let mut db = Self::init(url).await?;
+        let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await?;
+        sqlx::query(
+            "INSERT INTO launcher_state(key,value) VALUES('database_layout_v1',?)
+                     ON CONFLICT(key) DO NOTHING",
+        )
+        .bind(&key)
+        .execute(&mut *tx)
+        .await?;
+        let stored: String =
+            sqlx::query_scalar("SELECT value FROM launcher_state WHERE key='database_layout_v1'")
+                .fetch_one(&mut *tx)
+                .await?;
+        if stored != key {
+            return Err(DbError::LayoutConflict);
+        }
+        tx.commit().await?;
+        db.layout_lease = Some(lease);
+        Ok(db)
     }
 }
 

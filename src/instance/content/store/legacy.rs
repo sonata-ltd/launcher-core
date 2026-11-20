@@ -6,18 +6,14 @@ use std::{
 };
 
 use crate::{
-    data::{db::Database, layout::LauncherPaths},
+    data::{db::Database, layout::LauncherPaths, ownership::LayoutLease},
     instance::{
         activity::InstanceActivity,
         content::{error::Result, inventory, journal::Placement, model::ContentKind},
         model::InstanceId,
     },
     utils::files::{self, digest::FileStamp},
-    utils::{
-        cancellation::Cancellation,
-        jobs::supervisor::Tasks,
-        object_store::{ObjectStore, StoreLock},
-    },
+    utils::{cancellation::Cancellation, jobs::supervisor::Tasks, object_store::ObjectStore},
 };
 
 #[derive(sqlx::FromRow)]
@@ -37,7 +33,7 @@ pub(in crate::instance::content) async fn detach_registered_links(
     paths: Arc<LauncherPaths>,
     activity: Arc<InstanceActivity>,
     store: Arc<ObjectStore>,
-    ownership: [Arc<StoreLock>; 3],
+    ownership: Arc<LayoutLease>,
     tasks: &Tasks,
 ) -> Result<()> {
     tasks

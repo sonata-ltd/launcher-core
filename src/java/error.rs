@@ -5,6 +5,9 @@ use crate::data::db::DbError;
 #[derive(Debug, Error)]
 pub enum JavaError {
     #[error(transparent)]
+    Task(#[from] crate::utils::jobs::supervisor::TaskError),
+
+    #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("Runtime already registered: {0}")]
     AlreadyRegistered(String),

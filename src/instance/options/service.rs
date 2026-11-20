@@ -26,6 +26,7 @@ pub struct OptionsService {
     settings: Arc<SettingsService>,
     java: Arc<JavaRegistry>,
     bus: EventBus,
+    tasks: crate::utils::jobs::supervisor::Tasks,
 }
 
 impl OptionsService {
@@ -35,6 +36,7 @@ impl OptionsService {
         settings: Arc<SettingsService>,
         java: Arc<JavaRegistry>,
         bus: EventBus,
+        tasks: crate::utils::jobs::supervisor::Tasks,
     ) -> Self {
         Self {
             storage: Arc::new(DbOptionsStore::new(db)),
@@ -42,6 +44,7 @@ impl OptionsService {
             settings,
             java,
             bus,
+            tasks,
         }
     }
 
@@ -77,6 +80,7 @@ impl OptionsService {
             return self.overview(id).await;
         }
 
+        let _ticket = self.tasks.admit("update instance overview", None)?;
         let updates = self.instances.lock_updates().await;
         if patch.name.is_some() {
             self.instances.invalidate(id);
@@ -106,6 +110,7 @@ impl OptionsService {
     }
 
     pub async fn patch_settings(&self, id: InstanceId, patch: SettingsPatch) -> Result<Settings> {
+        let _ticket = self.tasks.admit("patch instance settings", None)?;
         self.settings
             .patch_and_notify(id, &patch, &self.bus)
             .await
@@ -189,6 +194,7 @@ mod tests {
             Arc::new(SettingsService::new(db.clone())),
             Arc::new(JavaRegistry::new(Arc::new(DbJavaStore::new(db)), 4)),
             bus,
+            Default::default(),
         );
 
         let patch = |name: &str| OverviewPatch {

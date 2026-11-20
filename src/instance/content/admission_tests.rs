@@ -12,6 +12,56 @@ fn assert_busy(store: &ObjectStore) {
 }
 
 #[async_std::test]
+async fn bootstrap_recovery_owns_lifetime_locks_and_finishes_sql_after_caller_drop() {
+    let fixture = fixture().await;
+    let (operation, _) = prepared(&fixture).await;
+    let store = ObjectStore::new(fixture.paths.root().join("content-store"));
+    let mut pause = Pause::new(operation, "recovering");
+    let mut bootstrap = Box::pin(InstanceContentService::new(
+        fixture.db.clone(),
+        fixture.paths.clone(),
+        fixture.instances.clone(),
+        None,
+        fixture.operations.clone(),
+    ));
+    assert!(matches!(
+        futures::future::select(bootstrap.as_mut(), Box::pin(pause.entered())).await,
+        futures::future::Either::Right(_)
+    ));
+    drop(bootstrap);
+    assert_eq!(
+        store.lock_exclusive().err().unwrap().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert!(storage::has_pending(&fixture.db, fixture.id).await.unwrap());
+    let stage_exists = std::fs::read_dir(&fixture.root).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".sonata-recovery-")
+    });
+    assert!(stage_exists);
+    pause.resume();
+    async_std::future::timeout(std::time::Duration::from_secs(10), async {
+        while storage::has_pending(&fixture.db, fixture.id).await.unwrap() {
+            async_std::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let bindings: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_content")
+        .fetch_one(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(bindings, 1);
+    assert_eq!(
+        std::fs::read(fixture.root.join("mods/mod.jar")).unwrap(),
+        b"verified bytes"
+    );
+}
+
+#[async_std::test]
 async fn imported_unregistered_bytes_stay_admitted_until_sql_lease_registration() {
     let fixture = fixture().await;
     let store = ObjectStore::new(fixture.paths.root().join("content-store"));

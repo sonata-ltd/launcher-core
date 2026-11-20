@@ -9,6 +9,7 @@ use crate::{
         config::{Config, DEFAULT_EVENTBUS_CAPACITY},
         db::{Database, DbError},
         layout::{LauncherPaths, LauncherPathsError},
+        ownership::LayoutLease,
         registry::operation::OperationRegistry,
     },
     instance::{
@@ -68,13 +69,20 @@ impl GlobalState {
     }
 
     pub async fn new(config: Config) -> Result<Self, AppError> {
+        // Startup owns every mutation and its recovery guards through completion
+        // even if the host stops awaiting the bootstrap result.
+        task::spawn(Self::bootstrap(config)).await
+    }
+
+    async fn bootstrap(config: Config) -> Result<Self, AppError> {
         let paths = Arc::new(LauncherPaths::resolve(&config).await?);
+        let lease = Arc::new(LayoutLease::acquire(&paths)?);
 
         let db_url = config
             .database_url
             .clone()
             .unwrap_or_else(|| format!("sqlite://{}", paths.cache_db().display()));
-        let db = Arc::new(Database::init(&db_url).await?);
+        let db = Arc::new(Database::init_owned(&db_url, &paths, lease.clone()).await?);
         crate::instance::init::retention::initialize(db.clone(), paths.clone()).await?;
         crate::instance::download::assets::AssetsData::initialize(
             db.clone(),
@@ -110,12 +118,13 @@ impl GlobalState {
         let instance_registry = instance_service.get_registry();
 
         let content_service = Arc::new(
-            crate::instance::content::service::InstanceContentService::new(
+            crate::instance::content::service::InstanceContentService::initialize(
                 db.clone(),
                 paths.clone(),
                 instance_service.clone(),
                 config.curseforge_api_key.clone(),
                 operations.clone(),
+                lease.clone(),
             )
             .await?,
         );
@@ -137,6 +146,7 @@ impl GlobalState {
                 settings,
                 java_registry,
                 bus.clone(),
+                operations.tasks.clone(),
             )),
         };
 
@@ -146,6 +156,7 @@ impl GlobalState {
             operations
                 .tasks
                 .spawn("startup scratch maintenance", None, async move {
+                    let _lease = lease;
                     const STALE_AFTER: Duration = Duration::from_secs(60 * 60);
                     let removed = sweep_partials(paths.libraries(), STALE_AFTER).await
                         + sweep_partials(paths.assets(), STALE_AFTER).await;
@@ -173,8 +184,8 @@ impl GlobalState {
             operations
                 .tasks
                 .spawn("startup Java discovery", None, async move {
-                    match java.ensure_discovered().await {
-                        Ok(added) if added > 0 => instances.assign_missing().await,
+                    match java.ensure_discovered_retained().await {
+                        Ok(added) if added > 0 => instances.assign_missing_retained().await,
                         Ok(_) => {}
                         Err(e) => tracing::warn!(error = %e, "java discovery failed"),
                     }
@@ -195,8 +206,9 @@ impl GlobalState {
     /// Registers a runtime the user picked by hand, then gives it to every
     /// instance that has no Java yet and can use this one.
     pub async fn add_java(&self, new: NewJavaRuntime) -> JavaResult<Arc<JavaRuntime>> {
-        let java = self.services.java.init_external(new).await?;
-        self.services.instances.assign_missing().await;
+        let _ticket = self.operations.tasks.admit("add Java runtime", None)?;
+        let java = self.services.java.init_external_retained(new).await?;
+        self.services.instances.assign_missing_retained().await;
 
         Ok(java)
     }
@@ -205,8 +217,12 @@ impl GlobalState {
     /// flag, then retries every instance without a Java — also when nothing
     /// new turned up: one may fit a runtime registered before it was installed.
     pub async fn rediscover_java(&self) -> JavaResult<usize> {
-        let added = self.services.java.rediscover().await?;
-        self.services.instances.assign_missing().await;
+        let _ticket = self
+            .operations
+            .tasks
+            .admit("rediscover and assign Java", None)?;
+        let added = self.services.java.rediscover_retained().await?;
+        self.services.instances.assign_missing_retained().await;
 
         Ok(added)
     }
@@ -223,7 +239,7 @@ impl GlobalState {
                 let java = core.java();
                 let result = java.validate_managed(id).await;
                 if result.is_ok() {
-                    core.services.instances.assign_missing().await;
+                    core.services.instances.assign_missing_retained().await;
                 }
                 let _ = tx.send(result).await;
             })

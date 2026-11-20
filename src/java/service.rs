@@ -26,6 +26,7 @@ pub struct JavaService {
     /// instance installed during the first-run search sees its results.
     discovery: Mutex<()>,
     paths_initialized: Mutex<bool>,
+    tasks: crate::utils::jobs::supervisor::Tasks,
 }
 
 impl JavaService {
@@ -44,6 +45,7 @@ impl JavaService {
     ) -> Self {
         let store: Arc<dyn JavaStore> =
             Arc::new(DbJavaStore::at(Arc::clone(&db), own_runtimes.clone()));
+        let tasks = operations.tasks.clone();
 
         Self {
             db: db.clone(),
@@ -56,6 +58,7 @@ impl JavaService {
             own_runtimes,
             discovery: Mutex::new(()),
             paths_initialized: Mutex::new(false),
+            tasks,
         }
     }
 
@@ -63,6 +66,11 @@ impl JavaService {
     /// home/archive GC. External Java stays external; an incomplete roots gate
     /// defers collection rather than treating migration as ownership proof.
     pub async fn initialize(&self) -> JavaResult<()> {
+        let _ticket = self.tasks.admit("initialize Java runtime paths", None)?;
+        self.initialize_retained().await
+    }
+
+    async fn initialize_retained(&self) -> JavaResult<()> {
         let mut initialized = self.paths_initialized.lock().await;
         if !*initialized {
             super::managed::retention::attach(Some(self.db.clone()), self.own_runtimes.clone())
@@ -134,6 +142,14 @@ impl JavaService {
     }
 
     pub async fn init_external(&self, new_java: NewJavaRuntime) -> JavaResult<Arc<JavaRuntime>> {
+        let _ticket = self.tasks.admit("register external Java runtime", None)?;
+        self.init_external_retained(new_java).await
+    }
+
+    pub(crate) async fn init_external_retained(
+        &self,
+        new_java: NewJavaRuntime,
+    ) -> JavaResult<Arc<JavaRuntime>> {
         let res = self.registry.register(new_java).await;
 
         match res {
@@ -148,7 +164,14 @@ impl JavaService {
     /// The first-run search: does nothing once it has completed on this
     /// install. Returns how many runtimes it registered.
     pub async fn ensure_discovered(&self) -> JavaResult<usize> {
-        self.initialize().await?;
+        let _ticket = self
+            .tasks
+            .admit("discover Java runtimes on first run", None)?;
+        self.ensure_discovered_retained().await
+    }
+
+    pub(crate) async fn ensure_discovered_retained(&self) -> JavaResult<usize> {
+        self.initialize_retained().await?;
         let _guard = self.discovery.lock().await;
 
         self.registry.backfill_major().await?;
@@ -165,7 +188,12 @@ impl JavaService {
 
     /// Searches again whatever the flag says: the user asked for it.
     pub async fn rediscover(&self) -> JavaResult<usize> {
-        self.initialize().await?;
+        let _ticket = self.tasks.admit("rediscover Java runtimes", None)?;
+        self.rediscover_retained().await
+    }
+
+    pub(crate) async fn rediscover_retained(&self) -> JavaResult<usize> {
+        self.initialize_retained().await?;
         let _guard = self.discovery.lock().await;
         self.discover_locked(true).await
     }

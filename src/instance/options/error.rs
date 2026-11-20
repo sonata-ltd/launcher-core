@@ -8,6 +8,9 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum OptionsError {
+    #[error(transparent)]
+    Task(#[from] crate::utils::jobs::supervisor::TaskError),
+
     #[error("instance not found: {0}")]
     InstanceNotFound(InstanceId),
 

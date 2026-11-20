@@ -394,6 +394,7 @@ async fn ephemeral_or_historical_ownership_cannot_become_complete_on_later_attac
                 .unwrap();
         } else if mode == "owner-error" {
             let broken = Database {
+                layout_lease: None,
                 pool: sqlx::SqlitePool::connect(&format!(
                     "sqlite://{}?mode=rwc",
                     f.directory.path().join("broken.db").display()

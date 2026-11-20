@@ -710,9 +710,23 @@ impl ManagedJavaService {
         if *initialized {
             return Ok(());
         }
-        retention::attach(self.database.clone(), self.root.clone()).await?;
+        let ticket = self
+            .tasks
+            .admit("recover managed Java records", None)
+            .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Shutdown, error))?;
         let root = self.root.clone();
-        let report = task::spawn_blocking(move || recovery::load(&root)).await?;
+        let db = self.database.clone();
+        let report = ticket
+            .spawn(async move {
+                retention::attach(db.clone(), root.clone()).await?;
+                task::spawn_blocking(move || {
+                    let _db = db;
+                    recovery::load(&root)
+                })
+                .await
+            })
+            .await
+            .map_err(storage)??;
         for diagnostic in &report.diagnostics {
             tracing::warn!(path = %diagnostic.path.display(), error = %diagnostic.error.diagnostic(), "managed record recovery requires attention");
         }

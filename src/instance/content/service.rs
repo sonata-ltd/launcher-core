@@ -2,7 +2,6 @@
 //! HTTP и нормализация находятся в crate::instance::content::catalog, SQL — в storage.
 use std::{
     collections::HashMap,
-    fs::OpenOptions,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -11,7 +10,7 @@ use std::{
 use super::{api::*, install, recovery, storage};
 use crate::utils::jobs::history::History;
 use crate::{
-    data::{db::Database, layout::LauncherPaths},
+    data::{db::Database, layout::LauncherPaths, ownership::LayoutLease},
     instance::content::{
         catalog::{types::*, ContentCatalog},
         error::{BusyReason, ContentError, ContentInitError, Result, StalePlanReason},
@@ -149,14 +148,11 @@ pub struct InstanceContentService {
     plans: Arc<Mutex<HashMap<Uuid, StoredPlan>>>,
     jobs: Arc<Mutex<Jobs>>,
     tasks: crate::utils::jobs::supervisor::Tasks,
-    // OS-lock защищает от второго обновлённого процесса с тем же корнем.
-    // In-memory барьер InstanceService защищает launch и install внутри процесса.
-    _root_lock: Arc<crate::utils::object_store::StoreLock>,
-    _instances_lock: Arc<crate::utils::object_store::StoreLock>,
-    _store_lock: Arc<crate::utils::object_store::StoreLock>,
+    _layout_lease: Arc<LayoutLease>,
 }
 
 impl InstanceContentService {
+    #[cfg(test)]
     pub(crate) async fn new(
         db: Arc<Database>,
         paths: Arc<LauncherPaths>,
@@ -164,45 +160,29 @@ impl InstanceContentService {
         curseforge_key: Option<String>,
         operations: Arc<crate::data::registry::operation::OperationRegistry>,
     ) -> std::result::Result<Self, ContentInitError> {
-        let root_lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(paths.root().join(".launcher-content.lock"))?;
-        let root_lock =
-            crate::utils::object_store::StoreLock::exclusive(root_lock).map_err(|source| {
-                ContentInitError::Lock {
-                    path: paths.root().clone(),
-                    source,
-                }
-            })?;
-        let root_lock = Arc::new(root_lock);
-        // The configured launcher root is not the instances resource identity:
-        // different roots may override instances to the same directory/alias.
-        std::fs::create_dir_all(paths.instances())?;
-        let lock_path = files::child(
-            paths.instances(),
-            std::path::Path::new(".launcher-content.lock"),
-        )?;
-        let instances_lock = crate::utils::object_store::StoreLock::exclusive(
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(lock_path)?,
-        )
-        .map_err(|source| ContentInitError::Lock {
-            path: paths.instances().clone(),
-            source,
-        })?;
-        let instances_lock = Arc::new(instances_lock);
+        let lease = Arc::new(LayoutLease::acquire(&paths)?);
+        instances
+            .tasks()
+            .spawn(
+                "content bootstrap",
+                None,
+                Self::initialize(db, paths, instances, curseforge_key, operations, lease),
+            )?
+            .await?
+    }
+
+    pub(crate) async fn initialize(
+        db: Arc<Database>,
+        paths: Arc<LauncherPaths>,
+        instances: Arc<InstanceService>,
+        curseforge_key: Option<String>,
+        operations: Arc<crate::data::registry::operation::OperationRegistry>,
+        lease: Arc<LayoutLease>,
+    ) -> std::result::Result<Self, ContentInitError> {
         let registry = instances.get_registry();
         let activity = instances.activity();
         let tasks = instances.tasks();
         let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
-        let store_lock = Arc::new(store.lock_exclusive()?);
         let maintenance = store.try_maintenance()?;
         let cleanup_db = db.clone();
         async_std::task::spawn(async move {
@@ -245,11 +225,7 @@ impl InstanceContentService {
             paths.clone(),
             activity.clone(),
             store.clone(),
-            [
-                root_lock.clone(),
-                instances_lock.clone(),
-                store_lock.clone(),
-            ],
+            lease.clone(),
             &tasks,
         )
         .await
@@ -315,9 +291,7 @@ impl InstanceContentService {
             plans,
             jobs,
             tasks,
-            _root_lock: root_lock,
-            _instances_lock: instances_lock,
-            _store_lock: store_lock,
+            _layout_lease: lease,
         })
     }
 

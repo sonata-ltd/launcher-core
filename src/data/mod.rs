@@ -3,5 +3,6 @@
 pub mod config;
 pub(crate) mod db;
 pub mod layout;
+pub(crate) mod ownership;
 pub(crate) mod registry;
 pub(crate) mod state;

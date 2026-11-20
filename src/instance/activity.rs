@@ -20,9 +20,13 @@ pub(super) struct InstanceActivity {
 }
 
 impl InstanceActivity {
-    pub(super) fn with_tasks(bus: EventBus, tasks: crate::utils::jobs::supervisor::Tasks) -> Self {
+    pub(super) fn with_tasks(
+        bus: EventBus,
+        tasks: crate::utils::jobs::supervisor::Tasks,
+        lease: Option<Arc<crate::data::ownership::LayoutLease>>,
+    ) -> Self {
         Self {
-            running: RunningInstances::with_tasks(bus, tasks),
+            running: RunningInstances::with_tasks(bus, tasks).with_layout_lease(lease),
             install_jobs: Default::default(),
             lifecycle: Default::default(),
             content_jobs: Default::default(),

@@ -7,6 +7,7 @@ use crate::utils::cancellation::Cancellation;
 
 const LOCK: &str = ".sonata-access.lock";
 
+#[derive(Debug)]
 pub(crate) struct StoreLock(fs::File);
 
 impl StoreLock {

@@ -66,6 +66,7 @@ impl InstanceService {
         bus: EventBus,
     ) -> Self {
         let store: Arc<dyn InstanceStore> = Arc::new(DbInstanceStore::new(Arc::clone(&db)));
+        let lease = db.layout_lease.clone();
 
         Self {
             registry: Arc::new(InstanceRegistry::new(store)),
@@ -78,6 +79,7 @@ impl InstanceService {
             activity: Arc::new(InstanceActivity::with_tasks(
                 bus.clone(),
                 operations.tasks.clone(),
+                lease,
             )),
             mod_index: Arc::new(instance::content::index::ModIndex::with_tasks(
                 operations.tasks.clone(),
@@ -96,6 +98,7 @@ impl InstanceService {
 
     /// Removes the instance registration. Game files are kept on disk.
     pub async fn unregister(&self, id: InstanceId) -> Result<()> {
+        let _ticket = self.operations.tasks.admit("unregister instance", None)?;
         let _activity = self.activity.reserve_content_change(id)?;
         self.ensure_content_recovered(id).await?;
         self.registry.delete(id).await?;
@@ -128,6 +131,7 @@ impl InstanceService {
         manifest_url: String,
         meta_provider: String,
     ) -> Result<Arc<InstanceRecord>> {
+        let _ticket = self.operations.tasks.admit("create instance", None)?;
         let dir = slugify(&name);
 
         if dir.is_empty() {
@@ -263,8 +267,11 @@ impl InstanceService {
         let result = instance::init::install::execute(&request, &context).await;
         let result = match result {
             Ok(profile) => {
+                if let Err(error) = self.auto_select_runtime(&rec, &profile.java, true).await {
+                    tracing::warn!(instance = %rec.id, %error, "Java auto-selection after installation failed");
+                }
                 op.finish(Outcome::Completed);
-                self.auto_select_runtime(&rec, &profile.java, true).await
+                Ok(())
             }
             Err(e) => {
                 let outcome = if e.is_cancelled() {
@@ -286,6 +293,13 @@ impl InstanceService {
     /// instance never installed has none and is skipped. Never notifies about
     /// instances still left without one, the user did not ask about them.
     pub async fn assign_missing(&self) {
+        let Ok(_ticket) = self.operations.tasks.admit("assign missing Java", None) else {
+            return;
+        };
+        self.assign_missing_retained().await;
+    }
+
+    pub(crate) async fn assign_missing_retained(&self) {
         let list = match self.list().await {
             Ok(list) => list,
             Err(e) => {
@@ -486,6 +500,7 @@ impl InstanceService {
     /// identity on disk and stays as it was slugified at creation, so a renamed
     /// instance keeps its original folder.
     pub async fn rename(&self, id: InstanceId, new_name: &str) -> Result<Arc<InstanceRecord>> {
+        let _ticket = self.operations.tasks.admit("rename instance", None)?;
         let rec = self.registry.rename(id, new_name).await?;
 
         self.bus.publish(InstanceEvent::OverviewChanged(id));
@@ -507,6 +522,10 @@ impl InstanceService {
     }
 
     pub async fn update_settings(&self, id: InstanceId, patch: &SettingsPatch) -> Result<()> {
+        let _ticket = self
+            .operations
+            .tasks
+            .admit("update instance settings", None)?;
         self.settings.patch_and_notify(id, patch, &self.bus).await
     }
 
