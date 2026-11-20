@@ -109,7 +109,9 @@ impl Directory {
                         | libc::O_EXCL
                         | libc::O_NOFOLLOW
                         | libc::O_CLOEXEC,
-                    mode as libc::mode_t,
+                    // The variadic argument uses C integer promotion even
+                    // on platforms where mode_t is narrower than an int.
+                    mode,
                 )
             };
             if fd < 0 {
