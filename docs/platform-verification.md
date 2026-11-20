@@ -2,7 +2,9 @@
 
 Локальный checkpoint: **19 ноября 2026**. Этот шаг намеренно **не запускает и не
 проверяет GUI**: пользователь отложил явную GUI verification. Исходный launcher
-не переключён. P11-V01 GUI replay остаётся отдельным историческим evidence.
+не переключён. P11-V01 GUI replay остаётся отдельным историческим evidence;
+его refresh от 20 ноября против этого commit выполнен с теми же inputs и
+подтвердил прежние numbers ([gui-migration/linux-verification.md](gui-migration/linux-verification.md)).
 
 ## Что проверено
 

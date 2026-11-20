@@ -151,6 +151,9 @@ regressions теперь используют controlled Rust child вместо
 документацию. Core fmt/check/test/build: **571 library + 2 CLI + 2 integration +
 18 doctests passed**, 0 failed, 1 ignored. Fresh GUI replay patches 01–05:
 resolve/fmt/check/test/build PASS, **238 passed, 0 failed, 7 ignored**.
+Refresh от 20 ноября против текущего core `4f4f3b2` теми же inputs подтверждает
+те же numbers (core pipeline на этом HEAD: 620 library + 2 CLI + 2 integration +
+18 doctests, 0 failed, 1 ignored).
 [Evidence, команды и ограничения](gui-migration/linux-verification.md).
 
 - **P08:** все четыре byte domains используют общий ObjectStore и actual SHA-256,
@@ -182,8 +185,9 @@ termination не превращается в cooperative close. Историче
 вне Java runtime/settings и content recovery не объявлены полностью мигрированными.
 
 Исходный GUI и его dependency/lockfile не изменены этой миграцией. В финальном replay
-проверено сохранение 173 исходных GUI файлов и его Git status. Локальный core
-`Cargo.lock` сохранён вне коммитов; автоматического переключения launcher и push нет.
+проверено сохранение 173 исходных GUI файлов и его Git status; baseline refresh
+20.11 — 175 файлов (2 новых untracked файла пользователя) и тот же status. Локальный
+core `Cargo.lock` сохранён вне коммитов; автоматического переключения launcher и push нет.
 
 [B06 follow-up](installed-resolver-contract.md) проверяет Required/Unknown связи
 всех fixed installed seeds в solver и catalog traversal. `NULL` dependencies

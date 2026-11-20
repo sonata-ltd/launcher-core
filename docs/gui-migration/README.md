@@ -30,6 +30,11 @@ offline и выполняет fmt/check/test/build. Последующие cargo
 [Команды, patch hashes, logs и ограничения](linux-verification.md).
 P11-V02/manual/platform и весь P08/P11 не объявлены blanket PASS.
 
+Refresh от 20 ноября 2026: тот же полный fresh replay без `--checks` против
+текущего core `4f4f3b2` с теми же inputs — все пять шагов PASS, GUI numbers не
+изменились (**238 passed, 0 failed, 7 ignored**); baseline inventory — 175 файлов
+(2 новых untracked файла пользователя). Подробности — в linux-verification.md.
+
 ## 01 — Закрытый service API
 
 `01-service-api.patch`: observer imports `operations::message`, managed Java
