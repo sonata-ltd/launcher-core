@@ -150,11 +150,15 @@ fn recover(root: &Path, record: &mut Record) -> Result<()> {
 }
 
 pub(super) fn load(root: &Path) -> Result<Report> {
-    let _maintenance = ownership::maintenance(root)?;
+    let maintenance = ownership::maintenance(root)?;
     #[cfg(test)]
     super::tests::ownership_checkpoint(root, "recovery");
+    // Created from the held managed root, never by re-resolving the path.
+    maintenance
+        .directory()
+        .create_relative(Path::new("operations"))
+        .map_err(storage)?;
     let directory = files::child(root, Path::new(".managed/operations")).map_err(storage)?;
-    fs::create_dir_all(&directory).map_err(storage)?;
     let archive_root = files::child(root, Path::new(".managed/bytes")).map_err(storage)?;
     crate::utils::object_store::ObjectStore::new(archive_root)
         .sweep_staging()

@@ -1,3 +1,4 @@
+use crate::utils::files::directory::Directory;
 use chrono::{DateTime, Utc};
 use futures::{
     channel::oneshot,
@@ -289,9 +290,28 @@ impl VersionCatalog {
             inner.flights.lock().unwrap().clear();
             if let Some(root) = inner.cache_root.clone() {
                 async_std::task::spawn_blocking(move || -> Result<()> {
+                    let directory = match root
+                        .canonicalize()
+                        .and_then(|root| Directory::open(&root))
+                    {
+                        Ok(directory) => directory,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                        Err(error) => return Err(VersionError::Cache(error.to_string())),
+                    };
                     for provider in [MetaProvider::Prism, MetaProvider::Mojang] {
                         let path = cache::file_path(&root, provider);
-                        match std::fs::remove_file(path) {
+                        let relative = path
+                            .strip_prefix(&root)
+                            .map_err(|error| VersionError::Cache(error.to_string()))?;
+                        let removed = directory
+                            .open_optional(relative.parent().unwrap_or(relative))
+                            .and_then(|parent| match parent {
+                                Some(parent) => {
+                                    parent.unlink(relative.file_name().unwrap_or_default())
+                                }
+                                None => Err(std::io::ErrorKind::NotFound.into()),
+                            });
+                        match removed {
                             Ok(()) => {}
                             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                             Err(error) => return Err(VersionError::Cache(error.to_string())),

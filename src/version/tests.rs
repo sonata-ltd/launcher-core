@@ -387,3 +387,23 @@ async fn concurrent_errors_are_shared_and_next_refresh_can_retry() {
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+#[cfg(unix)]
+#[async_std::test]
+async fn force_invalidation_preserves_files_behind_a_redirected_provider_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache_root = directory.path().join("cache");
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::create_dir_all(&cache_root).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let relative = cache::file_path(&cache_root, PROVIDER);
+    let relative = relative.strip_prefix(&cache_root).unwrap();
+    let provider = cache_root.join(relative.parent().unwrap());
+    let kept = elsewhere.join(relative.file_name().unwrap());
+    std::fs::write(&kept, b"keep").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &provider).unwrap();
+
+    let (catalog, _, _, _) = harness(Some(cache_root));
+    assert!(catalog.invalidate_all().await.is_err());
+    assert_eq!(std::fs::read(&kept).unwrap(), b"keep");
+}

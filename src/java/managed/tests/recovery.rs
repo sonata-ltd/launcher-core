@@ -164,3 +164,19 @@ async fn query_isolation_never_turns_corrupt_record_into_permission_for_gc() {
     assert!(gc::collect(root, std::time::Duration::ZERO).await.is_err());
     assert_eq!(fs::read(corrupt).unwrap(), b"broken root record");
 }
+
+#[cfg(unix)]
+#[async_std::test]
+async fn recovery_declines_a_redirected_operations_directory_without_touching_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let kept = elsewhere.path().join("kept");
+    fs::write(&kept, b"keep").unwrap();
+    fs::create_dir_all(dir.path().join(".managed")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), dir.path().join(".managed/operations")).unwrap();
+
+    let service = ManagedJavaService::new(dir.path().into());
+    assert!(service.initialize().await.is_err());
+    assert_eq!(fs::read(&kept).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(elsewhere.path()).unwrap().count(), 1);
+}
