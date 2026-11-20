@@ -113,6 +113,24 @@ Until it is restored, run the cargo pipeline directly (item 1).
   on every OS: OS-level filesystem and network confinement, descendant
   containment, and checking undeclared write locations against declared outputs.
 
+## 5a. B01 native and GUI build
+
+- Native Windows (NTFS) and macOS (APFS): run
+  `cargo test --locked --lib -- concurrency_observation --ignored --nocapture --test-threads=1`.
+  On Windows the module is `cfg(unix)` today, so first record that it was
+  not compiled; native Windows evidence for B01 then comes from item 1's
+  junction/reparse fixtures.
+- Expected on macOS: the control reports at least one repeat outside the root,
+  every held-directory scenario reports `0/7`, and every repeat has completed
+  work inside the root.
+- GUI: build the GUI snapshot (with patches 01–05) against core commit
+  `623e725` or later. Expected: it compiles, and no use of
+  `utils::files::{child, atomic_write}` or `utils::download::transfer::{download, place}`
+  turns up. If any does, record FAIL and report it; do not restore the
+  exports silently.
+- Status rule: B01 moves from `PLATFORM VALIDATION PENDING` to `VERIFIED` only
+  with this item and item 1 PASS on both native OSes.
+
 ## 6. Clean install → prepare → launch
 
 - Isolated root, DB and profile. For vanilla, Fabric/Quilt, Forge and NeoForge,
@@ -163,6 +181,7 @@ Until it is restored, run the cargo pipeline directly (item 1).
 | 3 | | | PENDING | | |
 | 4 | | | PENDING | | |
 | 5 | | | PENDING | | |
+| 5a | | | PENDING | | |
 | 6 | | | PENDING | | |
 | 7 | | | PENDING | | |
 | 8 | | | PENDING | | |
