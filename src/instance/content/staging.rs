@@ -12,6 +12,7 @@ use crate::utils::files::{
 };
 
 const PREFIX: &str = ".sonata-content-";
+pub(super) const RECOVERY_PREFIX: &str = ".sonata-recovery-";
 
 pub(super) struct ContentStaging {
     files: Arc<Directory>,
@@ -79,7 +80,8 @@ fn sweep(instances_root: &Path) -> io::Result<usize> {
     for instance in fs::read_dir(instances_root)? {
         let instance = instance?;
         if instance.file_type()?.is_dir() {
-            removed += owned_directory::sweep(&instance.path(), PREFIX)?;
+            removed +=
+                owned_directory::sweep_prefixes(&instance.path(), &[PREFIX, RECOVERY_PREFIX])?;
         }
     }
     Ok(removed)

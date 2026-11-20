@@ -41,24 +41,19 @@ pub async fn register(repo: &Repository, release: CleanroomRelease) -> Result<()
     // Lock/read/modify/atomic-write are one owned blocking transaction. Separate
     // Repository objects, aliases and processes share the same file lock.
     async_std::task::spawn_blocking(move || -> Result<()> {
-        std::fs::create_dir_all(&root)?;
-        let lock_path = files::child(&root, std::path::Path::new(".cleanroom-registry.lock"))?;
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(lock_path)?;
+        use std::ffi::OsStr;
+        let root = files::directory::Directory::ensure_path(&root)?;
+        let lock = root.open_lock(OsStr::new(".cleanroom-registry.lock"))?;
         let _lock = crate::utils::object_store::StoreLock::blocking_exclusive(lock)?;
-        let path = files::child(&root, std::path::Path::new("cleanroom-releases.json"))?;
-        let mut all: Vec<CleanroomRelease> = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+        let name = OsStr::new("cleanroom-releases.json");
+        let mut all: Vec<CleanroomRelease> = match root.open_file(name) {
+            Ok(file) => serde_json::from_reader(std::io::BufReader::new(file))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error.into()),
         };
         all.retain(|entry| entry.version != release.version);
         all.push(release);
-        files::atomic_write(&path, &serde_json::to_vec_pretty(&all)?)?;
+        root.write_bytes(name, &serde_json::to_vec_pretty(&all)?)?;
         Ok(())
     })
     .await

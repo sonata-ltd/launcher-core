@@ -1,5 +1,6 @@
 //! Detach files published by the old hardlink installer.
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -217,15 +218,12 @@ async fn migrate(
                     original: placement,
                     destination: relative,
                     witness: uuid::Uuid::new_v4(),
-                    file_identity: FileIdentity::from_handle(staged.file.as_file())?.storage_key(),
+                    file_identity: FileIdentity::from_handle(&staged.file)?.storage_key(),
                     sha256: staged.sha256.clone(),
                     enabled,
                 };
-                let source = staged
-                    .file
-                    .path()
-                    .file_name()
-                    .ok_or_else(|| io::Error::other("missing staged file name"))?;
+                let source = OsStr::new(&staged.name);
+                staged.verify()?;
                 staged
                     .directory
                     .hard_link(source, std::ffi::OsStr::new(&intent.witness_name()))?;
@@ -461,17 +459,22 @@ pub(in crate::instance::content) fn checkpoint(instances: &Path, dir: &str) -> u
 /// Returns whether the isolated bytes still match the registered object.
 struct StagedDetach {
     plan: MigrationPlan,
-    file: tempfile::NamedTempFile,
+    file: fs::File,
+    name: String,
     sha256: String,
     directory: Arc<Directory>,
 }
 
 impl StagedDetach {
-    fn publish(mut self, path: &Path) -> io::Result<()> {
-        if let Err(error) = self.directory.verify_location() {
-            self.file.disable_cleanup(true);
-            return Err(error);
-        }
+    fn verify(&self) -> io::Result<()> {
+        self.directory.verify_file(
+            OsStr::new(&self.name),
+            FileIdentity::from_handle(&self.file)?,
+        )
+    }
+
+    fn publish(self, path: &Path) -> io::Result<()> {
+        self.verify()?;
         let current = fs::symlink_metadata(path)?;
         if !current.is_file()
             || self.plan.stamp != FileStamp::from_metadata(&current)
@@ -480,19 +483,19 @@ impl StagedDetach {
         {
             return Err(io::Error::other("legacy mod changed while copying"));
         }
-        let source = self
-            .file
-            .path()
-            .file_name()
-            .ok_or_else(|| io::Error::other("missing staged file name"))?;
+        let source = OsStr::new(&self.name);
         let destination = path
             .file_name()
             .ok_or_else(|| io::Error::other("missing legacy file name"))?;
-        let result = self.directory.replace(source, destination);
-        if result.is_ok() || self.directory.verify_location().is_err() {
-            self.file.disable_cleanup(true);
+        self.directory.replace(source, destination)
+    }
+}
+
+impl Drop for StagedDetach {
+    fn drop(&mut self) {
+        if self.verify().is_ok() {
+            let _ = self.directory.unlink(OsStr::new(&self.name));
         }
-        result
     }
 }
 
@@ -512,26 +515,34 @@ fn stage_detach(
             "legacy mod changed after identity verification",
         ));
     }
-    let mut file = fs::File::open(path)?;
+    let name = path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+    let mut file = directory.open_file(name)?;
     if before != FileStamp::from_metadata(&file.metadata()?)
         || FileIdentity::from_handle(&file)? != planned.identity
     {
         return Err(io::Error::other("legacy mod changed before copying"));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("missing parent"))?;
-    directory.verify_location()?;
-    let mut copy = tempfile::NamedTempFile::new_in(parent)?;
-    io::copy(&mut file, copy.as_file_mut())?;
-    copy.as_file()
-        .set_permissions(file.metadata()?.permissions())?;
-    copy.as_file().sync_all()?;
-    let sha256 = files::sha256_file(copy.path())?;
-    Ok(Some(StagedDetach {
+    let name = format!(".sonata-detach-{}", uuid::Uuid::new_v4());
+    let mut staged = StagedDetach {
         plan: planned,
-        file: copy,
-        sha256,
+        file: directory.create_private_file(OsStr::new(&name))?,
+        name,
+        sha256: String::new(),
         directory,
-    }))
+    };
+    io::copy(&mut file, &mut staged.file)?;
+    staged
+        .file
+        .set_permissions(file.metadata()?.permissions())?;
+    staged.file.sync_all()?;
+    let name = OsStr::new(&staged.name);
+    let copy = staged.directory.open_file(name)?;
+    staged
+        .directory
+        .verify_file(name, FileIdentity::from_handle(&staged.file)?)?;
+    if FileIdentity::from_handle(&copy)? != FileIdentity::from_handle(&staged.file)? {
+        return Err(io::Error::other("staged legacy file changed"));
+    }
+    staged.sha256 = files::sha256_open_file(&copy)?;
+    Ok(Some(staged))
 }

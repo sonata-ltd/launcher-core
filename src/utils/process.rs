@@ -63,6 +63,7 @@ pub(crate) fn read_owner_from(file: impl std::io::Read) -> Option<u32> {
 /// Publish a complete PID without replacing another owner's marker. A numeric
 /// prefix of a live PID must never become visible as a different, dead PID.
 /// Like other publish helpers, this does not promise power-loss durability.
+#[cfg(test)]
 pub(crate) fn write_owner(path: &std::path::Path) -> std::io::Result<()> {
     use crate::utils::files::directory::Directory;
     let parent = path

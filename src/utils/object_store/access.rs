@@ -81,20 +81,7 @@ impl ObjectStore {
         fs::create_dir_all(&self.root)?;
         let root = fs::canonicalize(&self.root)?;
         let directory = Directory::open(&root)?;
-        let path = root.join(LOCK);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => return Err(io::Error::other("CAS access lock is not a regular file")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)?;
-        directory.verify_location()?;
+        let file = directory.open_lock(std::ffi::OsStr::new(LOCK))?;
         Ok((ObjectStore::new(root), directory, file))
     }
 

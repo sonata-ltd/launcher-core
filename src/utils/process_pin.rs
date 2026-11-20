@@ -1,10 +1,9 @@
 //! Durable process retention. Dropping a future never deletes its pin:
 //! kill-on-drop is a request, not confirmation that a JVM has stopped.
 use super::process;
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+#[cfg(all(test, unix))]
+use std::path::PathBuf;
+use std::{fs, io, path::Path};
 
 const DIRECTORY: &str = ".sonata-processes";
 const OWNER: &str = ".sonata-owner";
@@ -15,29 +14,26 @@ const NO_CHILD: &str = ".sonata-no-child";
 
 #[derive(Clone)]
 pub(crate) struct ProcessPin {
-    directory: PathBuf,
+    directory: std::sync::Arc<super::files::directory::Directory>,
 }
 
 impl ProcessPin {
     pub(crate) fn create(resource: &Path) -> io::Result<Self> {
-        let root = resource.join(DIRECTORY);
-        fs::create_dir_all(&root)?;
-        if !fs::symlink_metadata(&root)?.is_dir() {
-            return Err(io::Error::other("process pins root is not regular"));
-        }
-        let directory = root.join(uuid::Uuid::new_v4().to_string());
-        fs::create_dir(&directory)?;
-        process::write_owner(&directory.join(OWNER))?;
+        use std::ffi::OsStr;
+        let root = super::files::directory::Directory::ensure_path(resource)?;
+        let root = root.create_child(OsStr::new(DIRECTORY))?;
+        let directory = root.create_private_child(OsStr::new(&uuid::Uuid::new_v4().to_string()))?;
+        process::write_owner_in(&directory, OsStr::new(OWNER))?;
         Ok(Self { directory })
     }
 
     pub(crate) fn before_spawn(&self) -> io::Result<()> {
-        marker_new(&self.directory.join(STARTING), b"1")
+        self.marker_new(STARTING, b"1")
     }
 
     /// Only for a failed preparation that never attempted process creation.
     pub(crate) fn abort_before_spawn(&self) {
-        if let Err(error) = marker_new(&self.directory.join(NO_CHILD), b"1") {
+        if let Err(error) = self.marker_new(NO_CHILD, b"1") {
             tracing::warn!(%error, "could not acknowledge that no child was created");
         }
     }
@@ -46,7 +42,7 @@ impl ProcessPin {
         if pid == 0 {
             return;
         }
-        if let Err(error) = marker_new(&self.directory.join(CHILD), pid.to_string().as_bytes()) {
+        if let Err(error) = self.marker_new(CHILD, pid.to_string().as_bytes()) {
             tracing::warn!(%error, pid, "unknown child PID keeps runtime pinned");
         }
     }
@@ -54,10 +50,24 @@ impl ProcessPin {
     /// Called only after all owned work and a confirmed process exit.
     pub(crate) fn finish(&self, process_exited: bool) {
         if process_exited {
-            if let Err(error) = marker_new(&self.directory.join(EXITED), b"1") {
+            if let Err(error) = self.marker_new(EXITED, b"1") {
                 tracing::warn!(%error, "could not acknowledge process pin completion");
             }
         }
+    }
+
+    fn marker_new(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::{ffi::OsStr, io::Write};
+        self.directory.with_staged_file(
+            |file| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |staged, ()| {
+                self.directory
+                    .publish(staged, &self.directory, OsStr::new(name))
+            },
+        )
     }
 }
 
@@ -95,17 +105,6 @@ fn check_executable(executable: &Path) -> io::Result<()> {
         )),
         _ => Ok(()),
     }
-}
-
-fn marker_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::io::Write;
-    let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    temporary.write_all(bytes)?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(path)
-        .map_err(|error| error.error)?;
-    Ok(())
 }
 
 fn marker(path: &Path) -> io::Result<bool> {
@@ -214,13 +213,13 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         let first_pin = ProcessPin::create(first.path()).unwrap();
         let second_pin = ProcessPin::create(second.path()).unwrap();
-        fs::write(second_pin.directory.join(STARTING), b"unknown").unwrap();
+        fs::write(second_pin.directory.path().join(STARTING), b"unknown").unwrap();
         let executable = std::env::current_exe().unwrap();
         assert!(prepare_spawn(&executable, &[&first_pin, &second_pin]).is_err());
         assert!(allows_cleanup(first.path()).unwrap());
         assert!(!allows_cleanup(second.path()).unwrap_or(false));
         assert_eq!(
-            fs::read(second_pin.directory.join(STARTING)).unwrap(),
+            fs::read(second_pin.directory.path().join(STARTING)).unwrap(),
             b"unknown"
         );
     }
@@ -247,9 +246,9 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let pin = ProcessPin::create(root.path()).unwrap();
             match variant {
-                "owner" => fs::write(pin.directory.join(OWNER), b"broken").unwrap(),
-                "starting" => fs::write(pin.directory.join(STARTING), b"99").unwrap(),
-                "exited" => fs::write(pin.directory.join(EXITED), b"99").unwrap(),
+                "owner" => fs::write(pin.directory.path().join(OWNER), b"broken").unwrap(),
+                "starting" => fs::write(pin.directory.path().join(STARTING), b"99").unwrap(),
+                "exited" => fs::write(pin.directory.path().join(EXITED), b"99").unwrap(),
                 _ => fs::write(root.path().join(DIRECTORY).join("unknown"), b"unknown").unwrap(),
             }
             assert!(
@@ -270,13 +269,13 @@ mod tests {
             pin.record_child(123);
             let path = match variant {
                 "root" => root.path().join(DIRECTORY),
-                "pin" => pin.directory.clone(),
-                "owner" => pin.directory.join(OWNER),
-                "starting" => pin.directory.join(STARTING),
-                "child" => pin.directory.join(CHILD),
+                "pin" => pin.directory.path().to_owned(),
+                "owner" => pin.directory.path().join(OWNER),
+                "starting" => pin.directory.path().join(STARTING),
+                "child" => pin.directory.path().join(CHILD),
                 _ => {
                     pin.finish(true);
-                    pin.directory.join(EXITED)
+                    pin.directory.path().join(EXITED)
                 }
             };
             let outside = root.path().join("outside");
@@ -287,6 +286,24 @@ mod tests {
                 "{variant}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn marker_publication_declines_a_replacement_pin_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let pin = ProcessPin::create(root.path()).unwrap();
+        let path = pin.directory.path();
+        fs::rename(path, root.path().join("previous")).unwrap();
+        fs::create_dir(path).unwrap();
+        fs::write(path.join("keep"), b"preserve these bytes").unwrap();
+
+        assert!(pin.before_spawn().is_err());
+        assert_eq!(fs::read_dir(path).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(path.join("keep")).unwrap(),
+            b"preserve these bytes"
+        );
     }
 
     #[cfg(unix)]

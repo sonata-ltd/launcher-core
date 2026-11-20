@@ -1,9 +1,10 @@
 //! Bounded merged processor log and live preview.
+#[cfg(test)]
+use std::path::Path;
 use std::{
     collections::VecDeque,
     fs::File,
     io::{self, PipeReader, Read, Seek, SeekFrom, Write},
-    path::Path,
     process::Stdio,
 };
 

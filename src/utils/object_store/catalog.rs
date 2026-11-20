@@ -45,8 +45,7 @@ impl RootCatalog {
         maintenance: &StoreMaintenance,
         owner: Option<DatabaseOwner>,
     ) -> io::Result<()> {
-        let path = maintenance.root().join(FILE);
-        let mut catalog = match Self::read(&path) {
+        let mut catalog = match Self::read_at(maintenance.directory()) {
             Ok(catalog) => catalog,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 // Never declare an old store completely covered just because
@@ -82,7 +81,7 @@ impl RootCatalog {
     }
 
     pub(crate) fn owners(maintenance: &StoreMaintenance) -> io::Result<Vec<DatabaseOwner>> {
-        let catalog = Self::read(&maintenance.root().join(FILE))?;
+        let catalog = Self::read_at(maintenance.directory())?;
         if !catalog.complete || catalog.owners.is_empty() {
             return Err(io::Error::other(
                 "retention catalogue has unknown or ephemeral owners",
@@ -93,7 +92,16 @@ impl RootCatalog {
 
     fn read(path: &Path) -> io::Result<Self> {
         let body = read_regular(path, 1024 * 1024)?;
-        let catalog: Self = serde_json::from_slice(&body).map_err(io::Error::other)?;
+        Self::decode(&body)
+    }
+
+    fn read_at(directory: &crate::utils::files::directory::Directory) -> io::Result<Self> {
+        let file = directory.open_file(std::ffi::OsStr::new(FILE))?;
+        Self::decode(&read_open_regular(&file, 1024 * 1024)?)
+    }
+
+    fn decode(body: &[u8]) -> io::Result<Self> {
+        let catalog: Self = serde_json::from_slice(body).map_err(io::Error::other)?;
         if catalog.version != 1 || catalog.owners.len() > 1024 {
             return Err(io::Error::other(
                 "unsupported or oversized retention catalogue",

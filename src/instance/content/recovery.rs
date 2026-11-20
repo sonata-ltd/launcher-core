@@ -13,7 +13,9 @@ use crate::{
     instance::{model::InstanceId, registry::InstanceRegistry},
     utils::{
         cancellation::Cancellation,
-        files::{self, placement},
+        files::{
+            self, digest::copy_and_digest, identity::FileIdentity, owned_directory::OwnedDirectory,
+        },
     },
 };
 use std::{fs, io};
@@ -87,11 +89,10 @@ async fn recover_one(
     let root = instance_directory.path();
     let mods = files::child(root, std::path::Path::new("mods"))?;
     let mods_directory = instance_directory.create_child(std::ffi::OsStr::new("mods"))?;
-    let stage = tempfile::Builder::new()
-        .prefix(".sonata-recovery-")
-        .tempdir_in(root)?;
-    let staged_directory = instance_directory
-        .open_relative(stage.path().strip_prefix(root).map_err(io::Error::other)?)?;
+    let stage = OwnedDirectory::create_in(&instance_directory, super::staging::RECOVERY_PREFIX)?;
+    let staged_directory = stage
+        .directory()
+        .create_private_child(std::ffi::OsStr::new("files"))?;
     for file in &mut expected_files {
         let path = files::child(&mods, std::path::Path::new(&file.name))?;
         match fs::symlink_metadata(&path) {
@@ -128,20 +129,22 @@ async fn recover_one(
         }
         let object = store.path_for(&file.sha256)?;
         let expected = file.sha256.clone();
-        let staged = stage.path().join(&file.name);
         let reader = store.clone();
         let from = staged_directory.clone();
         let to = mods_directory.clone();
         let name = file.name.clone();
         async_std::task::spawn_blocking(move || -> Result<()> {
             let _access = reader;
-            placement::copy_new(&object, &staged, &Cancellation::default())?;
-            if !files::sha256_file(&staged)?.eq_ignore_ascii_case(&expected) {
+            let name = std::ffi::OsStr::new(&name);
+            let mut staged = from.create_file(name)?;
+            let bytes = copy_and_digest(&object, &mut staged, &Cancellation::default())?;
+            if !bytes.sha256.eq_ignore_ascii_case(&expected) {
                 return Err(ContentError::Invalid(
                     "content byte object is corrupt".into(),
                 ));
             }
-            let name = std::ffi::OsStr::new(&name);
+            staged.sync_all()?;
+            from.verify_file(name, FileIdentity::from_handle(&staged)?)?;
             from.publish(name, &to, name)?;
             Ok(())
         })

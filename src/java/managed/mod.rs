@@ -812,15 +812,23 @@ fn read_record(root: &Path, id: Uuid) -> Result<Option<Record>> {
 }
 
 fn write_record(root: &Path, record: &Record) -> Result<()> {
-    let directory =
-        crate::utils::files::child(root, Path::new(".managed/operations")).map_err(storage)?;
-    std::fs::create_dir_all(&directory).map_err(storage)?;
-    let mut file = tempfile::NamedTempFile::new_in(&directory).map_err(storage)?;
-    serde_json::to_writer_pretty(&mut file, record).map_err(storage)?;
-    file.as_file().sync_all().map_err(storage)?;
-    file.persist(directory.join(format!("{}.json", record.snapshot.id)))
+    let directory = ownership::open_root(root)?
+        .create_relative(Path::new(".managed/operations"))
         .map_err(storage)?;
-    Ok(())
+    let name = format!("{}.json", record.snapshot.id);
+    let name = std::ffi::OsStr::new(&name);
+    directory
+        .with_staged_file(
+            |file| {
+                serde_json::to_writer_pretty(&mut *file, record).map_err(std::io::Error::other)?;
+                file.sync_all()
+            },
+            |staged, ()| {
+                directory.require_regular_or_missing(name)?;
+                directory.replace(staged, name)
+            },
+        )
+        .map_err(storage)
 }
 
 fn validate_detected(

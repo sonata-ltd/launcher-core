@@ -197,6 +197,63 @@ impl Directory {
         Ok(file)
     }
 
+    pub(crate) fn open_lock(&self, name: &OsStr) -> io::Result<File> {
+        self.verify_location()?;
+        #[cfg(unix)]
+        let file = {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let name = component(name)?;
+            let fd = unsafe {
+                libc::openat(
+                    self.handle.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_NONBLOCK
+                        | libc::O_CLOEXEC,
+                    0o666u32,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // The descriptor was opened from a live parent and is now owned by File.
+            unsafe { File::from_raw_fd(fd) }
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+                FILE_SHARE_WRITE,
+            };
+            windows_component(name)?;
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(self.path.join(name))?;
+            if file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(io::Error::other("lock file is redirected"));
+            }
+            file
+        };
+        #[cfg(not(any(unix, windows)))]
+        let file: File = {
+            let _ = name;
+            return Err(io::ErrorKind::Unsupported.into());
+        };
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("lock is not a regular file"));
+        }
+        self.verify_file(name, FileIdentity::from_handle(&file)?)?;
+        Ok(file)
+    }
+
     pub(crate) fn verify_file(&self, name: &OsStr, identity: FileIdentity) -> io::Result<()> {
         self.verify_location()?;
         if FileIdentity::at(&self.path.join(name))? != identity {

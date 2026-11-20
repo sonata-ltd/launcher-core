@@ -2,8 +2,7 @@
 //! for crash cleanup; names and age alone do not establish ownership.
 use std::{
     ffi::OsStr,
-    fs,
-    io::{self, Write},
+    fs, io,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -42,13 +41,7 @@ impl OwnedDirectory {
         // a numeric prefix of a still-being-written PID as a different dead PID.
         // Exit before publication leaves an unknown directory, which is kept.
         let directory = owned.directory();
-        directory.with_staged_file(
-            |file| {
-                file.write_all(std::process::id().to_string().as_bytes())?;
-                file.sync_all()
-            },
-            |staged, ()| directory.publish(staged, directory, OsStr::new(OWNER)),
-        )?;
+        crate::utils::process::write_owner_in(directory, OsStr::new(OWNER))?;
         Ok(owned)
     }
 
@@ -85,10 +78,23 @@ impl Drop for OwnedDirectory {
 /// Only direct children of a known scratch root are inspected. Linked roots,
 /// children and owner markers are excluded from ownership selection.
 pub(crate) fn sweep(root: &Path, prefix: &str) -> io::Result<usize> {
-    sweep_with(root, prefix, crate::utils::process::may_be_alive)
+    sweep_prefixes(root, &[prefix])
 }
 
+pub(crate) fn sweep_prefixes(root: &Path, prefixes: &[&str]) -> io::Result<usize> {
+    sweep_selected(root, prefixes, crate::utils::process::may_be_alive)
+}
+
+#[cfg(test)]
 fn sweep_with(root: &Path, prefix: &str, process_alive: impl Fn(u32) -> bool) -> io::Result<usize> {
+    sweep_selected(root, &[prefix], process_alive)
+}
+
+fn sweep_selected(
+    root: &Path,
+    prefixes: &[&str],
+    process_alive: impl Fn(u32) -> bool,
+) -> io::Result<usize> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => return Ok(0),
@@ -99,17 +105,17 @@ fn sweep_with(root: &Path, prefix: &str, process_alive: impl Fn(u32) -> bool) ->
     let mut removed = 0;
     for entry in fs::read_dir(root.path())? {
         let entry = entry?;
+        let name = entry.file_name();
         if !entry.file_type()?.is_dir()
-            || !entry
-                .file_name()
-                .as_encoded_bytes()
-                .starts_with(prefix.as_bytes())
+            || !prefixes
+                .iter()
+                .any(|prefix| name.as_encoded_bytes().starts_with(prefix.as_bytes()))
         {
             continue;
         }
         let path = entry.path();
         let result = (|| -> io::Result<bool> {
-            let directory = root.open_relative(Path::new(&entry.file_name()))?;
+            let directory = root.open_relative(Path::new(&name))?;
             let marker = directory.open_file(OsStr::new(OWNER))?;
             if !crate::utils::process::read_owner_from(&marker)
                 .is_some_and(|pid| !process_alive(pid))

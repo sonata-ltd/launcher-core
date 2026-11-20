@@ -192,12 +192,8 @@ impl ObjectStore {
     /// maintenance barrier. Both follow the actual store through aliases.
     pub(crate) fn lock_exclusive(&self) -> io::Result<StoreLock> {
         fs::create_dir_all(&self.root)?;
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(self.root.join(".sonata-store.lock"))?;
+        let root = crate::utils::files::directory::Directory::open(&self.root.canonicalize()?)?;
+        let lock = root.open_lock(OsStr::new(".sonata-store.lock"))?;
         StoreLock::exclusive(lock)
     }
 

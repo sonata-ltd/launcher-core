@@ -129,6 +129,10 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     file_digest::<Sha256>(path, None)
 }
 
+pub(crate) fn sha256_open_file(file: &fs::File) -> std::io::Result<String> {
+    digest_reader::<Sha256>(file, None)
+}
+
 fn file_digest<D: Digest>(
     path: &Path,
     cancel: Option<&super::cancellation::Cancellation>,

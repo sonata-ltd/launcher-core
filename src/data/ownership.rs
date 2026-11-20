@@ -1,7 +1,6 @@
 //! Lifetime exclusion for resources coordinated by the instance database.
 use std::{
-    fs::{self, OpenOptions},
-    io,
+    fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -82,21 +81,8 @@ pub(crate) fn ensure_instance_directory(
 }
 
 fn lock(directory: &Path) -> Result<StoreLock, ContentInitError> {
-    let path = directory.join(".launcher-content.lock");
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_file() => {}
-        Ok(_) => {
-            return Err(io::Error::other("launcher lifetime lock is not a regular file").into())
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
+    let opened = Directory::open(directory)?;
+    let file = opened.open_lock(std::ffi::OsStr::new(".launcher-content.lock"))?;
     StoreLock::exclusive(file).map_err(|source| ContentInitError::Lock {
         path: directory.to_owned(),
         source,
