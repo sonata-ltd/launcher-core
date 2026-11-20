@@ -5,6 +5,14 @@
 расширяет ownership или право удалять Mojang/virtual/resource placements.
 D08/S05/S06 и native/manual P11 остаются частичными.
 
+После исправлений F01/F09 установка проверяет SHA-1, размер и схему сырого
+индекса. Проверенный URL-кэш хранится под `meta/asset-indexes`, а Minecraft
+получает индекс из `assets/indexes/<id>.json`. Публикация допускает повтор
+тех же байтов и отклоняет конфликт ID с сохранением старого индекса. SQL-профиль
+фиксируется после игровой публикации. Подготовка к запуску повторно проверяет
+индекс для профилей с признаком верификации. Поддержка исторических virtual
+и resources projections остаётся отдельным контрактом.
+
 ## Дефект и проверяемый контракт
 
 Прежний `serde_json::Value` parser терял первые roots при дублирующихся ключах:
@@ -14,7 +22,7 @@ D08/S05/S06 и native/manual P11 остаются частичными.
 и `size` поля допускали любой JSON type: неизвестная схема считалась понятной.
 Это противоречило заявленному corrupt/unknown-metadata gate.
 
-`src/instance/download/assets/retention/index.rs` задаёт private typed schema:
+`src/instance/download/assets/index.rs` задаёт общую схему установки и retention:
 
 - Required `objects` — JSON map с уникальными именами, **не** last-wins map.
 - Каждый object имеет required string `hash`; SHA-1 validation и lowercase roots
@@ -32,8 +40,8 @@ D08/S05/S06 и native/manual P11 остаются частичными.
 `size` — metadata, **не** identity/ownership/byte proof; даже valid size mismatch
 не снимает intended checksum root. `virtual=true`/`map_to_resources=true` не
 разрешают удаление или признание virtual/resource layouts owned. Их фактические
-unknown directories по-прежнему блокируют collector. Production download parser
-не изменён; retention intentionally строже, потому что управляет deletion.
+unknown directories по-прежнему блокируют collector. Установка и retention
+декодируют исходные байты одной схемой.
 
 ## Регрессии
 

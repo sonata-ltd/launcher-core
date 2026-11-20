@@ -1,5 +1,11 @@
 # B02 — Проверяемая migration исторических hardlinks
 
+После F04 существующий записанный путь тоже требует подтверждённой физической
+identity с CAS. Отсутствие CAS, ошибка получения identity и неоднозначность
+оставляют файл и SQL-привязку на месте. Ниже описан исторический checkpoint.
+Текущие ограничения восстановления и нативных проверок указаны в
+[журнале remediation](launcher-core-remediation.md).
+
 Checkpoint: **19 ноября 2026**, исходный core HEAD `7d9ac3a` плюс code/tests этого
 шага. Этот commit (`fix(content): resolve Windows physical file identity for legacy
 hardlink migration`) реализует Windows physical identity: `same_physical_file` получает

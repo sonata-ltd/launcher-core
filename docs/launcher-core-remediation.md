@@ -1,0 +1,123 @@
+# Верификация и исправления Launcher Core
+
+Исходный HEAD `bc1945d8cf4d0234f1f0d77ab3ab1ea6939bb40c`. Источник гипотез — `/tmp/launcher-core-readonly.vnN6DeRh/launcher-core-audit.md`. Локальные протоколы проверки — `/tmp/launcher-remediation.pj8qXHOL`.
+
+До изменений Git показал ветку `refactor/all-audit-findings`, две изменённые tracked-записи `.cargo/config.toml` и `Cargo.lock`, untracked `not-a-database-url` и пустой staged diff. Исходные SHA-256 всех tracked-файлов, отдельные хеши трёх пользовательских файлов и исходный diff сохранены в каталоге протоколов.
+
+## Исходная проверка
+
+Linux x86-64, Rust 1.98.1. Штатный runner использовал `--locked --offline` и отдельные временные каталоги. `fmt`, `check --all-targets`, `build` и `clippy --all-targets` прошли. Первый `test` под sandbox дал 16 ошибок локального bind. В прогоне с разрешённым 127.0.0.1 прошли 620 библиотечных тестов, 2 CLI, 2 интеграционных и 18 doctests. Один тест обнаружения установленной Java остался ignored. Python runner прошёл 8 тестов. Windows GNU прошёл `check`, линковку тестов и `build`. Нативного выполнения на Windows и macOS не было.
+
+## Журнал
+
+| ID | Группа | Вердикт | Состояние |
+|---|---:|---|---|
+| F01 | 1 | CONFIRMED | FIXED / VERIFIED |
+| F09 | 1 | CONFIRMED | FIXED / VERIFIED |
+| F22 | 1 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
+| F06 | 2 | CONFIRMED | FIXED / VERIFIED |
+| F13 | 2 | CONFIRMED | FIXED / VERIFIED |
+| F15 | 2 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
+| F20 | 2 | CONFIRMED | FIXED / VERIFIED |
+| F23 | 2 | CONFIRMED | FIXED / VERIFIED |
+| F02 | 3 | CONFIRMED | BLOCKED |
+| F03 | 3 | CONFIRMED | FIXED / VERIFIED |
+| F04 | 3 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
+| F07 | 3 | CONFIRMED | BLOCKED |
+| F14 | 3 | PARTIALLY CONFIRMED | BLOCKED |
+| F05 | 4 | CONFIRMED | FIXED / VERIFIED |
+| F08 | 4 | CONFIRMED | FIXED / VERIFIED |
+| F17 | 4 | CONFIRMED | FIXED / VERIFIED |
+| F19 | 4 | CONFIRMED | FIXED / VERIFIED |
+| F10 | 5 | CONFIRMED | FIXED / VERIFIED |
+| F11 | 5 | PARTIALLY CONFIRMED | BLOCKED |
+| F12 | 5 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
+| F16 | 5 | PARTIALLY CONFIRMED | FIXED / VERIFIED |
+| F18 | 5 | PARTIALLY CONFIRMED | FIXED / VERIFIED |
+| F21 | 5 | CONFIRMED | FIXED / PLATFORM VALIDATION PENDING |
+
+Из 23 находок подтверждено 19, частично подтверждено 4. Вердикты FALSE POSITIVE,
+OBSOLETE и NOT VERIFIED не присваивались. Состояние и вердикт отражают разные
+результаты проверки. Для F16 и F18 состояние относится к подтверждённой части.
+
+## Группа 1. Asset index и managed Java
+
+- **F01 — CONFIRMED, `d9131ac`.** До изменений реальный `init::install::execute` вернул профиль, `launch::resolved::prepare` передал ID, затем чтение `indexes/<id>.json` вернуло `NotFound`. В `download/assets/index.rs` добавлены проверка длины и SHA-1 сырых байтов, отдельный URL-кэш под `meta/asset-indexes` и атомарная публикация по игровому ID без перезаписи. `init/install.rs` публикует индекс после проверки артефактов и до записи профиля. Новый профиль проверяет опубликованный индекс при подготовке. Конфликт ID и байтов требует разрешения оператором, текущий индекс сохраняется. Исторические профили без признака верификации продолжают читаться. Контракт legacy-проекций `virtual` и `resources` остался отдельным релизным ограничением. `asset_index_install_publication_matches_prepared_game_id_after_restart` проверяет новый файловый SQLite после переоткрытия и отклонение ошибок SHA-1, размера и конфликта ID.
+- **F09 — CONFIRMED, `d9131ac`.** До изменений ответ с двумя `objects` завершил установку успешно. Установка и GC используют один декодер первичного JSON; проверяются дубли корневых полей, имён объектов и полей в объекте. `asset_index_install_rejects_duplicate_keys_before_persistence` доказывает отказ до записи профиля и индекса. Несовместимая будущая схема отклоняется с диагностикой. GC по-прежнему консервативно удерживает старые неоднозначные индексы.
+- **F22 — CONFIRMED по Windows semantics, `b33ceed`.** `java/paths.rs` кодирует компоненты через `/`. Записи операции и маркеры home, регистрация, SQL upgrade и retention учитывают один формат. Исторический Windows operation path допускается при совпадении с собственной generation. Тесты `nested_managed_home_uses_portable_paths_through_publication_and_recovery` и `managed_sql_encodes_nested_native_paths_as_portable_relative_paths` прошли на Linux и слинкованы для Windows GNU. Требуется native Windows, включая проверку регистрации JRE с реальным исполняемым файлом и Windows-исторической SQLite. Linux не трактует обратную косую черту как разделитель.
+
+Прогон `group1-linux-retry` прошёл полностью. 624 библиотечных, 2 CLI, 2 интеграционных и 18 doctests, один ignored. Первый групповой прогон выявил конфликт маршрутов в HTTP-фикстуре F09. Фикстура получила раздельные URL, assertions остались прежними. Логи `assets-before.log`, `group1-linux-retry`, `group1-clippy.log` и `group1-windows-gnu` доступны в каталоге протоколов.
+
+## Группа 2. Владение и shutdown
+
+- **F06, F13, F15, F23 — CONFIRMED.** Четыре новых теста `ownership_*` через публичный API упали на исходном поведении и прошли после изменения. При F06 дочерний процесс открывал ту же SQLite через `dirs.cache_db`, пока родитель удерживал её через `database_url`. Постоянная привязка к layout и lifetime locks добавлены в `data/ownership.rs`, `data/db/mod.rs` и bootstrap. Старый файл SQLite получает привязку при первом успешном открытии новой версией. Автоматический перенос существующего layout между путями требует отдельной гарантии происхождения данных.
+- **F20 — CONFIRMED.** В `bootstrap-before-retry.log` зафиксирован успешный повторный захват store lock после drop bootstrap в точке FS success → SQL completion. В `bootstrap-after.log` тот же тест подтверждает сохранение staging, блокировки и завершение SQL. Owned startup и отдельные recovery workers удерживают guards до завершения.
+
+Коммит группы `a8265a6`. В `group2-linux` прошли 625 библиотечных, 2 CLI, 6 интеграционных и 18 doctests. `group2-windows-gnu` подтвердил компиляцию и линковку. Clippy завершился с предупреждениями.
+
+- **F13.** `InstanceService`, `OptionsService` и `JavaService` используют общий admission. Java auto-select после публикации профиля выдаёт отдельную диагностику. `ownership_shutdown_rejects_instance_and_options_mutators` проверяет create, rename, settings, unregister и сохранение строки. Вызовы управления уже допущенными операциями по-прежнему могут послать сигнал остановки.
+- **F15.** `LayoutLease` захватывает общую launcher/instances блокировку один раз при совпадении каталога. `ownership_coincident_launcher_and_instance_roots_open_once` прошёл на Linux. Нужен native NTFS/APFS с алиасами.
+- **F23.** DB-backed сервисы удерживают полномочие layout через общий `Database`. Game watcher сохраняет lease до завершения обработки процесса. `ownership_exported_instance_service_keeps_lifetime_locks` подтверждает недоступность повторного bootstrap до освобождения экспортированного сервиса.
+
+## Группа 3. CAS и файловая идентичность
+
+- **F02 — CONFIRMED, частичное исправление `8795203`.** Добавлена проверка границ путей assets и Forge. Linux-регрессия `initialization_refuses_an_assets_objects_directory_redirect` прошла. Windows-фикстура слинкована. Общая гарантия при конкурентных изменениях дерева требует операций от удерживаемого каталога на каждой целевой ОС.
+- **F03 — CONFIRMED, `5d2cd98`.** `modified_cas_bytes_are_never_published_under_the_registered_digest` меняет подконтрольный источнику файл после его исходной проверки и до копирования. До исправления SQL зарегистрировала старый digest для других байтов. `content/install.rs` проверяет digest и размер при staging, проверяет SHA-256 перед rename и освобождает preparation при отказе. Кооперативные процессы блокируются admission. Подмена файлов внешним writer после последней проверки остаётся областью F02.
+- **F04 — CONFIRMED, `43761e9`.** `legacy.rs` отделяет неизвестную identity от несовпадения и повторно проверяет физическую identity перед заменой. Linux-регрессии `unknown_candidate_identity_defers_even_when_one_legacy_alias_is_identified` и `absent_cas_cannot_prove_ownership_of_a_recorded_path` прошли. Нужна нативная проверка Win32 file ID и sharing. Копирование сохраняет обычные permissions. Сохранение ACL и xattrs остаётся неподтверждённым.
+- **F07 — CONFIRMED, BLOCKED.** `sql_failure_after_isolation_preserves_bytes_cas_and_original_binding` подтверждает FS success → SQL failure. При повторном запуске в `legacy.rs` зарегистрированное имя уже отсутствует, а новая копия имеет собственный inode и не соответствует открытому CAS. Digest мог остаться прежним и не подтверждает, кто опубликовал файл. Вариант восстановления требует durable intent до rename, удостоверяемую identity опубликованного файла и сохранение изменённых файлов на отказе. Выдавать новый journal за защиту без согласованного контракта F02/F04 было бы некорректно.
+- **F14 — PARTIALLY CONFIRMED, BLOCKED.** SQL сравнивает точное представление пути, тогда как эквивалентность зависит от тома. На NTFS и APFS требуются нативные проверки, инвентаризация исторических конфликтов и правила их разрешения до миграции.
+
+Протоколы `group3-before-retry.log`, `group3-focused-retry.log`, `group3-linux`, `group3-windows-gnu` и `group3-clippy.log`. На Linux прошли 628 библиотечных, 2 CLI, 6 интеграционных и 18 doctests, один ignored. Windows GNU подтвердил компиляцию и линковку.
+
+## Группа 4. План и текущее состояние
+
+- **F05, F08, F17, F19 — CONFIRMED.** Все четыре теста в `group4-before.log` получили заявленные сбои на исходных реализациях. В `group4-focused-retry.log` прошли 19 проверок. F05 добавляет упорядоченный fingerprint SQL-фактов и типизированное устаревание preview после adoption. F08 сопоставляет exact bindings до relocation и оставляет конкурирующие привязки неподтверждёнными. F17 потребляет preview под тем же mutex после admission. F19 использует условный SQL UPDATE и отправляет событие только после фактического изменения. Файлы `content/storage.rs`, `content/service.rs`, `instance/service.rs` и `instance/settings`.
+
+Коммиты `75d80ee` (F05, F08, F17) и `eb1a2bb` (F19). Тесты `sql_only_adoption_invalidates_a_second_preview_without_touching_file_bytes`, `exact_binding_reserves_a_file_against_another_historical_seed`, `a_busy_instance_keeps_its_previously_built_preview_for_one_retry` и `java_auto_selection_preserves_a_manual_choice_made_before_update`. Полный Linux-прогон прошёл с 632 библиотечными тестами. Windows GNU подтвердил компиляцию и линковку.
+
+## Группа 5. Надёжность и ограничения ресурсов
+
+- **F10 — CONFIRMED, `2002dc6`.** Recovery и retention в `java/managed` получили общий строгий декодер. Тест `duplicate_managed_record_keys_defer_recovery_and_collection` прошёл после исходного отказа проверки. Запись сохраняется и появляется в диагностике, сборка откладывается.
+- **F11 — PARTIALLY CONFIRMED, частичное исправление `7accf62`.** В метаданных проверяется схема URL и сохраняются типизированные транспортные ошибки. Диагностический URL ограничен. Тесты `metadata_rejects_unsupported_schemes_without_exposing_url_secrets` и `preserves_http_failure_as_download_error` прошли. Единая политика доверия к зеркалам и перенаправлениям остаётся открытой. Разные правила для публичного каталога, настроенного зеркала и pinned Java сами по себе допустимы.
+- **F12 — CONFIRMED, `7accf62` и `d6d3fd9`.** `metadata_cache` ограничивает чтение с диска. Cleanroom ограничивает размер метаданных пакета и совокупных patches. ZIP-распаковка ограничивает фактические байты, managed Java также ограничивает число записей. `forge` пишет объединённый лог до 32 МиБ и продолжает читать вывод после исчерпания лимита. Прошли `oversized_cached_metadata_is_refused_before_it_reaches_the_repository_caller`, `zip_entry_budget_is_enforced_before_creating_outputs`, `processor_log_limit_drains_output_without_blocking_child_completion` и `the_platform_pipe_finishes_and_keeps_one_truncation_notice`. Последний тест ожидает нативного Windows/macOS прогона.
+- **F16 — PARTIALLY CONFIRMED, `75d80ee` и `37020a0`.** Обратный индекс digest устраняет повторный обход архива для каждой записи planner reconciliation. `object_store/collection.rs` считает SHA-1 и SHA-256, используемые retention. Прежние тесты корней и replay прошли. Задержки на больших деревьях и продолжительность удержания SQLite locks не измерялись. Объём одного прохода GC и повторные обходы legacy migration открыты для измерений.
+- **F18 — PARTIALLY CONFIRMED, `7accf62`.** Типизированные причины сохранены на границах metadata HTTP, legacy launch и ZIP. `malformed_zip_preserves_the_archive_parser_cause` и тесты HTTP ошибок прошли. Остаточные предупреждения и совместимость опубликованных Rust-конструкторов требуют отдельного разбора перед удалением legacy helpers.
+- **F21 — CONFIRMED, `d6d3fd9`.** `process_pin` фиксирует завершённый отказ, когда известно, что подготовка не создала процесса. Для неопределённого состояния сохраняется retention. Тесты `missing_game_executable_releases_all_pre_spawn_pins` и `a_later_marker_failure_releases_earlier_pins_and_retains_unknown_markers` прошли. Тесты неизвестного результата и дочернего процесса продолжают проходить. Нативная проверка Windows остаётся открытой.
+
+## Итоговые проверки
+
+| Среда | Проверки | Результат |
+|---|---|---|
+| Linux x86-64 | `fmt --check`, `check --locked --offline --all-targets`, `test --locked --offline`, `build --locked --offline` | PASS. 641 библиотечный тест, 2 CLI, 6 интеграционных, 18 doctests. Всего 667 passed, 0 failed, 1 ignored. |
+| Linux x86-64 | `clippy --locked --offline --all-targets` | PASS с предупреждениями. Cargo отметил будущую несовместимость `proc-macro-error2`. |
+| Python | `test_verify_platform.py` | 8 passed. |
+| Windows x86-64 GNU | `fmt`, all-target check, `test --no-run`, build | PASS компиляции и линковки. Нативный runtime ожидает проверки. |
+| Windows MSVC | Целевой Rust установлен. Итоговый прогон использовал GNU | Отдельный MSVC runtime и toolchain вне доказанного покрытия. |
+| macOS | Native runner, Rust target и Apple SDK отсутствуют | Компиляция и runtime ожидают целевой среды. |
+
+Логи `final-linux`, `final-windows-gnu`, `final-clippy.log` и `final-runner-tests.log`
+сохранены в каталоге протоколов. В исходном sandbox-прогоне локальные HTTP
+фикстуры упирались в ограничения среды. Последующие прогоны использовали
+разрешённый loopback. Ошибка маршрутов в fixture F09 и промежуточный прогон с
+нулём выбранных тестов исключены из доказательств. В итоговом прогоне flaky
+сбоев не наблюдалось. Замеры повторяемости под нагрузкой не проводились.
+
+## Сохранность и готовность к релизу
+
+Тесты подтверждают сохранность файлов в проверенных сценариях отказа
+переустановки, изменения CAS, неоднозначного legacy ownership и recovery.
+Проверены SQLite restart, кросс-процессный отказ несовместимого bootstrap,
+согласованность provenance и сохранение ручного выбора Java. Игровая JVM,
+GUI, аварийное отключение питания и сетевые тома вне данного покрытия.
+
+**Подключение к реальным пользовательским данным пока заблокировано.**
+До релиза остаются гарантии границ файловых путей F02, восстановление
+legacy migration F07, идентичность путей F14 и решение по транспортной
+политике F11. На время проверки операции записи и GC на исторических
+данных следует ограничить изолированными копиями. Обязательны нативные
+Windows и macOS проверки, включая Windows managed Java, а также чистый
+install → prepare → launch с отдельными тестовыми roots.
+
+`.cargo/config.toml`, `Cargo.lock` и `not-a-database-url` сохранили исходные
+контрольные суммы. Изменение `Cargo.toml` добавляет только Win32 Pipes feature.
+Проверки выполнялись на временных SQLite и файловых деревьях. Коммиты локальные.
