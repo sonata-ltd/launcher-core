@@ -320,6 +320,7 @@ async fn install<'a>(
             forge::FinalizeRequest {
                 game_version: &request.game_version,
                 prepared,
+                generation: workspace.open_generation_dir()?,
                 maven_dir: workspace.maven_dir(),
             },
             &forge::FinalizeContext {

@@ -23,7 +23,7 @@ pub struct ProcessorCommand {
     pub log: PathBuf,
     pub outputs: Vec<(PathBuf, String)>,
     /// Entire generation, not just the extracted processor work directory.
-    pub retention_root: PathBuf,
+    pub retention_root: std::sync::Arc<Directory>,
 }
 
 /// Private temporary directory created inside the processor work directory.
@@ -149,7 +149,7 @@ async fn run_with_log_limit(
         .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
 
     let temporary = cwd.create_relative(std::path::Path::new(PROCESSOR_TEMP))?;
-    let pin = crate::utils::process_pin::ProcessPin::create(&command.retention_root)?;
+    let pin = crate::utils::process_pin::ProcessPin::create_in(&command.retention_root)?;
     let java_pin = match java_use.map(|java_use| java_use.child_pin()).transpose() {
         Ok(pin) => pin,
         Err(error) => {

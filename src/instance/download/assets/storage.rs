@@ -60,9 +60,12 @@ impl DbAssetStore {
             Some(directory) => directory.clone(),
             None => {
                 let objects = self.objects.clone();
-                async_std::task::spawn_blocking(move || Directory::ensure_path(&objects))
-                    .await
-                    .map_err(bytes_error)?
+                async_std::task::spawn_blocking(move || {
+                    Directory::open_child_of(&objects, true)?
+                        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+                })
+                .await
+                .map_err(bytes_error)?
             }
         };
         let cancel = self.cancel.clone();

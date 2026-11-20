@@ -207,6 +207,10 @@ impl InstallWorkspace {
         &self.maven_dir
     }
 
+    pub(crate) fn open_generation_dir(&self) -> Result<Arc<Directory>> {
+        Ok(self.open_generation()?.1)
+    }
+
     pub(crate) fn open_work_dir(&self) -> Result<Arc<Directory>> {
         let (_, generation) = self.open_generation()?;
         Ok(generation.open_relative(Path::new("work"))?)

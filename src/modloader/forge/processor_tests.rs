@@ -13,7 +13,7 @@ fn command(root: &std::path::Path, script: &str) -> ProcessorCommand {
         cwd: Directory::open(root).unwrap(),
         log: root.join("processor.log"),
         outputs: Vec::new(),
-        retention_root: root.into(),
+        retention_root: Directory::open(root).unwrap(),
     }
 }
 

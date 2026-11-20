@@ -18,10 +18,17 @@ pub(crate) struct ProcessPin {
 }
 
 impl ProcessPin {
+    #[cfg(test)]
     pub(crate) fn create(resource: &Path) -> io::Result<Self> {
+        Self::create_in(&super::files::directory::Directory::ensure_path(resource)?)
+    }
+
+    /// Pin a resource directory the caller already holds open.
+    pub(crate) fn create_in(
+        resource: &std::sync::Arc<super::files::directory::Directory>,
+    ) -> io::Result<Self> {
         use std::ffi::OsStr;
-        let root = super::files::directory::Directory::ensure_path(resource)?;
-        let root = root.create_child(OsStr::new(DIRECTORY))?;
+        let root = resource.create_child(OsStr::new(DIRECTORY))?;
         let directory = root.create_private_child(OsStr::new(&uuid::Uuid::new_v4().to_string()))?;
         process::write_owner_in(&directory, OsStr::new(OWNER))?;
         Ok(Self { directory })
@@ -194,6 +201,30 @@ fn allows_cleanup_with(resource: &Path, alive: &impl Fn(u32) -> bool) -> io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn pins_refuse_a_resource_whose_ancestor_was_replaced() {
+        use crate::utils::files::directory::Directory;
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        let resource = parent.join("resource");
+        std::fs::create_dir_all(&resource).unwrap();
+        let held = Directory::open(&resource).unwrap();
+        // The decoy already has the layout a path-based pin would use.
+        let decoy = temp.path().join("decoy");
+        std::fs::create_dir_all(decoy.join("resource").join(DIRECTORY)).unwrap();
+        std::fs::rename(&parent, temp.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(&decoy, &parent).unwrap();
+
+        assert!(ProcessPin::create_in(&held).is_err());
+        assert_eq!(
+            std::fs::read_dir(decoy.join("resource").join(DIRECTORY))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
 
     #[test]
     fn completion_not_drop_releases_live_owner_and_unknown_spawn_intent() {

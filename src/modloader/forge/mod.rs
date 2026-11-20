@@ -165,6 +165,7 @@ pub async fn prepare<'a>(
 pub struct FinalizeRequest<'a> {
     pub game_version: &'a str,
     pub prepared: Prepared,
+    pub(crate) generation: Arc<files::directory::Directory>,
     pub maven_dir: &'a Path,
 }
 
@@ -234,6 +235,7 @@ async fn finalize_impl<'a>(
         Some(java_use) => {
             install::run_retained(
                 request.prepared,
+                request.generation,
                 request.maven_dir.to_path_buf(),
                 request.maven_dir.join(client),
                 PathBuf::from(&java.exec_path),
@@ -246,6 +248,7 @@ async fn finalize_impl<'a>(
         None => {
             install::run(
                 request.prepared,
+                request.generation,
                 request.maven_dir.to_path_buf(),
                 request.maven_dir.join(client),
                 PathBuf::from(&java.exec_path),

@@ -47,7 +47,7 @@ pub(crate) struct JavaUse {
 
 impl JavaUse {
     pub(super) fn admitted(access: StoreAccess) -> io::Result<Self> {
-        let pin = ProcessPin::create(access.root())?;
+        let pin = ProcessPin::create_in(access.directory())?;
         Ok(Self {
             pin,
             _access: access,
@@ -60,7 +60,7 @@ impl JavaUse {
     /// Independent child pins must not release the broad operation pin or be
     /// acknowledged by its completion after an unconfirmed spawn/exit.
     pub(crate) fn child_pin(&self) -> io::Result<ProcessPin> {
-        ProcessPin::create(self._access.root())
+        ProcessPin::create_in(self._access.directory())
     }
     pub(crate) fn finish(self, process_exited: bool) {
         self.pin.finish(process_exited);

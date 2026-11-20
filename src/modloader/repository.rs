@@ -47,8 +47,11 @@ impl Repository {
 
         let expected = pinned.or(expected);
         let root = self.cache.clone();
-        let directory =
-            async_std::task::spawn_blocking(move || Directory::ensure_path(&root)).await?;
+        let directory = async_std::task::spawn_blocking(move || {
+            Directory::open_child_of(&root, true)?
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        })
+        .await?;
         let entry = metadata_cache::Entry::new(directory, url);
         let (cached, modified) = match entry.read().await {
             Ok((bytes, modified)) => (Some(bytes), modified),

@@ -166,23 +166,30 @@ pub(crate) async fn prepare(
     })
 }
 
-pub async fn run(
+pub(crate) async fn run(
     prepared: Prepared,
+    generation: Arc<Directory>,
     libraries: PathBuf,
     minecraft: PathBuf,
     java: PathBuf,
     cancel: &Cancel,
     op: &crate::data::registry::operation::handle::OperationHandle,
 ) -> Result<()> {
-    run_retained(prepared, libraries, minecraft, java, cancel, op, None).await
+    run_retained(
+        prepared, generation, libraries, minecraft, java, cancel, op, None,
+    )
+    .await
 }
 
 /// Processors see this directory inside the installer work directory as
 /// `ROOT`. The instance game directory is never handed to installer code.
 const PROCESSOR_ROOT: &str = "processor-root";
 
+/// `generation` is the held installation generation retained while a
+/// processor may run; `libraries` is its Maven directory.
 pub(crate) async fn run_retained(
     prepared: Prepared,
+    generation: Arc<Directory>,
     libraries: PathBuf,
     minecraft: PathBuf,
     java: PathBuf,
@@ -321,12 +328,7 @@ pub(crate) async fn run_retained(
                     .path()
                     .join(format!("processor-{index}.log")),
                 outputs,
-                retention_root: libraries
-                    .parent()
-                    .ok_or_else(|| {
-                        ModloaderError::Invalid("Maven root has no generation parent".into())
-                    })?
-                    .to_owned(),
+                retention_root: generation.clone(),
             },
             cancel,
             &mut publish_output,
@@ -408,6 +410,7 @@ mod tests {
         );
         run(
             prepared,
+            Directory::ensure_path(libraries.parent().unwrap()).unwrap(),
             libraries,
             temp.path().join("minecraft.jar"),
             java,
@@ -492,6 +495,7 @@ mod tests {
         );
         run(
             prepared,
+            Directory::ensure_path(libraries.parent().unwrap()).unwrap(),
             libraries,
             temp.path().join("minecraft.jar"),
             java,

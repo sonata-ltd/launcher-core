@@ -448,8 +448,9 @@ impl InstanceService {
                 .access(&crate::utils::cancellation::Cancellation::new())
                 .await
                 .map_err(crate::instance::launch::LaunchError::Retention)?;
-            let runtime_pin = crate::utils::process_pin::ProcessPin::create(self.paths.libraries())
-                .map_err(crate::instance::launch::LaunchError::Retention)?;
+            let runtime_pin =
+                crate::utils::process_pin::ProcessPin::create_in(_runtime_access.directory())
+                    .map_err(crate::instance::launch::LaunchError::Retention)?;
             let prepared = async {
                 match instance::init::storage::load(&self.db, id).await? {
                     Some(profile) => {

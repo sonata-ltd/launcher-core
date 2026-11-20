@@ -42,7 +42,8 @@ pub async fn register(repo: &Repository, release: CleanroomRelease) -> Result<()
     // Repository objects, aliases and processes share the same file lock.
     async_std::task::spawn_blocking(move || -> Result<()> {
         use std::ffi::OsStr;
-        let root = files::directory::Directory::ensure_path(&root)?;
+        let root = files::directory::Directory::open_child_of(&root, true)?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
         let lock = root.open_lock(OsStr::new(".cleanroom-registry.lock"))?;
         let _lock = crate::utils::object_store::StoreLock::blocking_exclusive(lock)?;
         let name = OsStr::new("cleanroom-releases.json");
@@ -121,9 +122,16 @@ pub async fn import_archive(
     majors: Vec<u32>,
 ) -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let path = temp.path().join("release.zip");
+    let directory = files::directory::Directory::open(temp.path())?;
+    let path = directory.path().join("release.zip");
 
-    transfer::download(&url, &path, None, &Cancel::default()).await?;
+    transfer::download_in(
+        &url,
+        crate::utils::download::destination::Destination::Within(directory, "release.zip".into()),
+        None,
+        &Cancel::default(),
+    )
+    .await?;
 
     let (archive_sha256, archive_root) = async_std::task::spawn_blocking(move || {
         let digest = files::sha256_file(&path)?;
