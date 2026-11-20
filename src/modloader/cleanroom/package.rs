@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    io,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,8 +13,16 @@ use crate::{
         error::Result, model::MetadataPin, repository::Repository,
     },
     utils::download::transfer::{self, Cancel},
-    utils::files,
+    utils::{files, object_store::catalog::read_regular},
 };
+
+const MAX_PACK_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_ALL_PATCH_BYTES: u64 = 64 * 1024 * 1024;
+
+async fn read_pack_json(path: PathBuf, remaining: u64) -> io::Result<Vec<u8>> {
+    async_std::task::spawn_blocking(move || read_regular(&path, remaining.min(MAX_PACK_BYTES)))
+        .await
+}
 
 #[derive(Deserialize)]
 struct Pack {
@@ -59,7 +71,7 @@ pub async fn prepare(
     };
 
     let pack: Pack =
-        serde_json::from_slice(&async_std::fs::read(root.join("mmc-pack.json")).await?)?;
+        serde_json::from_slice(&read_pack_json(root.join("mmc-pack.json"), MAX_PACK_BYTES).await?)?;
     if pack.format_version != 1 || pack.components.len() > 128 {
         return Err(ModloaderError::Unsupported("MMC pack format".into()));
     }
@@ -67,16 +79,19 @@ pub async fn prepare(
     let mut local = HashMap::new();
     let mut roots = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut patch_bytes_remaining = MAX_ALL_PATCH_BYTES;
 
     for entry in pack.components {
+        cancel.check()?;
         if !seen.insert(entry.uid.clone()) || entry.uid.contains(['/', '\\', ':']) {
             return Err(ModloaderError::Invalid("invalid/duplicate MMC uid".into()));
         }
 
         let patch = root.join("patches").join(format!("{}.json", entry.uid));
 
-        match async_std::fs::read(patch).await {
+        match read_pack_json(patch, patch_bytes_remaining).await {
             Ok(bytes) => {
+                patch_bytes_remaining -= bytes.len() as u64;
                 local.insert(entry.uid.clone(), serde_json::from_slice::<Value>(&bytes)?);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

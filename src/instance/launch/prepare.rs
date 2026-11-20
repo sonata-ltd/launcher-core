@@ -35,10 +35,6 @@ async fn legacy_inputs(
     if libs.is_empty() {
         return Err(InstanceError::NotInstalled(rec.id));
     }
-    let manifest = load_or_fetch(&rec.manifest_url, paths.meta())
-        .await
-        .map_err(|error| {
-            InstanceError::RunFailed(format!("failed to load version manifest: {error}"))
-        })?;
+    let manifest = load_or_fetch(&rec.manifest_url, paths.meta()).await?;
     Ok((manifest, libs))
 }

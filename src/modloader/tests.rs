@@ -75,6 +75,35 @@ async fn cycle_and_exact_component_conflicts_fail_without_http() {
 }
 
 #[async_std::test]
+async fn oversized_cached_metadata_is_refused_before_it_reaches_the_repository_caller() {
+    let temp = tempfile::tempdir().unwrap();
+    let url = "file:///unsupported-local-source";
+    let path = crate::utils::download::metadata_cache::entry_path(temp.path(), url);
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(crate::utils::download::MAX_MANIFEST_BYTES as u64 + 1)
+        .unwrap();
+    let repo = Repository::new(temp.path().into());
+    assert!(repo.bytes(url, None).await.is_err());
+    assert!(path.exists());
+}
+
+#[test]
+fn malformed_zip_preserves_the_archive_parser_cause() {
+    use std::error::Error;
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("invalid.zip");
+    std::fs::write(&archive, b"not a ZIP archive").unwrap();
+    let error = super::archive::read(&archive, "component.json", 128).unwrap_err();
+    assert!(
+        error
+            .source()
+            .is_some_and(|source| source.is::<zip::result::ZipError>()),
+        "{error:?}"
+    );
+}
+
+#[async_std::test]
 async fn installed_profile_roundtrips_through_actual_migration() {
     let db = crate::data::db::Database::init("sqlite::memory:")
         .await

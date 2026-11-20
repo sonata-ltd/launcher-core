@@ -51,7 +51,7 @@ pub async fn download(url: String) -> Result<Vec<u8>> {
 pub async fn download_in_json(url: &str) -> Result<serde_json::Value> {
     let bytes = download_manifest_bytes(url).await?;
     serde_json::from_slice(&bytes).map_err(|source| DownloadError::MalformedJson {
-        url: url.to_owned(),
+        url: http::diagnostic_url(url),
         source: source.into(),
     })
 }
@@ -63,23 +63,27 @@ pub(crate) async fn download_manifest_bytes(url: &str) -> Result<Vec<u8>> {
 
     let request = http::request(url).map_err(|error| match error {
         HttpError::InvalidUrl(source) => DownloadError::InvalidUrl {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             source,
         },
+        HttpError::UnsupportedScheme => DownloadError::UnsupportedScheme {
+            url: http::diagnostic_url(url),
+            https_only: false,
+        },
         other => DownloadError::Request {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             source: other.into(),
         },
     })?;
     let response = timeout(REQUEST_TIMEOUT, http::send(request))
         .await
         .map_err(|_| DownloadError::Timeout {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             phase: "response",
             after: REQUEST_TIMEOUT,
         })?
         .map_err(|error| DownloadError::Request {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             source: error.into(),
         })?;
     timeout(
@@ -88,25 +92,25 @@ pub(crate) async fn download_manifest_bytes(url: &str) -> Result<Vec<u8>> {
     )
     .await
     .map_err(|_| DownloadError::Timeout {
-        url: url.to_owned(),
+        url: http::diagnostic_url(url),
         phase: "body",
         after: ONESHOT_TIMEOUT,
     })?
     .map_err(|error| match error {
         HttpError::Status(status) => DownloadError::Http {
             status,
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
         },
         HttpError::Body(source) => DownloadError::BodyRead {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             source,
         },
         HttpError::SizeLimit(limit) => DownloadError::SizeLimit {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             limit: limit as u64,
         },
         other => DownloadError::Request {
-            url: url.to_owned(),
+            url: http::diagnostic_url(url),
             source: other.into(),
         },
     })

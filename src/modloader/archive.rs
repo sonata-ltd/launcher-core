@@ -43,11 +43,13 @@ pub fn read(archive: &Path, resource: &str, limit: u64) -> Result<Vec<u8>> {
     let entry = resource.strip_prefix('/').unwrap_or(resource);
     name(entry)?;
 
-    let mut zip = zip::ZipArchive::new(fs::File::open(archive)?).map_err(zip_error)?;
-    let mut file = zip.by_name(entry).map_err(zip_error)?;
+    let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
+    let mut file = zip.by_name(entry)?;
     let mut bytes = Vec::new();
 
-    file.by_ref().take(limit + 1).read_to_end(&mut bytes)?;
+    file.by_ref()
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > limit {
         return Err(zip_error("ZIP entry too large"));
     }
@@ -56,9 +58,11 @@ pub fn read(archive: &Path, resource: &str, limit: u64) -> Result<Vec<u8>> {
 }
 
 pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Result<()> {
+    const MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+    const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
     fs::create_dir_all(destination)?;
 
-    let mut zip = zip::ZipArchive::new(fs::File::open(archive)?).map_err(zip_error)?;
+    let mut zip = zip::ZipArchive::new(fs::File::open(archive)?)?;
 
     if zip.len() > 20_000 {
         return Err(zip_error("too many ZIP entries"));
@@ -66,9 +70,10 @@ pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Resul
 
     let mut seen = HashSet::new();
     let mut total = 0u64;
+    let mut remaining = MAX_BYTES;
 
     for index in 0..zip.len() {
-        let mut entry = zip.by_index(index).map_err(zip_error)?;
+        let mut entry = zip.by_index(index)?;
         let relative = name(entry.name())?;
 
         if !seen.insert(relative.clone()) {
@@ -83,7 +88,7 @@ pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Resul
             .checked_add(entry.size())
             .ok_or_else(|| zip_error("ZIP size overflow"))?;
 
-        if total > 4 * 1024 * 1024 * 1024 {
+        if total > MAX_BYTES {
             return Err(zip_error("ZIP expands beyond limit"));
         }
 
@@ -106,11 +111,14 @@ pub fn extract(archive: &Path, destination: &Path, excludes: &[String]) -> Resul
         )?;
 
         let mut output = fs::File::create(&path)?;
-        let copied = std::io::copy(&mut entry.by_ref().take(512 * 1024 * 1024 + 1), &mut output)?;
-
-        if copied > 512 * 1024 * 1024 {
-            return Err(zip_error("ZIP file too large"));
+        let limit = remaining.min(MAX_ENTRY_BYTES);
+        let copied = std::io::copy(&mut entry.by_ref().take(limit), &mut output)?;
+        if entry.read(&mut [0; 1])? != 0 {
+            return Err(zip_error(
+                "ZIP output exceeds the file or archive byte limit",
+            ));
         }
+        remaining -= copied;
 
         output.flush()?;
     }

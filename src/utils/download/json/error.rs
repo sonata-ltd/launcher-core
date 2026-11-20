@@ -10,6 +10,8 @@ pub enum JsonRequestError {
     Transport(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
     #[error(transparent)]
     InvalidUrl(#[from] http_types::url::ParseError),
+    #[error("unsupported URL scheme")]
+    UnsupportedScheme,
     #[error(transparent)]
     Body(#[from] std::io::Error),
     #[error(transparent)]

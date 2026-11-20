@@ -6,7 +6,15 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const MAX_UNPACKED_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+struct ArchiveLimits {
+    entries: usize,
+    bytes: u64,
+}
+
+const LIMITS: ArchiveLimits = ArchiveLimits {
+    entries: 32_768,
+    bytes: 4 * 1024 * 1024 * 1024,
+};
 
 struct CheckedReader<R> {
     inner: R,
@@ -26,6 +34,16 @@ pub(super) fn extract(
     format: ArchiveFormat,
     cancel: &Cancellation,
 ) -> Result<PathBuf> {
+    extract_bounded(archive, destination, format, cancel, LIMITS)
+}
+
+fn extract_bounded(
+    archive: &Path,
+    destination: &Path,
+    format: ArchiveFormat,
+    cancel: &Cancellation,
+    limits: ArchiveLimits,
+) -> Result<PathBuf> {
     let run = || -> io::Result<()> {
         fs::create_dir_all(destination)?;
         let file = fs::File::open(archive)?;
@@ -37,7 +55,10 @@ pub(super) fn extract(
                     cancel: cancel.clone(),
                 };
                 let mut archive = tar::Archive::new(reader);
-                for entry in archive.entries()? {
+                for (index, entry) in archive.entries()?.enumerate() {
+                    if index >= limits.entries {
+                        return Err(io::Error::other("too many Java archive entries"));
+                    }
                     cancel.check()?;
                     let mut entry = entry?;
                     let path = entry.path()?.into_owned();
@@ -56,7 +77,7 @@ pub(super) fn extract(
                     total = total
                         .checked_add(entry.size())
                         .ok_or_else(|| io::Error::other("Archive size overflow"))?;
-                    if total > MAX_UNPACKED_SIZE {
+                    if total > limits.bytes {
                         return Err(io::Error::other("Archive is too large"));
                     }
                     if let Some(link) = entry.link_name()? {
@@ -78,6 +99,10 @@ pub(super) fn extract(
             }
             ArchiveFormat::Zip => {
                 let mut zip = zip::ZipArchive::new(file)?;
+                if zip.len() > limits.entries {
+                    return Err(io::Error::other("too many Java archive entries"));
+                }
+                let mut written = 0u64;
                 for i in 0..zip.len() {
                     cancel.check()?;
                     let mut entry = zip.by_index(i)?;
@@ -91,7 +116,7 @@ pub(super) fn extract(
                     total = total
                         .checked_add(entry.size())
                         .ok_or_else(|| io::Error::other("Archive size overflow"))?;
-                    if total > MAX_UNPACKED_SIZE {
+                    if total > limits.bytes {
                         return Err(io::Error::other("Archive is too large"));
                     }
                     let path = destination.join(relative);
@@ -114,6 +139,12 @@ pub(super) fn extract(
                         if n == 0 {
                             break;
                         }
+                        written = written
+                            .checked_add(n as u64)
+                            .filter(|written| *written <= limits.bytes)
+                            .ok_or_else(|| {
+                                io::Error::other("Java archive output exceeds byte limit")
+                            })?;
                         output.write_all(&buffer[..n])?;
                     }
                     #[cfg(unix)]
@@ -196,4 +227,37 @@ fn find_home(root: &Path) -> io::Result<PathBuf> {
         )));
     }
     Ok(candidates.remove(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zip_entry_budget_is_enforced_before_creating_outputs() {
+        let root = tempfile::tempdir().unwrap();
+        let archive = root.path().join("runtime.zip");
+        let mut writer = zip::ZipWriter::new(fs::File::create(&archive).unwrap());
+        for name in ["jre/bin/java", "jre/info"] {
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"fixture").unwrap();
+        }
+        writer.finish().unwrap();
+        let destination = root.path().join("unpacked");
+        let error = extract_bounded(
+            &archive,
+            &destination,
+            ArchiveFormat::Zip,
+            &Cancellation::new(),
+            ArchiveLimits {
+                entries: 1,
+                bytes: 1024,
+            },
+        )
+        .unwrap_err();
+        assert!(error.diagnostic().contains("too many Java archive entries"));
+        assert!(fs::read_dir(destination).unwrap().next().is_none());
+    }
 }

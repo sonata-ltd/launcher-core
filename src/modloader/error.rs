@@ -28,6 +28,9 @@ pub enum ModloaderError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 
+    #[error("could not read ZIP archive: {0}")]
+    ArchiveZip(#[from] zip::result::ZipError),
+
     #[error(transparent)]
     Maven(#[from] crate::utils::maven::MavenCoordinateError),
 

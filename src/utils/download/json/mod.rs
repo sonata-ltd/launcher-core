@@ -68,6 +68,7 @@ fn map_http_error(error: HttpError) -> JsonRequestError {
         ))),
         HttpError::Body(error) => JsonRequestError::Body(error),
         HttpError::InvalidUrl(error) => JsonRequestError::InvalidUrl(error),
+        HttpError::UnsupportedScheme => JsonRequestError::UnsupportedScheme,
     }
 }
 

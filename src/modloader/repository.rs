@@ -47,7 +47,7 @@ impl Repository {
 
         let expected = pinned.or(expected);
         let path = metadata_cache::entry_path(&self.cache, url);
-        let cached = async_std::fs::read(&path).await.ok();
+        let cached = metadata_cache::read(&path).await.ok();
         let valid = |bytes: &[u8]| {
             expected.is_none_or(|hash| files::sha256(bytes).eq_ignore_ascii_case(hash))
         };
@@ -65,11 +65,12 @@ impl Repository {
             }
         }
 
-        match http::get_bytes(url, 32 * 1024 * 1024).await {
+        match http::get_bytes(url, crate::utils::download::MAX_MANIFEST_BYTES).await {
             Ok(bytes) => {
                 if !valid(&bytes) {
                     return Err(ModloaderError::Invalid(format!(
-                        "metadata hash mismatch: {url}"
+                        "metadata hash mismatch: {}",
+                        http::diagnostic_url(url)
                     )));
                 }
 

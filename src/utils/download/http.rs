@@ -1,4 +1,7 @@
-use super::transfer::error::{DownloadError, Result};
+use super::{
+    error::DownloadError as TransportError,
+    transfer::error::{DownloadError, Result},
+};
 use futures::AsyncReadExt;
 use std::{io, time::Duration};
 
@@ -6,6 +9,8 @@ use std::{io, time::Duration};
 pub(crate) enum HttpError {
     #[error("invalid URL: {0}")]
     InvalidUrl(#[from] http_types::url::ParseError),
+    #[error("unsupported URL scheme")]
+    UnsupportedScheme,
     #[error("HTTP request failed: {0}")]
     Request(surf::Error),
     #[error("HTTP {0}")]
@@ -30,7 +35,22 @@ impl HttpError {
 }
 
 pub(crate) fn request(url: &str) -> std::result::Result<surf::RequestBuilder, HttpError> {
-    Ok(surf::get(surf::Url::parse(url)?))
+    let url = surf::Url::parse(url)?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(HttpError::UnsupportedScheme);
+    }
+    Ok(surf::get(url))
+}
+
+pub(crate) fn diagnostic_url(input: &str) -> String {
+    let Ok(mut url) = surf::Url::parse(input) else {
+        return "<invalid URL>".into();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.into()
 }
 
 pub(crate) async fn send(
@@ -87,7 +107,22 @@ pub async fn get_bytes(url: &str, limit: usize) -> Result<Vec<u8>> {
         },
         HttpError::Timeout => DownloadError::Timeout("metadata response"),
         HttpError::Body(source) => DownloadError::Io(source),
-        other => DownloadError::Http(format!("{other}: {url}")),
+        other => {
+            let url = diagnostic_url(url);
+            let error = match other {
+                HttpError::InvalidUrl(source) => TransportError::InvalidUrl { url, source },
+                HttpError::UnsupportedScheme => TransportError::UnsupportedScheme {
+                    url,
+                    https_only: false,
+                },
+                HttpError::Status(status) => TransportError::Http { status, url },
+                source => TransportError::Request {
+                    url,
+                    source: source.into(),
+                },
+            };
+            DownloadError::Network(Box::new(error))
+        }
     })
 }
 
@@ -102,6 +137,20 @@ mod tests {
             crate::utils::download::download_in_json("not-a-url").await,
             Err(crate::utils::download::error::DownloadError::InvalidUrl { .. })
         ));
+    }
+
+    #[async_std::test]
+    async fn metadata_rejects_unsupported_schemes_without_exposing_url_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut url = surf::Url::from_file_path(temp.path().join("absent")).unwrap();
+        url.set_query(Some("token=fixture-secret"));
+        let error = get_bytes(url.as_str(), 1024).await.unwrap_err();
+        assert!(
+            matches!(&error, DownloadError::Network(source)
+                if matches!(source.as_ref(), super::super::error::DownloadError::UnsupportedScheme { .. })),
+            "{error:?}"
+        );
+        assert!(!error.to_string().contains("fixture-secret"));
     }
 
     #[async_std::test]
@@ -139,10 +188,12 @@ mod tests {
             then.status(404);
         });
 
-        assert!(matches!(
-            get_bytes(&server.url("/missing"), 1024).await,
-            Err(DownloadError::Http(message)) if message.contains("404")
-        ));
+        let error = get_bytes(&server.url("/missing?token=fixture-secret"), 1024)
+            .await
+            .unwrap_err();
+        assert!(matches!(&error, DownloadError::Network(source)
+            if matches!(source.as_ref(), TransportError::Http { status: surf::StatusCode::NotFound, .. })));
+        assert!(!error.to_string().contains("fixture-secret"));
         mock.assert_hits(1);
     }
 }

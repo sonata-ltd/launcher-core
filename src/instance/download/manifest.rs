@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[cfg(test)]
 use async_std::fs;
 
 use crate::utils::{
@@ -73,7 +74,7 @@ pub async fn load_or_fetch<P: AsRef<Path>>(
     let save_dir = save_dir.as_ref();
 
     let cached = metadata_cache::entry_path(save_dir, url);
-    match fs::read(&cached).await {
+    match metadata_cache::read(&cached).await {
         Ok(body) => match serde_json::from_slice(&body) {
             Ok(value) => return Ok(value),
             Err(error) => tracing::warn!(
@@ -97,7 +98,7 @@ pub async fn load_or_fetch<P: AsRef<Path>>(
 /// touches the network.
 pub async fn load_cached<P: AsRef<Path>>(url: &str, save_dir: P) -> Option<serde_json::Value> {
     let cached = metadata_cache::entry_path(save_dir.as_ref(), url);
-    let body = fs::read(&cached).await.ok()?;
+    let body = metadata_cache::read(&cached).await.ok()?;
 
     serde_json::from_slice(&body).ok()
 }
