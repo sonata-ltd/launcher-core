@@ -6,6 +6,8 @@ use std::{
 };
 use thiserror::Error;
 
+#[cfg(all(test, unix))]
+mod concurrency_observation;
 pub mod digest;
 pub(crate) mod directory;
 pub(crate) mod identity;
