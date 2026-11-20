@@ -37,6 +37,21 @@ async fn short_process_flushes_stdout_stderr_and_unterminated_last_line() {
 }
 
 #[async_std::test]
+async fn processor_logging_preserves_the_previous_file_when_linked() {
+    let scope = tempfile::tempdir().unwrap();
+    let command = command(scope.path(), "printf 'new processor log'");
+    let log = command.log.clone();
+    let previous = scope.path().join("previous");
+    fs::write(&previous, b"preserve these bytes").unwrap();
+    fs::hard_link(&previous, &log).unwrap();
+
+    run(command, &Cancellation::new(), |_| {}).await.unwrap();
+
+    assert_eq!(fs::read(previous).unwrap(), b"preserve these bytes");
+    assert_eq!(fs::read(log).unwrap(), b"new processor log");
+}
+
+#[async_std::test]
 async fn failed_process_flushes_diagnostics_before_returning_error() {
     let dir = tempfile::tempdir().unwrap();
     let command = command(dir.path(), "printf 'failure details' >&2; exit 7");

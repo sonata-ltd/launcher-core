@@ -64,6 +64,10 @@ pub(crate) struct StoreMaintenance {
 }
 
 impl StoreMaintenance {
+    pub(crate) fn directory(&self) -> &Arc<Directory> {
+        &self.directory
+    }
+
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
     }

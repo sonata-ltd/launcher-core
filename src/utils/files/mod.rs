@@ -2,7 +2,6 @@ use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::{
     fs,
-    io::Write,
     path::{Component, Path, PathBuf},
 };
 use thiserror::Error;
@@ -200,13 +199,10 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .ok_or_else(|| FileError::InvalidPath("path has no parent".into()))?;
 
-    fs::create_dir_all(parent)?;
-
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(bytes)?;
-    file.as_file().sync_all()?;
-    file.persist(path).map_err(|e| FileError::Io(e.error))?;
-
+    let name = path
+        .file_name()
+        .ok_or_else(|| FileError::InvalidPath("path has no file name".into()))?;
+    directory::Directory::ensure_path(parent)?.write_bytes(name, bytes)?;
     Ok(())
 }
 
@@ -305,6 +301,34 @@ mod tests {
         ));
         assert_eq!(fs::read(destination.join("keep.txt")).unwrap(), b"keep");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn metadata_write_refuses_a_redirected_parent() {
+        let scope = tempfile::tempdir().unwrap();
+        let cache = scope.path().join("cache");
+        let existing = scope.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        fs::write(existing.join("manifest.json"), b"existing metadata").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&existing, &cache).unwrap();
+        #[cfg(windows)]
+        assert!(std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&cache)
+            .arg(&existing)
+            .status()
+            .unwrap()
+            .success());
+
+        let result = atomic_write(&cache.join("manifest.json"), b"new metadata");
+
+        assert_eq!(
+            fs::read(existing.join("manifest.json")).unwrap(),
+            b"existing metadata"
+        );
+        assert!(result.is_err());
     }
 
     #[cfg(unix)]

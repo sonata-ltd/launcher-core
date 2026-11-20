@@ -64,17 +64,26 @@ pub(crate) fn read_owner_from(file: impl std::io::Read) -> Option<u32> {
 /// prefix of a live PID must never become visible as a different, dead PID.
 /// Like other publish helpers, this does not promise power-loss durability.
 pub(crate) fn write_owner(path: &std::path::Path) -> std::io::Result<()> {
-    use std::io::Write;
+    use crate::utils::files::directory::Directory;
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("owner marker has no parent"))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(std::process::id().to_string().as_bytes())?;
-    temporary.as_file().sync_all()?;
-    temporary
-        .persist_noclobber(path)
-        .map_err(|error| error.error)?;
-    Ok(())
+    let name = path.file_name().ok_or(std::io::ErrorKind::InvalidInput)?;
+    write_owner_in(&Directory::ensure_path(parent)?, name)
+}
+
+pub(crate) fn write_owner_in(
+    directory: &std::sync::Arc<crate::utils::files::directory::Directory>,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    directory.with_staged_file(
+        |file| {
+            file.write_all(std::process::id().to_string().as_bytes())?;
+            file.sync_all()
+        },
+        |staged, ()| directory.publish(staged, directory, name),
+    )
 }
 
 #[cfg(test)]

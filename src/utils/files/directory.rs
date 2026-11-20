@@ -1,12 +1,14 @@
 use std::{
     ffi::OsStr,
     fs::{self, File},
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use super::identity::FileIdentity;
+
+mod cleanup;
 
 /// An opened directory used for publication. On Windows the parent chain
 /// stays open without delete sharing for the lifetime of each child.
@@ -71,6 +73,17 @@ impl Directory {
             directory = directory.child(component.as_os_str())?;
         }
         Ok(directory)
+    }
+
+    pub(crate) fn open_optional(
+        self: &Arc<Self>,
+        relative: &Path,
+    ) -> io::Result<Option<Arc<Self>>> {
+        match self.open_relative(relative) {
+            Ok(directory) => Ok(Some(directory)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Resolve a caller-selected directory. Missing descendants are created from
@@ -280,6 +293,19 @@ impl Directory {
         // Keep the staged identity live until publication and cleanup finish.
         drop(file);
         result
+    }
+
+    pub(crate) fn write_bytes(&self, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+        self.with_staged_file(
+            |file| {
+                file.write_all(bytes)?;
+                file.sync_all()
+            },
+            |staged, ()| {
+                self.require_regular_or_missing(name)?;
+                self.replace(staged, name)
+            },
+        )
     }
 
     pub(crate) fn hard_link(&self, source: &OsStr, name: &OsStr) -> io::Result<()> {

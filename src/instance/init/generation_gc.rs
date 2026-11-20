@@ -13,6 +13,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -72,9 +73,18 @@ impl GenerationOwner {
         Ok(())
     }
 
-    pub(super) fn write(&self, root: &Path) -> io::Result<()> {
+    #[cfg(test)]
+    fn write(&self, root: &Path) -> io::Result<()> {
+        let root = crate::utils::files::directory::Directory::ensure_path(root)?;
+        self.write_in(&root)
+    }
+
+    pub(super) fn write_in(
+        &self,
+        root: &crate::utils::files::directory::Directory,
+    ) -> io::Result<()> {
         let body = serde_json::to_vec(self).map_err(io::Error::other)?;
-        files::atomic_write(&root.join(RECORD), &body).map_err(io::Error::other)
+        root.write_bytes(std::ffi::OsStr::new(RECORD), &body)
     }
 }
 
@@ -103,7 +113,7 @@ pub(super) async fn collect(paths: Arc<LauncherPaths>, minimum_age: Duration) ->
             .map(|owner| owner.identity)
             .collect();
         let removed = async_std::task::spawn_blocking(move || {
-            collect_files(worker.root(), &roots, &owners, minimum_age)
+            collect_files(worker.directory(), &roots, &owners, minimum_age)
         })
         .await?;
         snapshot.databases.close().await;
@@ -206,15 +216,18 @@ fn eligible(
 }
 
 fn collect_files(
-    root: &Path,
+    base: &Arc<crate::utils::files::directory::Directory>,
     current: &HashSet<PathBuf>,
     owners: &HashSet<String>,
     age: Duration,
 ) -> io::Result<usize> {
+    base.verify_location()?;
+    let root = base.path();
     let queue = root.join(QUEUE);
-    let queue_parent = queue.parent().unwrap();
+    let queue_relative = Path::new(QUEUE);
+    let mut queue_directory = base.open_optional(queue_relative)?;
     let mut pending = HashMap::new();
-    if directory(queue_parent)? && directory(&queue)? {
+    if queue_directory.is_some() {
         for entry in fs::read_dir(&queue)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -285,16 +298,18 @@ fn collect_files(
                         ));
                     }
                 } else {
-                    fs::create_dir_all(&queue)?;
+                    if queue_directory.is_none() {
+                        queue_directory = Some(base.create_relative(queue_relative)?);
+                    }
+                    let directory = queue_directory.as_ref().ok_or(io::ErrorKind::NotFound)?;
                     let intent = Intent {
                         version: 1,
                         owner: owner.clone(),
                     };
-                    files::atomic_write(
-                        &queue.join(format!("{}.json", owner.generation)),
+                    directory.write_bytes(
+                        OsStr::new(&format!("{}.json", owner.generation)),
                         &serde_json::to_vec(&intent).map_err(io::Error::other)?,
-                    )
-                    .map_err(io::Error::other)?;
+                    )?;
                     checkpoint(root, "intent");
                     pending.insert(owner.generation, owner);
                 }
@@ -302,50 +317,64 @@ fn collect_files(
         }
     }
     let mut removed = 0;
+    let Some(queue_directory) = queue_directory else {
+        return Ok(0);
+    };
     for owner in pending.into_values() {
         // Replay validates every original ancestor as well as quarantine. A
         // linked instance directory must not redirect a previously valid intent.
         directory(&instances)?;
         directory(&instances.join(owner.instance.to_string()))?;
-        let original = root.join(owner.relative());
-        let tombstone = queue.join(owner.generation.to_string());
-        let intent = queue.join(format!("{}.json", owner.generation));
+        let relative = owner.relative();
+        let relative_parent = relative.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        let generation = owner.generation.to_string();
+        let name = OsStr::new(&generation);
+        let original_parent = base.open_optional(relative_parent)?;
+        let original = match &original_parent {
+            Some(parent) => parent.open_optional(Path::new(name))?,
+            None => None,
+        };
+        let mut tombstone = queue_directory.open_optional(Path::new(name))?;
+        let intent = format!("{}.json", owner.generation);
         if current.contains(&owner.relative()) {
-            if directory(&tombstone)? {
-                if directory(&original)? {
+            if let Some(tombstone) = tombstone {
+                if original.is_some() {
                     return Err(io::Error::other(
                         "new generation root conflicts with quarantine",
                     ));
                 }
-                if record(&tombstone)? != owner
-                    || !known_tree(&tombstone)?
-                    || !old_tree(&tombstone, Duration::ZERO)?
+                if record(tombstone.path())? != owner
+                    || !known_tree(tombstone.path())?
+                    || !old_tree(tombstone.path(), Duration::ZERO)?
                 {
                     return Err(io::Error::other(
                         "unknown quarantined bytes cannot be restored as a current generation",
                     ));
                 }
-                fs::rename(&tombstone, &original)?;
+                let parent = original_parent.ok_or(io::ErrorKind::NotFound)?;
+                queue_directory.move_child_to(tombstone, &parent, name)?;
             }
-            fs::remove_file(intent)?;
+            clear_intent(&queue_directory, OsStr::new(&intent), &owner)?;
             continue;
         }
-        if directory(&original)? {
-            if directory(&tombstone)? || record(&original)? != owner {
+        if let Some(original) = original {
+            if tombstone.is_some() || record(original.path())? != owner {
                 return Err(io::Error::other(
                     "generation replaced during deletion replay",
                 ));
             }
-            if !eligible(&original, &owner, owners, age)? {
+            if !eligible(original.path(), &owner, owners, age)? {
                 continue;
             }
-            fs::rename(&original, &tombstone)?;
+            let parent = original_parent.ok_or(io::ErrorKind::NotFound)?;
+            tombstone = Some(parent.move_child_to(original, &queue_directory, name)?);
             checkpoint(root, "rename");
         }
-        if directory(&tombstone)? {
-            match record(&tombstone) {
+        if let Some(tombstone) = tombstone {
+            tombstone.verify_location()?;
+            match record(tombstone.path()) {
                 Ok(record) if record == owner => {
-                    if !eligible(&tombstone, &owner, owners, age)? {
+                    if !eligible(tombstone.path(), &owner, owners, age)? {
                         continue;
                     }
                 }
@@ -353,7 +382,7 @@ fn collect_files(
                 Err(_) => {
                     // Ownership metadata is removed last. A crash here may only
                     // leave one or both exact metadata files, never outputs.
-                    for entry in fs::read_dir(&tombstone)? {
+                    for entry in fs::read_dir(tombstone.path())? {
                         let entry = entry?;
                         if !entry.file_type()?.is_file()
                             || ![RECORD, OWNER]
@@ -376,28 +405,43 @@ fn collect_files(
                 }
             }
             for name in ["maven", "work", ".sonata-processes"] {
-                let path = tombstone.join(name);
-                if directory(&path)? {
-                    fs::remove_dir_all(path)?;
+                if let Some(child) = tombstone.open_optional(Path::new(name))? {
+                    tombstone.remove_child_tree(child)?;
                 }
                 checkpoint(root, "outputs");
             }
             for name in [RECORD, OWNER] {
-                match fs::remove_file(tombstone.join(name)) {
+                match tombstone.remove_regular(OsStr::new(name)) {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error),
                 }
                 checkpoint(root, "metadata");
             }
-            fs::remove_dir(&tombstone)?;
+            queue_directory.remove_empty_child(tombstone)?;
             removed += 1;
             checkpoint(root, "removed");
         }
-        fs::remove_file(intent)?;
+        clear_intent(&queue_directory, OsStr::new(&intent), &owner)?;
         checkpoint(root, "cleaned");
     }
     Ok(removed)
+}
+
+fn clear_intent(
+    queue: &crate::utils::files::directory::Directory,
+    name: &OsStr,
+    owner: &GenerationOwner,
+) -> io::Result<()> {
+    use crate::utils::object_store::catalog::read_open_regular;
+    queue.remove_verified_file(name, |file| {
+        let intent: Intent =
+            serde_json::from_slice(&read_open_regular(file, 4096)?).map_err(io::Error::other)?;
+        if intent.version != 1 || &intent.owner != owner {
+            return Err(io::Error::other("generation deletion intent changed"));
+        }
+        Ok(())
+    })
 }
 
 fn checkpoint(_root: &Path, _phase: &'static str) {

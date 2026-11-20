@@ -12,7 +12,7 @@ pub(crate) mod retention;
 mod tests;
 mod transfer;
 
-use async_std::{fs, sync::Mutex as AsyncMutex, task};
+use async_std::{sync::Mutex as AsyncMutex, task};
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -641,8 +641,13 @@ impl ManagedJavaService {
         };
         if cancelled {
             let cleanup = task::spawn_blocking(move || -> std::io::Result<()> {
-                published.verify_file(OsStr::new(&name), FileIdentity::from_handle(&witness)?)?;
-                std::fs::remove_dir_all(published.path().join(&name))
+                let home = published.open_relative(Path::new(&name))?;
+                if home.identity()? != FileIdentity::from_handle(&witness)? {
+                    return Err(std::io::Error::other(
+                        "published home changed before cleanup",
+                    ));
+                }
+                published.remove_child_tree(home)
             })
             .await;
             if let Err(error) = cleanup {

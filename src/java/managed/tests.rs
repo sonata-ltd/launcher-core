@@ -1,5 +1,7 @@
 use super::*;
 use crate::java::{model::JavaSource, service::JavaService};
+#[cfg(unix)]
+use async_std::fs;
 use futures::io::Cursor;
 use sha2::{Digest, Sha256};
 use std::io::Write;

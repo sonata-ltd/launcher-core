@@ -151,14 +151,18 @@ fn digest_regular_file(
     ))
 }
 
-pub(crate) fn retention_digests(path: &Path) -> io::Result<RetentionDigests> {
+pub(crate) fn retention_digests(mut file: &File) -> io::Result<RetentionDigests> {
     let mut sha256 = Sha256::new();
     let mut sha1 = Sha1::new();
-    let (size_bytes, _) = read_regular_chunks(path, &Cancellation::new(), |bytes, _| {
+    let before = FileStamp::from_metadata(&file.metadata()?);
+    let size_bytes = read_chunks(&mut file, None, |bytes, _| {
         sha256.update(bytes);
         sha1.update(bytes);
         Ok(())
     })?;
+    if FileStamp::from_metadata(&file.metadata()?) != before || size_bytes != before.size_bytes {
+        return Err(io::Error::other("file changed during hashing"));
+    }
     Ok(RetentionDigests {
         sha256: format!("{:x}", sha256.finalize()),
         sha1: format!("{:x}", sha1.finalize()),

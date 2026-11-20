@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::data::registry::operation::message::output::OutputLine;
+use crate::utils::files::directory::Directory;
 
 const MAX_LINES: usize = 6;
 const MAX_LINE_BYTES: usize = 4096;
@@ -22,7 +23,19 @@ pub(super) struct OutputCapture {
 }
 
 impl OutputCapture {
+    #[cfg(test)]
     pub(super) fn open(log: &Path, limit: u64) -> io::Result<(Self, Stdio, Stdio)> {
+        let parent = log.parent().ok_or(io::ErrorKind::InvalidInput)?;
+        let name = log.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+        let directory = Directory::ensure_path(parent)?;
+        Self::open_in(&directory, name, limit)
+    }
+
+    pub(super) fn open_in(
+        directory: &Directory,
+        name: &std::ffi::OsStr,
+        limit: u64,
+    ) -> io::Result<(Self, Stdio, Stdio)> {
         let (reader, writer) = io::pipe()?;
         set_read_nonblocking(&reader)?;
         let stdout = Stdio::from(writer.try_clone()?);
@@ -32,10 +45,18 @@ impl OutputCapture {
         } else {
             &[]
         };
+        let log = directory.with_staged_file(
+            |file| file.try_clone(),
+            |staged, file| {
+                directory.require_regular_or_missing(name)?;
+                directory.replace(staged, name)?;
+                Ok::<_, io::Error>(file)
+            },
+        )?;
         Ok((
             Self {
                 reader,
-                log: File::create(log)?,
+                log,
                 remaining: limit - notice.len() as u64,
                 notice,
             },
@@ -256,13 +277,18 @@ pub(super) struct OutputTail {
 }
 
 impl OutputTail {
+    #[cfg(test)]
     pub fn open(path: &Path) -> io::Result<Self> {
-        Ok(Self {
-            file: File::open(path)?,
+        Ok(Self::from_file(File::open(path)?))
+    }
+
+    pub(super) fn from_file(file: File) -> Self {
+        Self {
+            file,
             offset: 0,
             buffer: OutputBuffer::default(),
             last_snapshot: Vec::new(),
-        })
+        }
     }
 
     pub fn poll(&mut self, finished: bool) -> io::Result<Option<Vec<OutputLine>>> {

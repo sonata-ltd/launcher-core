@@ -1,6 +1,6 @@
 use crate::utils::{
     download::{http, metadata_cache},
-    files,
+    files::{self, directory::Directory},
 };
 
 use super::error::{ModloaderError, Result};
@@ -46,16 +46,19 @@ impl Repository {
         }
 
         let expected = pinned.or(expected);
-        let path = metadata_cache::entry_path(&self.cache, url);
-        let cached = metadata_cache::read(&path).await.ok();
+        let root = self.cache.clone();
+        let directory =
+            async_std::task::spawn_blocking(move || Directory::ensure_path(&root)).await?;
+        let entry = metadata_cache::Entry::new(directory, url);
+        let (cached, modified) = match entry.read().await {
+            Ok((bytes, modified)) => (Some(bytes), modified),
+            Err(_) => (None, None),
+        };
         let valid = |bytes: &[u8]| {
             expected.is_none_or(|hash| files::sha256(bytes).eq_ignore_ascii_case(hash))
         };
 
-        let fresh = async_std::fs::metadata(&path)
-            .await
-            .ok()
-            .and_then(|m| m.modified().ok())
+        let fresh = modified
             .and_then(|time| SystemTime::now().duration_since(time).ok())
             .is_some_and(|age| age < Duration::from_secs(3600));
 
@@ -74,7 +77,7 @@ impl Repository {
                     )));
                 }
 
-                metadata_cache::publish(path, bytes.clone()).await?;
+                entry.publish(bytes.clone()).await?;
                 Ok(bytes)
             }
             Err(error) => match cached {

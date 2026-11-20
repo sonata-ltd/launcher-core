@@ -76,7 +76,9 @@ impl RootCatalog {
             catalog.complete = false;
         }
         let body = serde_json::to_vec(&catalog).map_err(io::Error::other)?;
-        crate::utils::files::atomic_write(&path, &body).map_err(io::Error::other)
+        maintenance
+            .directory()
+            .write_bytes(std::ffi::OsStr::new(FILE), &body)
     }
 
     pub(crate) fn owners(maintenance: &StoreMaintenance) -> io::Result<Vec<DatabaseOwner>> {
@@ -118,10 +120,18 @@ pub(crate) fn read_regular(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
             "retention metadata is not a bounded regular file",
         ));
     }
+    read_open_regular(&fs::File::open(path)?, limit)
+}
+
+pub(crate) fn read_open_regular(file: &fs::File, limit: u64) -> io::Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(io::Error::other(
+            "retention metadata is not a bounded regular file",
+        ));
+    }
     let mut body = Vec::new();
-    fs::File::open(path)?
-        .take(limit + 1)
-        .read_to_end(&mut body)?;
+    file.take(limit.saturating_add(1)).read_to_end(&mut body)?;
     if body.len() as u64 > limit {
         return Err(io::Error::other("retention metadata grew beyond limit"));
     }

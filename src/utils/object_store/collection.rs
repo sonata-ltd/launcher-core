@@ -1,11 +1,12 @@
 //! Replayable byte deletion, independent of domain roots and SQL metadata.
 //! Admission and a complete domain snapshot are required before constructing
 //! this capability; aliases are hints, never roots supplied by this module.
-use super::{catalog::read_regular, ObjectStore, StoreMaintenance};
-use crate::utils::files::{self, directory::Directory};
+use super::{catalog::read_open_regular, ObjectStore, StoreMaintenance};
+use crate::utils::files::{self, directory::Directory, identity::FileIdentity};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs, io,
     path::Path,
     sync::Arc,
@@ -14,7 +15,7 @@ use std::{
 
 pub(crate) const INTENTS: &str = ".sonata-gc";
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DeleteIntent {
     pub(crate) version: u32,
@@ -91,9 +92,9 @@ impl Collection {
             let intents_directory = self.directory.open_relative(Path::new(INTENTS))?;
             for entry in fs::read_dir(&intents)? {
                 let entry = entry?;
-                let intent: DeleteIntent =
-                    serde_json::from_slice(&read_regular(&entry.path(), 4096)?)
-                        .map_err(io::Error::other)?;
+                let file = intents_directory.open_file(&entry.file_name())?;
+                let intent: DeleteIntent = serde_json::from_slice(&read_open_regular(&file, 4096)?)
+                    .map_err(io::Error::other)?;
                 intent.validate()?;
                 if entry.file_name() != format!("{}.json", intent.sha256).as_str() {
                     return Err(io::Error::other("deletion intent filename mismatch"));
@@ -166,7 +167,9 @@ impl Collection {
                 {
                     continue;
                 }
-                let digests = files::digest::retention_digests(&store.path_for(&hash)?)?;
+                let relative = Path::new("objects/sha256").join(&prefix).join(&hash);
+                let file = self.directory.open_entry_file(&relative)?;
+                let digests = files::digest::retention_digests(&file)?;
                 if digests.sha256 != hash || retained.sha1.contains(&digests.sha1) {
                     continue;
                 }
@@ -176,12 +179,11 @@ impl Collection {
                     sha1: digests.sha1,
                     size: digests.size_bytes,
                 };
-                fs::create_dir_all(&intents)?;
-                files::atomic_write(
-                    &intents.join(format!("{hash}.json")),
+                let directory = self.directory.create_relative(Path::new(INTENTS))?;
+                directory.write_bytes(
+                    std::ffi::OsStr::new(&format!("{hash}.json")),
                     &serde_json::to_vec(&intent).map_err(io::Error::other)?,
-                )
-                .map_err(io::Error::other)?;
+                )?;
                 self.checkpoint("intent");
                 plan.insert(hash, intent);
             }
@@ -205,20 +207,20 @@ impl Collection {
             let directory = self
                 .directory
                 .open_relative(parent.strip_prefix(root).map_err(io::Error::other)?)?;
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_file() => {
-                    let digests = files::digest::retention_digests(&path)?;
-                    if digests.sha256 != intent.sha256
-                        || digests.sha1 != intent.sha1
-                        || digests.size_bytes != intent.size
-                    {
-                        return Err(io::Error::other("object changed since deletion intent"));
-                    }
-                    directory.unlink(std::ffi::OsStr::new(&intent.sha256))?;
+            match directory.remove_verified_file(OsStr::new(&intent.sha256), |file| {
+                let digests = files::digest::retention_digests(file)?;
+                if digests.sha256 != intent.sha256
+                    || digests.sha1 != intent.sha1
+                    || digests.size_bytes != intent.size
+                {
+                    return Err(io::Error::other("object changed since deletion intent"));
+                }
+                Ok(())
+            }) {
+                Ok(()) => {
                     self.checkpoint("unlink");
                     true
                 }
-                Ok(_) => return Err(io::Error::other("deletion target is not regular")),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => false,
                 Err(error) => return Err(error),
             }
@@ -226,13 +228,15 @@ impl Collection {
         if regular_directory(&root.join("aliases"))?
             && regular_directory(&root.join("aliases/sha1"))?
         {
-            let alias = root.join("aliases/sha1").join(&intent.sha1);
             let directory = self.directory.open_relative(Path::new("aliases/sha1"))?;
-            match read_regular(&alias, 64) {
-                Ok(body) if body == intent.sha256.as_bytes() => {
-                    directory.unlink(std::ffi::OsStr::new(&intent.sha1))?
+            let name = OsStr::new(&intent.sha1);
+            match directory.open_file(name) {
+                Ok(file) => {
+                    if read_open_regular(&file, 64)? == intent.sha256.as_bytes() {
+                        directory.verify_file(name, FileIdentity::from_handle(&file)?)?;
+                        directory.unlink(name)?;
+                    }
                 }
-                Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
@@ -255,7 +259,16 @@ impl Collection {
                 .path_for(&intent.sha256)?
                 .try_exists()?
             {
-                directory.unlink(std::ffi::OsStr::new(&format!("{}.json", intent.sha256)))?;
+                let name = format!("{}.json", intent.sha256);
+                directory.remove_verified_file(OsStr::new(&name), |file| {
+                    let persisted: DeleteIntent =
+                        serde_json::from_slice(&read_open_regular(file, 4096)?)
+                            .map_err(io::Error::other)?;
+                    if persisted != *intent {
+                        return Err(io::Error::other("object deletion intent changed"));
+                    }
+                    Ok(())
+                })?;
             }
         }
         Ok(())

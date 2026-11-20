@@ -1,10 +1,14 @@
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use crate::utils::process::{may_be_alive as process_may_be_alive, read_owner as read_pid};
+use crate::utils::{
+    files::{directory::Directory, owned_directory::OwnedDirectory},
+    process::{may_be_alive as process_may_be_alive, read_owner_from},
+};
 
 const OWNER_PID: &str = ".sonata-owner";
 const SPAWN_INTENT: &str = ".sonata-starting";
@@ -13,28 +17,20 @@ const PREFIX: &str = "run-";
 
 #[derive(Clone)]
 pub(crate) struct NativeDirectory {
-    directory: Arc<tempfile::TempDir>,
+    directory: Arc<OwnedDirectory>,
     extracted: PathBuf,
     runtime_pins: Vec<crate::utils::process_pin::ProcessPin>,
 }
 
 impl NativeDirectory {
     pub(crate) fn create(root: &Path) -> io::Result<Self> {
-        fs::create_dir_all(root)?;
-        if !fs::symlink_metadata(root)?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "natives root is not a directory",
-            ));
-        }
-        let directory = tempfile::Builder::new().prefix(PREFIX).tempdir_in(root)?;
-        let extracted = directory.path().join("files");
-        fs::create_dir(&extracted)?;
-        crate::utils::files::atomic_write(
-            &directory.path().join(OWNER_PID),
-            std::process::id().to_string().as_bytes(),
-        )
-        .map_err(io::Error::other)?;
+        let root = Directory::ensure_path(root)?;
+        let directory = OwnedDirectory::create_in(&root, PREFIX)?;
+        let extracted = directory
+            .directory()
+            .create_private_child(OsStr::new("files"))?
+            .path()
+            .to_owned();
         Ok(Self {
             directory: Arc::new(directory),
             extracted,
@@ -45,15 +41,18 @@ impl NativeDirectory {
     pub(super) fn before_spawn(&self) -> io::Result<()> {
         // This marker precedes process creation. Cleanup conservatively keeps
         // the directory if the launcher dies before it records the game PID.
-        fs::File::create_new(self.directory.path().join(SPAWN_INTENT))?;
+        self.directory
+            .directory()
+            .create_private_file(OsStr::new(SPAWN_INTENT))?;
         Ok(())
     }
 
     pub(super) fn record_child(&self, pid: u32) {
-        if let Err(error) = crate::utils::files::atomic_write(
-            &self.directory.path().join(CHILD_PID),
-            pid.to_string().as_bytes(),
-        ) {
+        if let Err(error) = self
+            .directory
+            .directory()
+            .write_bytes(OsStr::new(CHILD_PID), pid.to_string().as_bytes())
+        {
             tracing::warn!(%pid, %error, "could not record native directory owner");
         }
     }
@@ -62,16 +61,9 @@ impl NativeDirectory {
         for pin in &self.runtime_pins {
             pin.finish(process_exited);
         }
-        if let Ok(directory) = Arc::try_unwrap(self.directory) {
-            if process_exited {
-                let path = directory.path().to_owned();
-                if let Err(error) = directory.close() {
-                    tracing::warn!(path = %path.display(), %error, "could not remove native libraries");
-                }
-            } else {
-                let path = directory.keep();
-                tracing::warn!(path = %path.display(), "kept native libraries because process exit was unconfirmed");
-            }
+        if !process_exited {
+            self.directory.retain();
+            tracing::warn!(path = %self.directory.directory().path().display(), "kept native libraries because process exit was unconfirmed");
         }
     }
 
@@ -96,21 +88,24 @@ pub(crate) async fn sweep_stale(instance_root: PathBuf) {
 }
 
 fn sweep(instance_root: &Path, process_alive: impl Fn(u32) -> bool) -> io::Result<()> {
-    let instances = match fs::read_dir(instance_root) {
-        Ok(instances) => instances,
+    let root = match instance_root
+        .canonicalize()
+        .and_then(|root| Directory::open(&root))
+    {
+        Ok(root) => root,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    for instance in instances {
+    for instance in fs::read_dir(root.path())? {
         let instance = instance?;
         if !instance.file_type()?.is_dir() {
             continue;
         }
-        let natives = instance.path().join(".sonata-natives");
-        if !fs::symlink_metadata(&natives).is_ok_and(|metadata| metadata.is_dir()) {
+        let relative = PathBuf::from(instance.file_name()).join(".sonata-natives");
+        let Ok(Some(natives)) = root.open_optional(&relative) else {
             continue;
-        }
-        for directory in fs::read_dir(natives)? {
+        };
+        for directory in fs::read_dir(natives.path())? {
             let directory = directory?;
             if !directory.file_type()?.is_dir()
                 || !directory.file_name().to_string_lossy().starts_with(PREFIX)
@@ -118,10 +113,13 @@ fn sweep(instance_root: &Path, process_alive: impl Fn(u32) -> bool) -> io::Resul
                 continue;
             }
             let path = directory.path();
-            if !can_remove(&path, &process_alive) {
+            let Ok(child) = natives.open_relative(Path::new(&directory.file_name())) else {
+                continue;
+            };
+            if !can_remove(&child, &process_alive) {
                 continue;
             }
-            if let Err(error) = fs::remove_dir_all(&path) {
+            if let Err(error) = natives.remove_child_tree(child) {
                 if error.kind() != io::ErrorKind::NotFound {
                     tracing::warn!(path = %path.display(), %error, "could not remove stale native directory");
                 }
@@ -131,19 +129,23 @@ fn sweep(instance_root: &Path, process_alive: impl Fn(u32) -> bool) -> io::Resul
     Ok(())
 }
 
-fn can_remove(directory: &Path, process_alive: &impl Fn(u32) -> bool) -> bool {
-    let Some(owner) = read_pid(&directory.join(OWNER_PID)) else {
+fn can_remove(directory: &Directory, process_alive: &impl Fn(u32) -> bool) -> bool {
+    let read_pid = |name: &str| {
+        directory
+            .open_file(OsStr::new(name))
+            .ok()
+            .and_then(read_owner_from)
+    };
+    let Some(owner) = read_pid(OWNER_PID) else {
         return false;
     };
     if process_alive(owner) {
         return false;
     }
 
-    match fs::symlink_metadata(directory.join(SPAWN_INTENT)) {
+    match directory.open_file(OsStr::new(SPAWN_INTENT)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => true,
-        Ok(marker) if marker.is_file() => {
-            read_pid(&directory.join(CHILD_PID)).is_some_and(|pid| !process_alive(pid))
-        }
+        Ok(_) => read_pid(CHILD_PID).is_some_and(|pid| !process_alive(pid)),
         _ => false,
     }
 }
@@ -175,6 +177,22 @@ impl Natives {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unconfirmed_exit_retains_scratch_after_the_last_clone_is_dropped() {
+        let scope = tempfile::tempdir().unwrap();
+        let directory = NativeDirectory::create(scope.path()).unwrap();
+        let duplicate = directory.clone();
+        let extracted = directory.as_ref().to_owned();
+        fs::write(extracted.join("library"), b"native bytes").unwrap();
+        directory.finish(false);
+        drop(duplicate);
+
+        assert_eq!(
+            fs::read(extracted.join("library")).unwrap(),
+            b"native bytes"
+        );
+    }
 
     #[test]
     fn stale_sweep_keeps_live_launches_and_unverified_ownership() {

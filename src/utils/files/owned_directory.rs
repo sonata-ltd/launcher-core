@@ -5,16 +5,21 @@ use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
-use super::directory::Directory;
+use super::{directory::Directory, identity::FileIdentity};
 
 const OWNER: &str = ".sonata-owner";
 
 pub(crate) struct OwnedDirectory {
     path: PathBuf,
+    parent: Arc<Directory>,
     directory: Option<Arc<Directory>>,
+    retained: AtomicBool,
 }
 
 impl OwnedDirectory {
@@ -29,7 +34,9 @@ impl OwnedDirectory {
         let directory = root.create_private_child(OsStr::new(&name))?;
         let owned = Self {
             path: directory.path().to_owned(),
+            parent: root.clone(),
             directory: Some(directory),
+            retained: AtomicBool::new(false),
         };
         // Publish the complete PID atomically: a concurrent sweep must not see
         // a numeric prefix of a still-being-written PID as a different dead PID.
@@ -55,27 +62,28 @@ impl OwnedDirectory {
             .as_ref()
             .expect("owned directory stays open until drop")
     }
+
+    pub(crate) fn retain(&self) {
+        self.retained.store(true, Ordering::Release);
+    }
 }
 
 impl Drop for OwnedDirectory {
     fn drop(&mut self) {
+        if self.retained.load(Ordering::Acquire) {
+            return;
+        }
         let Some(directory) = self.directory.take() else {
             return;
         };
-        if directory.verify_location().is_err() {
-            return;
-        }
-        // Windows has to release its directory handle before deleting it.
-        drop(directory);
-        if let Err(error) = fs::remove_dir_all(&self.path) {
+        if let Err(error) = self.parent.remove_marked_tree(directory, OsStr::new(OWNER)) {
             tracing::debug!(path = %self.path.display(), %error, "could not remove scratch directory");
         }
     }
 }
 
-/// Only direct children of a known scratch root are inspected. Symlink roots,
-/// children and owner markers are not followed. Assumes stable ancestors, like
-/// the other filesystem helpers; this is not a sandbox against external writers.
+/// Only direct children of a known scratch root are inspected. Linked roots,
+/// children and owner markers are excluded from ownership selection.
 pub(crate) fn sweep(root: &Path, prefix: &str) -> io::Result<usize> {
     sweep_with(root, prefix, crate::utils::process::may_be_alive)
 }
@@ -87,8 +95,9 @@ fn sweep_with(root: &Path, prefix: &str, process_alive: impl Fn(u32) -> bool) ->
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error),
     }
+    let root = Directory::open(root)?;
     let mut removed = 0;
-    for entry in fs::read_dir(root)? {
+    for entry in fs::read_dir(root.path())? {
         let entry = entry?;
         if !entry.file_type()?.is_dir()
             || !entry
@@ -99,13 +108,21 @@ fn sweep_with(root: &Path, prefix: &str, process_alive: impl Fn(u32) -> bool) ->
             continue;
         }
         let path = entry.path();
-        if !crate::utils::process::read_owner(&path.join(OWNER))
-            .is_some_and(|pid| !process_alive(pid))
-        {
-            continue;
-        }
-        match fs::remove_dir_all(&path) {
-            Ok(()) => removed += 1,
+        let result = (|| -> io::Result<bool> {
+            let directory = root.open_relative(Path::new(&entry.file_name()))?;
+            let marker = directory.open_file(OsStr::new(OWNER))?;
+            if !crate::utils::process::read_owner_from(&marker)
+                .is_some_and(|pid| !process_alive(pid))
+            {
+                return Ok(false);
+            }
+            directory.verify_file(OsStr::new(OWNER), FileIdentity::from_handle(&marker)?)?;
+            drop(marker);
+            root.remove_marked_tree(directory, OsStr::new(OWNER))?;
+            Ok(true)
+        })();
+        match result {
+            Ok(owned) => removed += usize::from(owned),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "could not remove abandoned scratch directory")
@@ -158,6 +175,36 @@ mod tests {
 
         assert_eq!(fs::read(path.join("keep")).unwrap(), b"user bytes");
         assert!(moved.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_scratch_cleanup_preserves_a_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("scratch-abandoned");
+        let previous = root.path().join("previous");
+        fs::create_dir(&scratch).unwrap();
+        fs::write(scratch.join(OWNER), b"41").unwrap();
+        fs::write(scratch.join("data"), b"abandoned output").unwrap();
+
+        let removed = sweep_with(root.path(), "scratch-", |pid| {
+            assert_eq!(pid, 41);
+            fs::rename(&scratch, &previous).unwrap();
+            fs::create_dir(&scratch).unwrap();
+            fs::write(scratch.join("keep"), b"preserve these bytes").unwrap();
+            false
+        })
+        .unwrap();
+
+        assert_eq!(
+            fs::read(scratch.join("keep")).unwrap(),
+            b"preserve these bytes"
+        );
+        assert_eq!(
+            fs::read(previous.join("data")).unwrap(),
+            b"abandoned output"
+        );
+        assert_eq!(removed, 0);
     }
 
     #[test]

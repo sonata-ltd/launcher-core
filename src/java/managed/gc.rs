@@ -6,7 +6,7 @@ use super::{
     retention, storage, Result,
 };
 use crate::utils::{
-    files,
+    files::{self, directory::Directory},
     object_store::{
         catalog::{read_regular, RootCatalog},
         collection::{Collection, DeleteIntent, Roots},
@@ -16,8 +16,10 @@ use crate::utils::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 use uuid::Uuid;
@@ -61,7 +63,8 @@ async fn collect_homes(root: &Path, age: Duration) -> Result<usize> {
             .parent()
             .ok_or_else(|| storage("missing Java root"))?;
         layout(root)?;
-        collect_home_files(root, &rooted, &owners, age)
+        let base = Directory::open(root).map_err(storage)?;
+        collect_home_files(&base, managed.directory(), &rooted, &owners, age)
     })
     .await;
     snapshot.close().await;
@@ -232,11 +235,17 @@ fn pending(root: &Path, owners: &HashSet<String>) -> Result<HashMap<Uuid, HomeOw
 }
 
 fn collect_home_files(
-    root: &Path,
+    base: &Arc<Directory>,
+    control: &Arc<Directory>,
     rooted: &HashSet<PathBuf>,
     owners: &HashSet<String>,
     age: Duration,
 ) -> Result<usize> {
+    let root = base.path();
+    base.verify_location().map_err(storage)?;
+    control.verify_location().map_err(storage)?;
+    let queue_relative = Path::new(QUEUE).strip_prefix(".managed").map_err(storage)?;
+    let mut queue_directory = control.open_optional(queue_relative).map_err(storage)?;
     let mut pending = pending(root, owners)?;
     let managed = files::child(root, Path::new("managed")).map_err(storage)?;
     if directory(&managed)? {
@@ -255,94 +264,153 @@ fn collect_home_files(
                         return Err(storage("Java home replaced during deletion"));
                     }
                 } else {
-                    let queue = files::child(root, Path::new(QUEUE)).map_err(storage)?;
-                    fs::create_dir_all(&queue).map_err(storage)?;
-                    files::atomic_write(
-                        &queue.join(format!("{}.json", owner.operation)),
-                        &serde_json::to_vec(&Intent {
-                            version: 1,
-                            owner: owner.clone(),
-                        })
-                        .map_err(storage)?,
-                    )
-                    .map_err(storage)?;
+                    if queue_directory.is_none() {
+                        queue_directory =
+                            Some(control.create_relative(queue_relative).map_err(storage)?);
+                    }
+                    let queue = queue_directory
+                        .as_ref()
+                        .ok_or_else(|| storage("missing Java quarantine"))?;
+                    queue
+                        .write_bytes(
+                            OsStr::new(&format!("{}.json", owner.operation)),
+                            &serde_json::to_vec(&Intent {
+                                version: 1,
+                                owner: owner.clone(),
+                            })
+                            .map_err(storage)?,
+                        )
+                        .map_err(storage)?;
                     checkpoint(root, "home-intent");
                     pending.insert(owner.operation, owner);
                 }
             }
         }
     }
-    let queue = files::child(root, Path::new(QUEUE)).map_err(storage)?;
     let mut removed = 0;
+    let Some(queue) = queue_directory else {
+        return Ok(0);
+    };
     for owner in pending.into_values() {
-        let original = files::child(root, &owner.generation()).map_err(storage)?;
-        let quarantine =
-            files::child(&queue, Path::new(&owner.operation.to_string())).map_err(storage)?;
-        let intent = files::child(&queue, Path::new(&format!("{}.json", owner.operation)))
-            .map_err(storage)?;
+        let relative = owner.generation();
+        let relative_parent = relative
+            .parent()
+            .ok_or_else(|| storage("missing Java generation parent"))?;
+        let generation = owner.operation.to_string();
+        let name = OsStr::new(&generation);
+        let original_parent = base.open_optional(relative_parent).map_err(storage)?;
+        let original = match &original_parent {
+            Some(parent) => parent.open_optional(Path::new(name)).map_err(storage)?,
+            None => None,
+        };
+        let mut quarantine = queue.open_optional(Path::new(name)).map_err(storage)?;
+        let intent = format!("{}.json", owner.operation);
         if rooted.contains(&owner.generation()) {
-            if directory(&quarantine)? {
-                if directory(&original)? || HomeOwner::read(&quarantine)? != owner {
+            if let Some(quarantine) = quarantine {
+                if original.is_some() || HomeOwner::read(quarantine.path())? != owner {
                     return Err(storage("rooted Java home conflicts with quarantine"));
                 }
-                old_tree(&quarantine, Duration::ZERO)?;
-                fs::create_dir_all(original.parent().unwrap()).map_err(storage)?;
-                fs::rename(quarantine, original).map_err(storage)?;
+                old_tree(quarantine.path(), Duration::ZERO)?;
+                let parent = match original_parent {
+                    Some(parent) => parent,
+                    None => base.create_relative(relative_parent).map_err(storage)?,
+                };
+                queue
+                    .move_child_to(quarantine, &parent, name)
+                    .map_err(storage)?;
             }
-            fs::remove_file(intent).map_err(storage)?;
+            clear_intent(&queue, OsStr::new(&intent), &owner)?;
             continue;
         }
-        if directory(&original)? {
-            if directory(&quarantine)? || HomeOwner::read(&original)? != owner {
+        if let Some(original) = original {
+            if quarantine.is_some() || HomeOwner::read(original.path())? != owner {
                 return Err(storage("Java home identity changed before quarantine"));
             }
-            if !eligible(&original, &owner, owners, age)? {
+            if !eligible(original.path(), &owner, owners, age)? {
                 continue;
             }
-            fs::rename(&original, &quarantine).map_err(storage)?;
+            let parent =
+                original_parent.ok_or_else(|| storage("missing Java generation parent"))?;
+            quarantine = Some(
+                parent
+                    .move_child_to(original, &queue, name)
+                    .map_err(storage)?,
+            );
             checkpoint(root, "home-rename");
         }
-        if directory(&quarantine)? {
-            if quarantine.join(HOME_MARKER).try_exists().map_err(storage)? {
-                if HomeOwner::read(&quarantine)? != owner {
+        if let Some(quarantine) = quarantine {
+            quarantine.verify_location().map_err(storage)?;
+            if quarantine
+                .path()
+                .join(HOME_MARKER)
+                .try_exists()
+                .map_err(storage)?
+            {
+                if HomeOwner::read(quarantine.path())? != owner {
                     return Err(storage("quarantined Java home identity changed"));
                 }
-                if !eligible(&quarantine, &owner, owners, age)? {
+                if !eligible(quarantine.path(), &owner, owners, age)? {
                     continue;
                 }
-                for entry in fs::read_dir(&quarantine).map_err(storage)? {
+                for entry in fs::read_dir(quarantine.path()).map_err(storage)? {
                     let entry = entry.map_err(storage)?;
                     if entry.file_name() == HOME_MARKER {
                         continue;
                     }
                     let kind = entry.file_type().map_err(storage)?;
+                    let name = entry.file_name();
                     if kind.is_dir() {
-                        fs::remove_dir_all(entry.path()).map_err(storage)?;
+                        let child = quarantine
+                            .open_relative(Path::new(&name))
+                            .map_err(storage)?;
+                        quarantine.remove_child_tree(child).map_err(storage)?;
                     } else if kind.is_file() {
-                        fs::remove_file(entry.path()).map_err(storage)?;
+                        quarantine.remove_regular(&name).map_err(storage)?;
                     } else {
                         return Err(storage("unknown Java quarantine output"));
                     }
                 }
                 checkpoint(root, "home-outputs");
-                fs::remove_file(quarantine.join(HOME_MARKER)).map_err(storage)?;
+                quarantine
+                    .remove_regular(OsStr::new(HOME_MARKER))
+                    .map_err(storage)?;
                 checkpoint(root, "home-metadata");
             } else {
-                if fs::read_dir(&quarantine).map_err(storage)?.next().is_some() {
+                if fs::read_dir(quarantine.path())
+                    .map_err(storage)?
+                    .next()
+                    .is_some()
+                {
                     return Err(storage("unowned partial Java quarantine"));
                 }
-                if !eligible(&quarantine, &owner, owners, age)? {
+                if !eligible(quarantine.path(), &owner, owners, age)? {
                     continue;
                 }
             }
-            fs::remove_dir(&quarantine).map_err(storage)?;
+            queue.remove_empty_child(quarantine).map_err(storage)?;
             removed += 1;
             checkpoint(root, "home-removed");
         }
-        fs::remove_file(intent).map_err(storage)?;
+        clear_intent(&queue, OsStr::new(&intent), &owner)?;
         checkpoint(root, "home-cleaned");
     }
     Ok(removed)
+}
+
+fn clear_intent(queue: &Directory, name: &OsStr, owner: &HomeOwner) -> Result<()> {
+    use crate::utils::object_store::catalog::read_open_regular;
+    use std::io;
+
+    queue
+        .remove_verified_file(name, |file| {
+            let intent: Intent = serde_json::from_slice(&read_open_regular(file, 4096)?)
+                .map_err(io::Error::other)?;
+            if intent.version != 1 || &intent.owner != owner {
+                return Err(io::Error::other("Java home deletion intent changed"));
+            }
+            Ok(())
+        })
+        .map_err(storage)
 }
 
 /// Domain-wide layout preflight; immutable objects are still freshly verified

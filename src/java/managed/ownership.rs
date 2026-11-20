@@ -2,15 +2,18 @@
 //! Old/unknown ownership is preserved; PID reuse conservatively defers recovery.
 use super::{storage, ManagedJavaError, Result};
 use crate::utils::{
-    files::{self, directory::Directory},
-    object_store::{catalog::read_regular, ObjectStore, StoreAccess, StoreMaintenance},
+    files::{self, directory::Directory, identity::FileIdentity},
+    object_store::{
+        catalog::{read_open_regular, read_regular},
+        ObjectStore, StoreAccess, StoreMaintenance,
+    },
     process,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     ffi::OsStr,
-    fs, io,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -189,14 +192,6 @@ pub(super) fn operation(root: &Path, operation: Uuid) -> Result<StoreMaintenance
     })
 }
 
-fn staging(root: &Path, operation: Uuid) -> Result<PathBuf> {
-    files::child(
-        root,
-        &PathBuf::from(".managed/staging").join(operation.to_string()),
-    )
-    .map_err(storage)
-}
-
 pub(super) fn create_staging(
     root: &Path,
     operation: Uuid,
@@ -248,20 +243,29 @@ pub(super) fn cleanup_staging(
     }) {
         return Err(storage("live or unknown managed staging owner"));
     }
-    let path = staging(root, operation)?;
-    match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Err(storage("managed staging is not regular")),
+    let opened = (|| -> io::Result<_> {
+        let base = Directory::open(&root.canonicalize()?)?;
+        let parent = base.open_relative(Path::new(".managed/staging"))?;
+        let staging = parent.open_relative(Path::new(&operation.to_string()))?;
+        Ok((parent, staging))
+    })();
+    let (parent, staging) = match opened {
+        Ok(opened) => opened,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(storage(error)),
-    }
-    let actual: Owner =
-        serde_json::from_slice(&read_regular(&path.join(MARKER), 4096).map_err(storage)?)
-            .map_err(storage)?;
+    };
+    let name = OsStr::new(MARKER);
+    let marker = staging.open_file(name).map_err(storage)?;
+    let actual: Owner = serde_json::from_slice(&read_open_regular(&marker, 4096).map_err(storage)?)
+        .map_err(storage)?;
     if actual != *owner {
         return Err(storage("managed staging owner does not match operation"));
     }
     #[cfg(test)]
     super::tests::ownership_checkpoint(root, "cleanup");
-    fs::remove_dir_all(path).map_err(storage)
+    staging
+        .verify_file(name, FileIdentity::from_handle(&marker).map_err(storage)?)
+        .map_err(storage)?;
+    drop(marker);
+    parent.remove_marked_tree(staging, name).map_err(storage)
 }

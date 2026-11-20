@@ -1,10 +1,14 @@
 use super::output::{OutputCapture, OutputTail};
 use crate::data::registry::operation::message::output::OutputLine;
 use crate::modloader::error::{ModloaderError, Result};
-use crate::utils::{cancellation::Cancellation, files};
+use crate::utils::{
+    cancellation::Cancellation,
+    files::{self, directory::Directory},
+};
 use async_std::{process::Command, task};
+#[cfg(all(test, unix))]
+use std::fs;
 use std::{
-    fs,
     path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
@@ -86,12 +90,26 @@ async fn run_with_log_limit(
         return Ok(());
     }
 
-    fs::create_dir_all(&command.cwd)?;
+    let cwd = Directory::ensure_path(&command.cwd)?;
+    let log = command.log.strip_prefix(&command.cwd).map_err(|_| {
+        ModloaderError::Invalid("processor log is outside the work directory".into())
+    })?;
+    let log_directory = cwd.create_entry_parent(log)?;
+    let log_name = log
+        .file_name()
+        .ok_or_else(|| ModloaderError::Invalid("processor log has no name".into()))?
+        .to_owned();
 
-    let (mut capture, stdout, stderr) = OutputCapture::open(&command.log, log_limit)?;
+    let (mut capture, stdout, stderr) =
+        OutputCapture::open_in(&log_directory, &log_name, log_limit)?;
 
-    let log_path = command.log.clone();
-    let mut tail = match task::spawn_blocking(move || OutputTail::open(&log_path)).await {
+    let mut tail = match task::spawn_blocking(move || {
+        log_directory
+            .open_file(&log_name)
+            .map(OutputTail::from_file)
+    })
+    .await
+    {
         Ok(tail) => Some(tail),
         Err(error) => {
             tracing::warn!(%error, "cannot read processor output");
@@ -117,7 +135,7 @@ async fn run_with_log_limit(
         .arg(classpath)
         .arg(&command.main_class)
         .args(&command.args)
-        .current_dir(&command.cwd)
+        .current_dir(cwd.path())
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)

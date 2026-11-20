@@ -111,8 +111,11 @@ impl InstallWorkspace {
         let dir_creation_result = (|| {
             // Ownership is visible before any useful runtime outputs.
             generation_directory.verify_location()?;
-            crate::utils::process::write_owner(&generation_directory.path().join(".sonata-owner"))?;
-            owner.write(generation_directory.path())?;
+            crate::utils::process::write_owner_in(
+                &generation_directory,
+                OsStr::new(".sonata-owner"),
+            )?;
+            owner.write_in(&generation_directory)?;
             generation_directory.create_private_child(OsStr::new("maven"))?;
             generation_directory.create_private_child(OsStr::new("work"))?;
 
@@ -138,7 +141,14 @@ impl InstallWorkspace {
         if !self.cleanup_allowed()? {
             return Ok(());
         }
-        match async_std::fs::remove_dir_all(&self.generation_root).await {
+        let result = self.open_generation();
+        let result = match result {
+            Ok((parent, generation)) => {
+                async_std::task::spawn_blocking(move || parent.remove_child_tree(generation)).await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
@@ -155,7 +165,17 @@ impl InstallWorkspace {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         }
-        match async_std::fs::remove_dir_all(&self.work_dir).await {
+        let result = self.open_generation().and_then(|(_, generation)| {
+            let work = generation.open_relative(Path::new("work"))?;
+            Ok((generation, work))
+        });
+        let result = match result {
+            Ok((generation, work)) => {
+                async_std::task::spawn_blocking(move || generation.remove_child_tree(work)).await
+            }
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
@@ -188,6 +208,11 @@ impl InstallWorkspace {
     }
 
     pub(crate) fn open_maven_dir(&self) -> Result<Arc<Directory>> {
+        let (_, generation) = self.open_generation()?;
+        Ok(generation.open_relative(Path::new("maven"))?)
+    }
+
+    fn open_generation(&self) -> std::io::Result<(Arc<Directory>, Arc<Directory>)> {
         let generation = self
             .relative_maven_dir
             .parent()
@@ -195,11 +220,18 @@ impl InstallWorkspace {
             .map_err(std::io::Error::from)?;
         let root = self._admission.directory();
         root.verify_location()?;
-        let generation = root.open_relative(generation)?;
+        let relative_parent = generation
+            .parent()
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let name = generation
+            .file_name()
+            .ok_or(std::io::ErrorKind::InvalidInput)?;
+        let parent = root.open_relative(relative_parent)?;
+        let generation = parent.open_relative(Path::new(name))?;
         if generation.identity()? != self.generation_identity {
-            return Err(std::io::Error::other("installation workspace changed").into());
+            return Err(std::io::Error::other("installation workspace changed"));
         }
-        Ok(generation.open_relative(Path::new("maven"))?)
+        Ok((parent, generation))
     }
 
     pub fn work_dir(&self) -> &Path {
