@@ -11,6 +11,7 @@ const OWNER: &str = ".sonata-owner";
 const STARTING: &str = ".sonata-starting";
 const CHILD: &str = ".sonata-child";
 const EXITED: &str = ".sonata-exited";
+const NO_CHILD: &str = ".sonata-no-child";
 
 #[derive(Clone)]
 pub(crate) struct ProcessPin {
@@ -34,6 +35,13 @@ impl ProcessPin {
         marker_new(&self.directory.join(STARTING), b"1")
     }
 
+    /// Only for a failed preparation that never attempted process creation.
+    pub(crate) fn abort_before_spawn(&self) {
+        if let Err(error) = marker_new(&self.directory.join(NO_CHILD), b"1") {
+            tracing::warn!(%error, "could not acknowledge that no child was created");
+        }
+    }
+
     pub(crate) fn record_child(&self, pid: u32) {
         if pid == 0 {
             return;
@@ -50,6 +58,42 @@ impl ProcessPin {
                 tracing::warn!(%error, "could not acknowledge process pin completion");
             }
         }
+    }
+}
+
+pub(crate) fn prepare_spawn(executable: &Path, pins: &[&ProcessPin]) -> io::Result<()> {
+    let prepared = check_executable(executable)
+        .and_then(|()| pins.iter().try_for_each(|pin| pin.before_spawn()));
+    if prepared.is_err() {
+        for pin in pins {
+            pin.abort_before_spawn();
+        }
+    }
+    prepared
+}
+
+fn check_executable(executable: &Path) -> io::Result<()> {
+    if !executable.is_absolute() {
+        // PATH and cwd resolution belong to the OS process adapter.
+        return Ok(());
+    }
+    let metadata = fs::metadata(executable);
+    #[cfg(windows)]
+    let metadata = match metadata {
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound && executable.extension().is_none() =>
+        {
+            fs::metadata(executable.with_extension("exe"))
+        }
+        other => other,
+    };
+    match metadata {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(error),
+        Ok(metadata) if metadata.is_dir() => Err(io::Error::new(
+            io::ErrorKind::IsADirectory,
+            "process executable is a directory",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -78,7 +122,7 @@ fn released(directory: &Path, alive: &impl Fn(u32) -> bool) -> io::Result<bool> 
         let entry = entry?;
         let name = entry.file_name();
         if !entry.file_type()?.is_file()
-            || ![OWNER, STARTING, CHILD, EXITED]
+            || ![OWNER, STARTING, CHILD, EXITED, NO_CHILD]
                 .iter()
                 .any(|known| name == *known)
         {
@@ -102,7 +146,11 @@ fn released(directory: &Path, alive: &impl Fn(u32) -> bool) -> io::Result<bool> 
         Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    if marker(&directory.join(EXITED))? {
+    let exited = marker(&directory.join(EXITED))?;
+    if marker(&directory.join(NO_CHILD))? {
+        return Ok(child.is_none() && !exited);
+    }
+    if exited {
         return Ok(true);
     }
     if alive(owner) {
@@ -158,6 +206,23 @@ mod tests {
         assert!(!allows_cleanup_with(root.path(), &|_| false).unwrap());
         pin.finish(true);
         assert!(allows_cleanup(root.path()).unwrap());
+    }
+
+    #[test]
+    fn a_later_marker_failure_releases_earlier_pins_and_retains_unknown_markers() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_pin = ProcessPin::create(first.path()).unwrap();
+        let second_pin = ProcessPin::create(second.path()).unwrap();
+        fs::write(second_pin.directory.join(STARTING), b"unknown").unwrap();
+        let executable = std::env::current_exe().unwrap();
+        assert!(prepare_spawn(&executable, &[&first_pin, &second_pin]).is_err());
+        assert!(allows_cleanup(first.path()).unwrap());
+        assert!(!allows_cleanup(second.path()).unwrap_or(false));
+        assert_eq!(
+            fs::read(second_pin.directory.join(STARTING)).unwrap(),
+            b"unknown"
+        );
     }
 
     #[test]

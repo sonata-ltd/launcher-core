@@ -1,4 +1,54 @@
 use super::*;
+
+#[test]
+fn output_capture_child_fixture() {
+    if std::env::var_os("SONATA_TEST_FORGE_OUTPUT_CAPTURE").is_some() {
+        let bytes = [b'x'; 16 * 1024];
+        std::io::stdout().write_all(&bytes).unwrap();
+        std::io::stderr().write_all(&bytes).unwrap();
+    }
+}
+
+#[test]
+fn the_platform_pipe_finishes_and_keeps_one_truncation_notice() {
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("processor.log");
+    let (mut capture, stdout, stderr) = OutputCapture::open(&path, 128).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "modloader::forge::output::tests::output_capture_child_fixture",
+            "--nocapture",
+        ])
+        .env("SONATA_TEST_FORGE_OUTPUT_CAPTURE", "1")
+        .current_dir(temp.path())
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        capture.drain(64 * 1024).unwrap();
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("capture child did not finish");
+        }
+        std::thread::yield_now();
+    }
+    capture.drain(64 * 1024).unwrap();
+    let body = std::fs::read_to_string(path).unwrap();
+    assert_eq!(body.len(), 128);
+    assert_eq!(body.matches("[processor log limit reached]").count(), 1);
+}
 use std::io::Write;
 
 fn texts(lines: &[OutputLine]) -> Vec<&str> {

@@ -1,10 +1,10 @@
-use super::output::OutputTail;
+use super::output::{OutputCapture, OutputTail};
 use crate::data::registry::operation::message::output::OutputLine;
 use crate::modloader::error::{ModloaderError, Result};
 use crate::utils::{cancellation::Cancellation, files};
 use async_std::{process::Command, task};
 use std::{
-    fs::{self, File},
+    fs,
     path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
@@ -62,8 +62,18 @@ pub async fn run(
 pub(crate) async fn run_retained(
     command: ProcessorCommand,
     cancel: &Cancellation,
+    on_output: impl FnMut(Vec<OutputLine>) + Send,
+    java_use: Option<&crate::java::managed::process::JavaUse>,
+) -> Result<()> {
+    run_with_log_limit(command, cancel, on_output, java_use, 32 * 1024 * 1024).await
+}
+
+async fn run_with_log_limit(
+    command: ProcessorCommand,
+    cancel: &Cancellation,
     mut on_output: impl FnMut(Vec<OutputLine>) + Send,
     java_use: Option<&crate::java::managed::process::JavaUse>,
+    log_limit: u64,
 ) -> Result<()> {
     if cancel.is_cancelled() {
         return Err(ModloaderError::Cancelled);
@@ -78,8 +88,7 @@ pub(crate) async fn run_retained(
 
     fs::create_dir_all(&command.cwd)?;
 
-    let stdout = File::create(&command.log)?;
-    let stderr = stdout.try_clone()?;
+    let (mut capture, stdout, stderr) = OutputCapture::open(&command.log, log_limit)?;
 
     let log_path = command.log.clone();
     let mut tail = match task::spawn_blocking(move || OutputTail::open(&log_path)).await {
@@ -94,11 +103,15 @@ pub(crate) async fn run_retained(
         .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
 
     let pin = crate::utils::process_pin::ProcessPin::create(&command.retention_root)?;
-    let java_pin = java_use.map(|java_use| java_use.child_pin()).transpose()?;
-    pin.before_spawn()?;
-    if let Some(pin) = &java_pin {
-        pin.before_spawn()?;
-    }
+    let java_pin = match java_use.map(|java_use| java_use.child_pin()).transpose() {
+        Ok(pin) => pin,
+        Err(error) => {
+            pin.abort_before_spawn();
+            return Err(error.into());
+        }
+    };
+    let pins: Vec<_> = std::iter::once(&pin).chain(java_pin.iter()).collect();
+    crate::utils::process_pin::prepare_spawn(std::path::Path::new(&command.java), &pins)?;
     let child = Command::new(&command.java)
         .arg("-cp")
         .arg(classpath)
@@ -106,8 +119,8 @@ pub(crate) async fn run_retained(
         .args(&command.args)
         .current_dir(&command.cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
+        .stdout(stdout)
+        .stderr(stderr)
         .kill_on_drop(true)
         .spawn()?;
     pin.record_child(child.id());
@@ -121,6 +134,7 @@ pub(crate) async fn run_retained(
         cancel,
         &mut on_output,
         &mut tail,
+        &mut capture,
         &mut process_exited,
     )
     .await;
@@ -137,6 +151,7 @@ async fn run_child(
     cancel: &Cancellation,
     on_output: &mut (impl FnMut(Vec<OutputLine>) + Send),
     tail: &mut Option<OutputTail>,
+    capture: &mut OutputCapture,
     process_exited: &mut bool,
 ) -> Result<()> {
     let started = Instant::now();
@@ -144,10 +159,19 @@ async fn run_child(
     loop {
         let status = child.try_status();
         let finished = !matches!(&status, Ok(None));
+        *process_exited = matches!(&status, Ok(Some(_)));
+        let drained = match capture.drain(if finished { 1024 * 1024 } else { 64 * 1024 }) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if !*process_exited && child.kill().is_ok() {
+                    *process_exited = child.status().await.is_ok();
+                }
+                return Err(error.into());
+            }
+        };
         poll_output(tail, finished, on_output).await;
 
         if let Some(status) = status? {
-            *process_exited = true;
             if !status.success() {
                 return Err(ModloaderError::Processor(format!(
                     "exit {status}; log {}",
@@ -164,6 +188,9 @@ async fn run_child(
             if killed.is_ok() {
                 *process_exited = child.status().await.is_ok();
             }
+            if let Err(error) = capture.drain(1024 * 1024) {
+                tracing::warn!(%error, "could not drain processor output after stop");
+            }
             poll_output(tail, true, on_output).await;
             killed?;
 
@@ -174,7 +201,11 @@ async fn run_child(
             });
         }
 
-        let _ = cancel.run(task::sleep(Duration::from_millis(100))).await;
+        if drained > 0 {
+            task::yield_now().await;
+        } else {
+            let _ = cancel.run(task::sleep(Duration::from_millis(10))).await;
+        }
     }
 
     let outputs = command.outputs;

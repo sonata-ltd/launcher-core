@@ -49,6 +49,39 @@ async fn failed_process_flushes_diagnostics_before_returning_error() {
 }
 
 #[async_std::test]
+async fn processor_log_limit_drains_output_without_blocking_child_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = command(
+        dir.path(),
+        "printf 'first\\n'; printf '%0102400d\\n' 0; printf 'last' >&2",
+    );
+    let log = command.log.clone();
+    let mut updates = Vec::new();
+    async_std::future::timeout(
+        Duration::from_secs(10),
+        run_with_log_limit(
+            command,
+            &Cancellation::new(),
+            |lines| updates.push(lines),
+            None,
+            128,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let bytes = fs::read(&log).unwrap();
+    assert!(bytes.len() <= 128, "{} bytes", bytes.len());
+    assert!(bytes.starts_with(b"first\n"));
+    assert!(updates
+        .last()
+        .unwrap()
+        .iter()
+        .any(|line| line.text.contains("log limit reached")));
+    assert!(crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
+}
+
+#[async_std::test]
 async fn cancellation_keeps_output_already_produced() {
     let dir = tempfile::tempdir().unwrap();
     // The shell itself stays alive: no descendant can retain the log after kill.

@@ -451,28 +451,41 @@ impl InstanceService {
                 .map_err(crate::instance::launch::LaunchError::Retention)?;
             let runtime_pin = crate::utils::process_pin::ProcessPin::create(self.paths.libraries())
                 .map_err(crate::instance::launch::LaunchError::Retention)?;
-            let mut command = match instance::init::storage::load(&self.db, id).await? {
-                Some(profile) => {
-                    resolved::prepare(&rec, &settings, &java, &self.paths, profile).await?
+            let prepared = async {
+                match instance::init::storage::load(&self.db, id).await? {
+                    Some(profile) => {
+                        resolved::prepare(&rec, &settings, &java, &self.paths, profile).await
+                    }
+                    None if rec.loader == LoaderKind::Vanilla => {
+                        prepare::prepare_command(
+                            &rec,
+                            &settings,
+                            &java,
+                            &self.paths,
+                            self.db.clone(),
+                        )
+                        .await
+                    }
+                    None => Err(InstanceError::NotInstalled(id)),
                 }
-                None if rec.loader == LoaderKind::Vanilla => {
-                    prepare::prepare_command(
-                        &rec,
-                        &settings,
-                        &java,
-                        &self.paths,
-                        Arc::clone(&self.db),
-                    )
-                    .await?
+            }
+            .await;
+            let mut command = match prepared {
+                Ok(command) => command,
+                Err(error) => {
+                    runtime_pin.abort_before_spawn();
+                    return Err(error);
                 }
-                None => return Err(InstanceError::NotInstalled(id)),
+            };
+            let java_pin = match java_use.child_pin() {
+                Ok(pin) => pin,
+                Err(error) => {
+                    runtime_pin.abort_before_spawn();
+                    return Err(crate::instance::launch::LaunchError::Retention(error).into());
+                }
             };
             command.retain_runtime(runtime_pin);
-            command.retain_runtime(
-                java_use
-                    .child_pin()
-                    .map_err(crate::instance::launch::LaunchError::Retention)?,
-            );
+            command.retain_runtime(java_pin);
             let (child, natives) = resolved::spawn(command)?;
             reservation.commit_with_natives(child, natives);
 

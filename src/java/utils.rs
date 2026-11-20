@@ -42,6 +42,9 @@ async fn detect_properties_impl(
 ) -> io::Result<DetectedJavaRuntime> {
     let exec_path = dunce::canonicalize(input).unwrap_or_else(|_| input.to_path_buf());
 
+    if let Some(pin) = pin {
+        crate::utils::process_pin::prepare_spawn(&exec_path, &[pin])?;
+    }
     let mut cmd = Command::new(&exec_path);
     cmd.args(["-XshowSettings:properties", "-version"])
         .stdin(Stdio::null());
@@ -53,7 +56,7 @@ async fn detect_properties_impl(
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = run_with_timeout_retained(&mut cmd, PROBE_TIMEOUT, pin).await?;
+    let output = run_prepared_probe(&mut cmd, PROBE_TIMEOUT, pin).await?;
 
     // java -version writes only to stderr but we still have to check the stdout
     let output = {
@@ -110,11 +113,23 @@ async fn detect_properties_impl(
 }
 
 #[cfg(test)]
-async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::process::Output> {
-    run_with_timeout_retained(cmd, dur, None).await
+async fn run_with_timeout_retained(
+    cmd: &mut Command,
+    dur: Duration,
+    pin: Option<&crate::utils::process_pin::ProcessPin>,
+) -> io::Result<std::process::Output> {
+    if let Some(pin) = pin {
+        pin.before_spawn()?;
+    }
+    run_prepared_probe(cmd, dur, pin).await
 }
 
-async fn run_with_timeout_retained(
+#[cfg(test)]
+async fn run_with_timeout(cmd: &mut Command, dur: Duration) -> io::Result<std::process::Output> {
+    run_prepared_probe(cmd, dur, None).await
+}
+
+async fn run_prepared_probe(
     cmd: &mut Command,
     dur: Duration,
     pin: Option<&crate::utils::process_pin::ProcessPin>,
@@ -122,9 +137,6 @@ async fn run_with_timeout_retained(
     cmd.kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if let Some(pin) = pin {
-        pin.before_spawn()?;
-    }
     let mut child = cmd.spawn()?;
     if let Some(pin) = pin {
         pin.record_child(child.id());

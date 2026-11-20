@@ -342,18 +342,27 @@ async fn prepare_command(
 pub(crate) fn spawn(
     mut command: LaunchCommand,
 ) -> Result<(async_std::process::Child, NativeDirectory)> {
-    for pin in &command.runtime_pins {
-        pin.before_spawn().map_err(LaunchError::Spawn)?;
+    let pins: Vec<_> = command.runtime_pins.iter().collect();
+    crate::utils::process_pin::prepare_spawn(&command.java, &pins).map_err(LaunchError::Spawn)?;
+    if let Err(error) = command.natives.before_spawn() {
+        for pin in pins {
+            pin.abort_before_spawn();
+        }
+        return Err(LaunchError::Natives(error).into());
     }
-    command
-        .natives
-        .before_spawn()
-        .map_err(LaunchError::Natives)?;
-    let child = async_std::process::Command::new(command.java)
+    let spawned = async_std::process::Command::new(command.java)
         .current_dir(command.game_dir)
         .args(command.args)
-        .spawn()
-        .map_err(LaunchError::Spawn)?;
+        .spawn();
+    let child = match spawned {
+        Ok(child) => child,
+        Err(error) => {
+            // The async adapter can fail while registering an already-created
+            // child. Keep its scratch and durable pins with unknown outcome.
+            command.natives.finish(false);
+            return Err(LaunchError::Spawn(error).into());
+        }
+    };
     command.natives.record_child(child.id());
     for pin in command.runtime_pins {
         pin.record_child(child.id());
@@ -450,9 +459,8 @@ mod forge_ignore_tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn failed_game_spawn_preserves_all_unknown_child_intents() {
+    fn missing_game_executable_releases_all_pre_spawn_pins() {
         use crate::utils::process_pin::{allows_cleanup, ProcessPin};
         let dir = tempfile::tempdir().unwrap();
         let resources = [dir.path().join("java"), dir.path().join("libraries")];
@@ -468,7 +476,7 @@ mod forge_ignore_tests {
         }
         assert!(spawn(command).is_err());
         for resource in &resources {
-            assert!(!allows_cleanup(resource).unwrap());
+            assert!(allows_cleanup(resource).unwrap());
         }
     }
     fn profile() -> InstalledProfile {
