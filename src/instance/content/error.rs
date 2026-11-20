@@ -36,6 +36,8 @@ pub enum ContentError {
     RecoveryConflict { name: String },
     #[error("staged bytes for {name} differ from the registered content digest")]
     StagedDigestMismatch { name: String },
+    #[error("content path has an ambiguous binding: {path}", path = .path.display())]
+    AmbiguousBinding { path: std::path::PathBuf },
     #[error("invalid content journal operation id {0:?}")]
     InvalidJournalId(String),
     #[error("CurseForge API credential is not configured")]

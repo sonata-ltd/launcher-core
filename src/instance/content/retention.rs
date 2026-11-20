@@ -136,7 +136,7 @@ async fn collect_owned(store: Arc<ObjectStore>, minimum_age: Duration) -> Result
     }
     #[cfg(test)]
     tests::checkpoint(maintenance.root(), "snapshot").await;
-    let collection = Collection::new(maintenance.clone());
+    let collection = Collection::new(maintenance.clone())?;
     #[cfg(test)]
     let collection = collection
         .with_test_hook(|root, phase| async_std::task::block_on(tests::checkpoint(root, phase)));

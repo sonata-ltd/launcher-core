@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use super::super::storage;
 use crate::{
     data::{db::Database, layout::LauncherPaths, ownership::LayoutLease},
     instance::{
@@ -12,11 +13,11 @@ use crate::{
         content::{error::Result, inventory, journal::Placement, model::ContentKind},
         model::InstanceId,
     },
-    utils::files::{self, digest::FileStamp, identity::FileIdentity},
+    utils::files::{self, digest::FileStamp, directory::Directory, identity::FileIdentity},
     utils::{cancellation::Cancellation, jobs::supervisor::Tasks, object_store::ObjectStore},
 };
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct LegacyPlacement {
     id: i64,
     object_id: i64,
@@ -26,6 +27,23 @@ struct LegacyPlacement {
     path_key: Vec<u8>,
     sha256: String,
     kind: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DetachIntent {
+    original: LegacyPlacement,
+    destination: String,
+    witness: uuid::Uuid,
+    file_identity: String,
+    sha256: String,
+    enabled: Option<bool>,
+}
+
+impl DetachIntent {
+    fn witness_name(&self) -> String {
+        format!(".sonata-detach-{}.pending", self.witness)
+    }
 }
 
 pub(in crate::instance::content) async fn detach_registered_links(
@@ -40,9 +58,8 @@ pub(in crate::instance::content) async fn detach_registered_links(
         .spawn("legacy hardlink migration", None, async move {
             // Already admitted migration owns lifetime locks, CAS access, blocking
             // copies and SQL completion even if its bootstrap caller disappears.
-            let _ownership = ownership;
             let access = store.access(&Cancellation::new()).await?;
-            let result = migrate(&db, &paths, &activity, &access).await;
+            let result = migrate(&db, &paths, &activity, &access, &ownership).await;
             if let Err(error) = &result {
                 tracing::warn!(%error, "legacy hardlink migration failed");
             }
@@ -56,6 +73,7 @@ async fn migrate(
     paths: &LauncherPaths,
     activity: &InstanceActivity,
     store: &crate::utils::object_store::StoreAccess,
+    ownership: &LayoutLease,
 ) -> Result<()> {
     let placements: Vec<LegacyPlacement> = sqlx::query_as(
         "SELECT content.id, content.object_id, content.instance_id, instance.dir,
@@ -85,6 +103,37 @@ async fn migrate(
                 continue;
             }
         };
+        let instance_directory = match ownership.open_instance_directory(&instance) {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(content_id = id, %error, "legacy instance directory unavailable");
+                continue;
+            }
+        };
+        let instance = instance_directory.path().to_owned();
+        if let Some(body) = sqlx::query_scalar::<_, String>(
+            "SELECT intent_json FROM legacy_detach_intents WHERE binding_id=?",
+        )
+        .bind(id)
+        .fetch_optional(&db.pool)
+        .await?
+        {
+            let intent: DetachIntent = serde_json::from_str(&body)?;
+            if intent.original != placement {
+                tracing::warn!(
+                    content_id = id,
+                    "legacy binding changed; previous migration deferred"
+                );
+                continue;
+            }
+            let recovered = files::child(&instance, Path::new(&intent.destination))?;
+            if let Some(witness) = publication_witness(&recovered, &intent)? {
+                finish_detach(db, &instance, &intent, &witness).await?;
+                continue;
+            }
+            // A fresh migration may proceed only if selection below can still
+            // independently prove an original hardlink. Unknown bytes stay put.
+        }
         let root = instance.clone();
         let recorded = PathBuf::from(&placement.relative_path);
         let expected = placement.sha256.clone();
@@ -113,7 +162,6 @@ async fn migrate(
         let Some(relative) = plan.relative_path.to_str().map(str::to_owned) else {
             continue; // SQL cannot represent this name; do not invent a lossy path.
         };
-        let key = files::path_key(&plan.relative_path);
         let relocated = plan.relative_path != Path::new(&placement.relative_path);
         if relocated {
             // One inode alias is still ambiguous if several historical bindings
@@ -132,11 +180,17 @@ async fn migrate(
                 continue;
             }
         }
-        let occupied: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM instance_content WHERE instance_id=? AND path_key=? AND id<>?)",
-        ).bind(placement.instance_id).bind(&key).bind(id).fetch_one(&db.pool).await?;
-        if occupied {
-            continue; // Physical identity does not allow merging two bindings.
+        if let Err(error) = storage::guard_binding_aliases(
+            db,
+            placement.instance_id,
+            &instance,
+            &plan.relative_path,
+            Some(id),
+        )
+        .await
+        {
+            tracing::warn!(content_id = id, %error, "legacy binding deferred");
+            continue;
         }
         #[cfg(test)]
         crate::instance::content::install::checkpoints::wait(
@@ -145,25 +199,117 @@ async fn migrate(
         )
         .await;
         let enabled = plan.mod_enabled;
-        let expected = placement.sha256.clone();
         let access = store.clone();
+        let target = files::child(&instance, &plan.relative_path)?;
+        let Some(relative_parent) = plan.relative_path.parent() else {
+            continue;
+        };
+        let directory = instance_directory.open_relative(relative_parent)?;
+        let destination = target.clone();
         let outcome = async_std::task::spawn_blocking(move || {
             let _access = access;
-            let path = files::child(&instance, &plan.relative_path)?;
-            Ok::<_, crate::utils::files::FileError>(detach(&path, &expected, &plan)?)
+            stage_detach(&destination, plan, directory)
         })
         .await;
         match outcome {
-            Ok(Some(matches)) => {
+            Ok(Some(staged)) => {
+                let intent = DetachIntent {
+                    original: placement,
+                    destination: relative,
+                    witness: uuid::Uuid::new_v4(),
+                    file_identity: FileIdentity::from_handle(staged.file.as_file())?.storage_key(),
+                    sha256: staged.sha256.clone(),
+                    enabled,
+                };
+                let source = staged
+                    .file
+                    .path()
+                    .file_name()
+                    .ok_or_else(|| io::Error::other("missing staged file name"))?;
+                staged
+                    .directory
+                    .hard_link(source, std::ffi::OsStr::new(&intent.witness_name()))?;
+                sqlx::query(
+                    "INSERT INTO legacy_detach_intents(binding_id,intent_json) VALUES(?,?)
+                     ON CONFLICT(binding_id) DO UPDATE SET intent_json=excluded.intent_json",
+                )
+                .bind(id)
+                .bind(serde_json::to_string(&intent)?)
+                .execute(&db.pool)
+                .await?;
+                let published =
+                    async_std::task::spawn_blocking(move || staged.publish(&target)).await;
+                if let Err(error) = published {
+                    tracing::warn!(content_id = id, %error, "legacy mod publication deferred");
+                    continue;
+                }
                 #[cfg(test)]
                 crate::instance::content::install::checkpoints::wait(
-                    checkpoint(paths.instances(), &placement.dir),
+                    checkpoint(paths.instances(), &intent.original.dir),
                     "legacy-sql",
                 )
                 .await;
-                // File-preserving isolation precedes SQL. A failed SQL update
-                // leaves independent bytes, never a replacement of the CAS.
-                let updated = sqlx::query(
+                if let Some(witness) = publication_witness(
+                    &files::child(&instance, Path::new(&intent.destination))?,
+                    &intent,
+                )? {
+                    finish_detach(db, &instance, &intent, &witness).await?;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(content_id = id, %error, "legacy mod copy deferred"),
+        }
+    }
+    Ok(())
+}
+
+fn publication_witness(target: &Path, intent: &DetachIntent) -> io::Result<Option<PathBuf>> {
+    let witness = target.with_file_name(intent.witness_name());
+    for path in [target, witness.as_path()] {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    let target_identity = FileIdentity::at(target)?;
+    if target_identity != FileIdentity::at(&witness)?
+        || target_identity.storage_key() != intent.file_identity
+        || files::sha256_file(target)? != intent.sha256
+    {
+        return Ok(None);
+    }
+    Ok(Some(witness))
+}
+
+async fn finish_detach(
+    db: &Database,
+    root: &Path,
+    intent: &DetachIntent,
+    witness: &Path,
+) -> Result<()> {
+    let placement = &intent.original;
+    let id = placement.id;
+    let destination = Path::new(&intent.destination);
+    if let Err(error) =
+        storage::guard_binding_aliases(db, placement.instance_id, root, destination, Some(id)).await
+    {
+        tracing::warn!(content_id = id, %error, "legacy completion deferred");
+        return Ok(());
+    }
+    let relocated = destination != Path::new(&placement.relative_path);
+    let matches = intent.sha256.eq_ignore_ascii_case(&placement.sha256);
+    let mut transaction = db.pool.begin().await?;
+    let rows = storage::binding_paths(&mut transaction, placement.instance_id).await?;
+    let key = match storage::existing_binding_key(&rows, destination, Some(id)) {
+        Ok(key) => key,
+        Err(crate::instance::content::error::ContentError::AmbiguousBinding { .. }) => {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
+    let updated = sqlx::query(
                     "UPDATE instance_content SET relative_path=?, path_key=?,
                          mod_enabled=COALESCE(?,mod_enabled), presence='present', placement=?,
                          object_id=CASE WHEN ? THEN object_id ELSE NULL END,
@@ -174,7 +320,7 @@ async fn migrate(
                        AND (?=0 OR NOT EXISTS(SELECT 1 FROM instance_content
                            WHERE instance_id=? AND object_id=? AND kind=? AND placement=? AND id<>?))",
                 )
-                .bind(relative).bind(&key).bind(enabled)
+                .bind(&intent.destination).bind(&key).bind(intent.enabled)
                 .bind(if matches { Placement::Copy } else { Placement::External })
                 .bind(matches).bind(matches).bind(id).bind(placement.instance_id)
                 .bind(Placement::Hardlink).bind(placement.object_id).bind(&placement.relative_path)
@@ -182,17 +328,38 @@ async fn migrate(
                 .bind(placement.instance_id).bind(&key).bind(id)
                 .bind(relocated).bind(placement.instance_id).bind(placement.object_id)
                 .bind(&placement.kind).bind(Placement::Hardlink).bind(id)
-                .execute(&db.pool)
+                .execute(&mut *transaction)
                 .await?;
-                if updated.rows_affected() != 1 {
-                    tracing::warn!(
-                        content_id = id,
-                        "legacy binding changed before SQL completion; reconciliation deferred"
-                    );
-                }
+    if updated.rows_affected() != 1 {
+        tracing::warn!(
+            content_id = id,
+            "legacy binding changed before SQL completion; reconciliation deferred"
+        );
+        return Ok(());
+    }
+    sqlx::query("DELETE FROM legacy_detach_intents WHERE binding_id=?")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    if let Some(target) = witness
+        .parent()
+        .and_then(|p| destination.file_name().map(|name| p.join(name)))
+    {
+        if publication_witness(&target, intent)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            let cleanup = Directory::open(
+                witness
+                    .parent()
+                    .ok_or_else(|| io::Error::other("missing witness parent"))?,
+            )
+            .and_then(|directory| directory.unlink(std::ffi::OsStr::new(&intent.witness_name())));
+            if let Err(error) = cleanup {
+                tracing::warn!(content_id = id, %error, "could not remove legacy migration witness");
             }
-            Ok(None) => {}
-            Err(error) => tracing::warn!(content_id = id, %error, "legacy mod copy deferred"),
         }
     }
     Ok(())
@@ -286,14 +453,54 @@ pub(in crate::instance::content) fn same_physical_file(left: &Path, right: &Path
 
 #[cfg(test)]
 pub(in crate::instance::content) fn checkpoint(instances: &Path, dir: &str) -> uuid::Uuid {
-    uuid::Uuid::new_v5(
-        &uuid::Uuid::NAMESPACE_OID,
-        &files::path_key(&instances.join(dir)),
-    )
+    let path = instances.join(dir);
+    let path = path.canonicalize().unwrap_or(path);
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &files::path_key(&path))
 }
 
 /// Returns whether the isolated bytes still match the registered object.
-fn detach(path: &Path, expected: &str, planned: &MigrationPlan) -> io::Result<Option<bool>> {
+struct StagedDetach {
+    plan: MigrationPlan,
+    file: tempfile::NamedTempFile,
+    sha256: String,
+    directory: Arc<Directory>,
+}
+
+impl StagedDetach {
+    fn publish(mut self, path: &Path) -> io::Result<()> {
+        if let Err(error) = self.directory.verify_location() {
+            self.file.disable_cleanup(true);
+            return Err(error);
+        }
+        let current = fs::symlink_metadata(path)?;
+        if !current.is_file()
+            || self.plan.stamp != FileStamp::from_metadata(&current)
+            || FileIdentity::at(path)? != self.plan.identity
+            || FileIdentity::at(&self.plan.object)? != self.plan.identity
+        {
+            return Err(io::Error::other("legacy mod changed while copying"));
+        }
+        let source = self
+            .file
+            .path()
+            .file_name()
+            .ok_or_else(|| io::Error::other("missing staged file name"))?;
+        let destination = path
+            .file_name()
+            .ok_or_else(|| io::Error::other("missing legacy file name"))?;
+        let result = self.directory.replace(source, destination);
+        if result.is_ok() || self.directory.verify_location().is_err() {
+            self.file.disable_cleanup(true);
+        }
+        result
+    }
+}
+
+fn stage_detach(
+    path: &Path,
+    planned: MigrationPlan,
+    directory: Arc<Directory>,
+) -> io::Result<Option<StagedDetach>> {
     let before = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => FileStamp::from_metadata(&metadata),
         Ok(_) => return Ok(None),
@@ -314,20 +521,17 @@ fn detach(path: &Path, expected: &str, planned: &MigrationPlan) -> io::Result<Op
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("missing parent"))?;
+    directory.verify_location()?;
     let mut copy = tempfile::NamedTempFile::new_in(parent)?;
     io::copy(&mut file, copy.as_file_mut())?;
     copy.as_file()
         .set_permissions(file.metadata()?.permissions())?;
     copy.as_file().sync_all()?;
-    let matches = files::sha256_file(copy.path())?.eq_ignore_ascii_case(expected);
-    let current = fs::symlink_metadata(path)?;
-    if !current.is_file()
-        || before != FileStamp::from_metadata(&current)
-        || FileIdentity::at(path)? != planned.identity
-        || FileIdentity::at(&planned.object)? != planned.identity
-    {
-        return Err(io::Error::other("legacy mod changed while copying"));
-    }
-    copy.persist(path).map_err(|error| error.error)?;
-    Ok(Some(matches))
+    let sha256 = files::sha256_file(copy.path())?;
+    Ok(Some(StagedDetach {
+        plan: planned,
+        file: copy,
+        sha256,
+        directory,
+    }))
 }

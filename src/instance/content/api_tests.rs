@@ -129,6 +129,60 @@ async fn fixture() -> Fixture {
     fixture_with_database(false).await
 }
 
+#[async_std::test]
+async fn publication_reuses_the_binding_for_an_equivalent_historical_path() {
+    use std::path::Path;
+    let fixture = fixture().await;
+    let (operation, files) = prepared(&fixture).await;
+    storage::complete(&fixture.db, operation, fixture.id, &files)
+        .await
+        .unwrap();
+    let saved = "mods/./mod.jar";
+    sqlx::query("UPDATE instance_content SET relative_path=?, path_key=?")
+        .bind(saved)
+        .bind(crate::utils::files::path_key(Path::new(saved)))
+        .execute(&fixture.db.pool)
+        .await
+        .unwrap();
+    let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM instance_content")
+        .fetch_all(&fixture.db.pool)
+        .await
+        .unwrap();
+    let second = uuid::Uuid::new_v4();
+    storage::prepare(&fixture.db, second, fixture.id, &files)
+        .await
+        .unwrap();
+    storage::complete(&fixture.db, second, fixture.id, &files)
+        .await
+        .unwrap();
+    let after: Vec<i64> = sqlx::query_scalar("SELECT id FROM instance_content")
+        .fetch_all(&fixture.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(after, ids);
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[async_std::test]
+async fn category_binding_respects_actual_case_behavior_of_the_volume() {
+    use std::{fs, path::Path};
+    let fixture = fixture().await;
+    let (operation, files) = prepared(&fixture).await;
+    storage::complete(&fixture.db, operation, fixture.id, &files)
+        .await
+        .unwrap();
+    fs::write(fixture.root.join("mods/mod.jar"), b"registered").unwrap();
+    let alternate = Path::new("mods/MOD.jar");
+    let same_entry = fixture.root.join(alternate).exists();
+    if !same_entry {
+        fs::write(fixture.root.join(alternate), b"separate").unwrap();
+    }
+    let result =
+        storage::guard_binding_aliases(&fixture.db, fixture.id, &fixture.root, alternate, None)
+            .await;
+    assert_eq!(result.is_err(), same_entry);
+}
+
 async fn fixture_with_database(persistent: bool) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let paths = Arc::new(

@@ -8,6 +8,7 @@ use std::{
 use thiserror::Error;
 
 pub mod digest;
+pub(crate) mod directory;
 pub(crate) mod identity;
 pub(crate) mod owned_directory;
 pub mod placement;

@@ -78,10 +78,19 @@ async fn execute_preparing(
     cancel: &Cancel,
     progress: impl Fn(usize, bool),
 ) -> Result<()> {
+    let instance_directory =
+        crate::data::ownership::ensure_instance_directory(db.layout_lease.as_deref(), root)?;
+    let root = instance_directory.path();
     let mods = files::child(root, Path::new("mods"))?;
-    fs::create_dir_all(&mods)?;
+    let mods_directory = instance_directory.create_child(std::ffi::OsStr::new("mods"))?;
     // Временные записи лежат вне mods и на том же томе, что назначения.
     let stage = super::staging::ContentStaging::create(root)?;
+    let stage_files = stage.files();
+    let staged_directory = instance_directory.open_relative(
+        stage_files
+            .strip_prefix(root)
+            .map_err(std::io::Error::other)?,
+    )?;
     let mut prepared = Vec::new();
     for (index, action) in releases.iter().enumerate() {
         let release = &action.release;
@@ -90,6 +99,8 @@ async fn execute_preparing(
         file.validate()?;
         let (object_id, sha256, placement) = if action.adopt_existing {
             let target = files::child(&mods, Path::new(&file.file_name))?;
+            let relative = Path::new("mods").join(&file.file_name);
+            storage::guard_binding_aliases(&db, instance, root, &relative, None).await?;
             let expected = file.clone();
             let token = cancel.clone();
             let hashes = async_std::task::spawn_blocking(move || -> Result<_> {
@@ -210,8 +221,9 @@ async fn execute_preparing(
         .filter(|file| file.placement != Placement::External)
     {
         let source = stage.files().join(&file.name);
-        let target = mods.join(&file.name);
         let publisher = store.clone();
+        let from = staged_directory.clone();
+        let to = mods_directory.clone();
         let expected = file.sha256.clone();
         let name = file.name.clone();
         async_std::task::spawn_blocking(move || -> Result<()> {
@@ -220,13 +232,15 @@ async fn execute_preparing(
             {
                 return Err(ContentError::StagedDigestMismatch { name });
             }
-            files::publish::publish_new(source, target)?;
+            let name = std::ffi::OsStr::new(&name);
+            from.publish(name, &to, name)?;
             Ok(())
         })
         .await?;
     }
     #[cfg(test)]
     checkpoints::wait(id, "completing").await;
+    mods_directory.verify_location()?;
     storage::complete(&db, id, instance, &prepared).await?;
     Ok(())
 }

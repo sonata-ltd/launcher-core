@@ -658,3 +658,68 @@ async fn sql_failure_after_isolation_preserves_bytes_cas_and_original_binding() 
     assert_lifetime_locks(&f, &store, false);
     assert!(store.try_maintenance().is_ok());
 }
+
+#[cfg(any(unix, windows))]
+#[async_std::test]
+async fn legacy_reopens_the_intent_and_recovers_only_the_published_file() {
+    for edited in [false, true] {
+        let f = fixture_with_database(true).await;
+        let (_, object, original) = registered_link(&f).await;
+        let renamed = f.root.join("mods/known.jar");
+        fs::rename(original, &renamed).unwrap();
+        let old = bindings(&f).await;
+        sqlx::query(
+            "CREATE TRIGGER reject_replay_fixture BEFORE UPDATE ON instance_content
+             WHEN NEW.placement='copy' BEGIN SELECT RAISE(ABORT,'fixture'); END",
+        )
+        .execute(&f.db.pool)
+        .await
+        .unwrap();
+        drop(startup(&f).await);
+        assert_eq!(bindings(&f).await, old);
+        assert!(!legacy::same_physical_file(&object, &renamed));
+        if edited {
+            fs::write(&renamed, b"current user content").unwrap();
+        }
+        sqlx::query("DROP TRIGGER reject_replay_fixture")
+            .execute(&f.db.pool)
+            .await
+            .unwrap();
+        let location = f.db.retention_owner().await.unwrap().unwrap().path;
+        let reopened = Arc::new(
+            Database::init(&format!("sqlite://{}", location.display()))
+                .await
+                .unwrap(),
+        );
+        let service = InstanceContentService::new(
+            reopened.clone(),
+            f.paths.clone(),
+            f.instances.clone(),
+            None,
+            f.operations.clone(),
+        )
+        .await
+        .unwrap();
+        let intents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM legacy_detach_intents")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap();
+        assert_eq!(intents, i64::from(edited));
+        let rows = bindings(&f).await;
+        if edited {
+            assert_eq!(rows, old);
+            assert_eq!(fs::read(&renamed).unwrap(), b"current user content");
+        } else {
+            assert_eq!(rows[0].id, old[0].id);
+            assert_eq!(
+                Path::new(&rows[0].relative_path),
+                Path::new("mods/known.jar")
+            );
+            assert_eq!(rows[0].placement, "copy");
+            assert_eq!(fs::read(&renamed).unwrap(), b"verified bytes");
+        }
+        assert_eq!(fs::read(object).unwrap(), b"verified bytes");
+        drop(service);
+        f.operations.tasks.shutdown().await;
+    }
+}

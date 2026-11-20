@@ -74,7 +74,7 @@ pub(super) async fn collect(assets: PathBuf, minimum_age: Duration) -> Result<us
         }
         #[cfg(test)]
         tests::snapshot_checkpoint(maintenance.root()).await;
-        let collection = Collection::new(maintenance);
+        let collection = Collection::new(maintenance).map_err(bytes_error)?;
         #[cfg(test)]
         let collection = collection.with_test_hook(tests::checkpoint);
         #[cfg(test)]

@@ -7,6 +7,10 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    pub(crate) fn storage_key(self) -> String {
+        format!("{:016x}:{:032x}", self.device, self.file)
+    }
+
     #[cfg(unix)]
     pub(crate) fn at(path: &Path) -> io::Result<Self> {
         Ok(Self::from_metadata(&fs::symlink_metadata(path)?))

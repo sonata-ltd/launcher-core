@@ -429,6 +429,7 @@ impl InstanceContentService {
             let already_installed = if std::fs::symlink_metadata(&target).is_ok() {
                 let file = release.file.clone();
                 let matches = async_std::task::spawn_blocking(move || -> Result<bool> {
+                    storage::require_observed_name(&target)?;
                     let (actual, _) = files::digest::digest_file(
                         &target,
                         &crate::utils::cancellation::Cancellation::default(),

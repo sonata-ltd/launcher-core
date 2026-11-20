@@ -2,7 +2,7 @@
 //! Admission and a complete domain snapshot are required before constructing
 //! this capability; aliases are hints, never roots supplied by this module.
 use super::{catalog::read_regular, ObjectStore, StoreMaintenance};
-use crate::utils::files;
+use crate::utils::files::{self, directory::Directory};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -54,17 +54,20 @@ impl Roots {
 #[derive(Clone)]
 pub(crate) struct Collection {
     maintenance: Arc<StoreMaintenance>,
+    directory: Arc<Directory>,
     #[cfg(test)]
     hook: fn(&Path, &'static str),
 }
 
 impl Collection {
-    pub(crate) fn new(maintenance: Arc<StoreMaintenance>) -> Self {
-        Self {
+    pub(crate) fn new(maintenance: Arc<StoreMaintenance>) -> io::Result<Self> {
+        let directory = Directory::open(maintenance.root())?;
+        Ok(Self {
             maintenance,
+            directory,
             #[cfg(test)]
             hook: |_, _| {},
-        }
+        })
     }
 
     #[cfg(test)]
@@ -84,6 +87,7 @@ impl Collection {
         let intents = root.join(INTENTS);
         let mut plan = HashMap::new();
         if regular_directory(&intents)? {
+            let intents_directory = self.directory.open_relative(Path::new(INTENTS))?;
             for entry in fs::read_dir(&intents)? {
                 let entry = entry?;
                 let intent: DeleteIntent =
@@ -94,7 +98,7 @@ impl Collection {
                     return Err(io::Error::other("deletion intent filename mismatch"));
                 }
                 if retained.retains(&intent) {
-                    fs::remove_file(entry.path())?;
+                    intents_directory.unlink(&entry.file_name())?;
                 } else {
                     let target = store.path_for(&intent.sha256)?;
                     if regular_directory(&root.join("objects"))?
@@ -194,6 +198,12 @@ impl Collection {
         let removed = if !directories_present {
             false
         } else {
+            let parent = path
+                .parent()
+                .ok_or_else(|| io::Error::other("object is missing its parent"))?;
+            let directory = self
+                .directory
+                .open_relative(parent.strip_prefix(root).map_err(io::Error::other)?)?;
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.is_file() => {
                     let digests = files::digest::retention_digests(&path)?;
@@ -203,7 +213,7 @@ impl Collection {
                     {
                         return Err(io::Error::other("object changed since deletion intent"));
                     }
-                    fs::remove_file(path)?;
+                    directory.unlink(std::ffi::OsStr::new(&intent.sha256))?;
                     self.checkpoint("unlink");
                     true
                 }
@@ -216,8 +226,11 @@ impl Collection {
             && regular_directory(&root.join("aliases/sha1"))?
         {
             let alias = root.join("aliases/sha1").join(&intent.sha1);
+            let directory = self.directory.open_relative(Path::new("aliases/sha1"))?;
             match read_regular(&alias, 64) {
-                Ok(body) if body == intent.sha256.as_bytes() => fs::remove_file(alias)?,
+                Ok(body) if body == intent.sha256.as_bytes() => {
+                    directory.unlink(std::ffi::OsStr::new(&intent.sha1))?
+                }
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -234,13 +247,14 @@ impl Collection {
         if !regular_directory(&intents)? {
             return Ok(());
         }
+        let directory = self.directory.open_relative(Path::new(INTENTS))?;
         for intent in completed {
             intent.validate()?;
             if !ObjectStore::new(self.maintenance.root().to_owned())
                 .path_for(&intent.sha256)?
                 .try_exists()?
             {
-                fs::remove_file(intents.join(format!("{}.json", intent.sha256)))?;
+                directory.unlink(std::ffi::OsStr::new(&format!("{}.json", intent.sha256)))?;
             }
         }
         Ok(())

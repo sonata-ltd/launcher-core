@@ -3,13 +3,14 @@ use std::{
     fs::{self, OpenOptions},
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use super::layout::LauncherPaths;
 use crate::{
     instance::content::error::ContentInitError,
     utils::{
-        files::{self, identity::FileIdentity},
+        files::{self, directory::Directory, identity::FileIdentity},
         object_store::{ObjectStore, StoreLock},
     },
 };
@@ -19,6 +20,8 @@ pub(crate) struct LayoutLease {
     _root: StoreLock,
     _instances: Option<StoreLock>,
     _content: StoreLock,
+    instances_path: PathBuf,
+    instances_directory: Arc<Directory>,
 }
 
 impl LayoutLease {
@@ -27,6 +30,7 @@ impl LayoutLease {
         let root_lock = lock(&root)?;
         fs::create_dir_all(paths.instances())?;
         let instances = paths.instances().canonicalize()?;
+        let instances_directory = Directory::open(&instances)?;
         let instances_lock = if root == instances
             || matches!(
                 (FileIdentity::at(&root), FileIdentity::at(&instances)),
@@ -42,8 +46,39 @@ impl LayoutLease {
             _root: root_lock,
             _instances: instances_lock,
             _content: content,
+            instances_path: paths.instances().clone(),
+            instances_directory,
         })
     }
+
+    pub(crate) fn create_instance_directory(&self, path: &Path) -> io::Result<Arc<Directory>> {
+        let relative = path
+            .strip_prefix(&self.instances_path)
+            .map_err(io::Error::other)?;
+        self.instances_directory.verify_location()?;
+        let instance = self.instances_directory.create_relative(relative)?;
+        instance.verify_location()?;
+        Ok(instance)
+    }
+
+    pub(crate) fn open_instance_directory(&self, path: &Path) -> io::Result<Arc<Directory>> {
+        let relative = path
+            .strip_prefix(&self.instances_path)
+            .map_err(io::Error::other)?;
+        self.instances_directory.verify_location()?;
+        self.instances_directory.open_relative(relative)
+    }
+}
+
+pub(crate) fn ensure_instance_directory(
+    lease: Option<&LayoutLease>,
+    path: &Path,
+) -> io::Result<Arc<Directory>> {
+    if let Some(lease) = lease {
+        return lease.create_instance_directory(path);
+    }
+    fs::create_dir_all(path)?;
+    Directory::open(path)
 }
 
 fn lock(directory: &Path) -> Result<StoreLock, ContentInitError> {

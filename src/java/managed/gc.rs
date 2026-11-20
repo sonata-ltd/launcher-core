@@ -71,7 +71,7 @@ async fn collect_homes(root: &Path, age: Duration) -> Result<usize> {
 async fn collect_archives(root: &Path, age: Duration) -> Result<usize> {
     let snapshot = retention::snapshot(root).await?;
     let managed = snapshot.maintenance.clone();
-    let collection = Collection::new(snapshot.archive_maintenance.clone());
+    let collection = Collection::new(snapshot.archive_maintenance.clone()).map_err(storage)?;
     #[cfg(test)]
     let collection = collection.with_test_hook(tests::archive_checkpoint);
     let roots = Roots {

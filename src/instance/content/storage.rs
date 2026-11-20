@@ -146,8 +146,10 @@ pub(super) async fn complete(
     if transition.rows_affected() != 1 {
         return Err(ContentError::InvalidJournalId(id.to_string()));
     }
+    let existing = binding_paths(&mut transaction, instance).await?;
     for file in files {
         let relative = format!("mods/{}", file.name);
+        let key = existing_binding_key(&existing, Path::new(&relative), None)?;
         let evidence = if file.placement == Placement::External {
             "verified_hash"
         } else {
@@ -173,7 +175,7 @@ pub(super) async fn complete(
                          pinned=CASE WHEN instance_content.object_id=excluded.object_id
                                      THEN instance_content.pinned ELSE 0 END,
                          preferred_provider_file_id=excluded.preferred_provider_file_id")
-            .bind(instance.get()).bind(file.object_id).bind(&relative).bind(crate::utils::files::path_key(std::path::Path::new(&relative)))
+            .bind(instance.get()).bind(file.object_id).bind(&relative).bind(key)
             .bind(file.placement).bind(ModPresence::Present).bind(provider_id).execute(&mut *transaction).await?;
     }
     sqlx::query("DELETE FROM content_object_leases WHERE operation_id=?")
@@ -181,6 +183,117 @@ pub(super) async fn complete(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+pub(super) type BindingPath = (i64, String, Vec<u8>);
+
+pub(super) async fn binding_paths(
+    connection: &mut sqlx::SqliteConnection,
+    instance: InstanceId,
+) -> Result<Vec<BindingPath>> {
+    Ok(
+        sqlx::query_as(
+            "SELECT id,relative_path,path_key FROM instance_content WHERE instance_id=?",
+        )
+        .bind(instance.get())
+        .fetch_all(connection)
+        .await?,
+    )
+}
+
+pub(super) fn existing_binding_key(
+    existing: &[BindingPath],
+    path: &Path,
+    exclude: Option<i64>,
+) -> Result<Vec<u8>> {
+    let new = crate::utils::files::path_key(path);
+    let mut key = None;
+    for (id, relative, saved_key) in existing {
+        if Some(*id) == exclude {
+            continue;
+        }
+        let same_path = Path::new(relative) == path;
+        if !same_path && saved_key != &new {
+            continue;
+        }
+        if !same_path || exclude.is_some() || key.replace(saved_key.clone()).is_some() {
+            return Err(ContentError::AmbiguousBinding {
+                path: path.to_owned(),
+            });
+        }
+    }
+    Ok(key.unwrap_or(new))
+}
+
+/// Existing placements must use the exact name enumerated by the filesystem.
+/// Path lookup alone can resolve multiple spellings to one directory entry.
+pub(super) fn require_observed_name(path: &Path) -> Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| ContentError::AmbiguousBinding {
+            path: path.to_owned(),
+        })?;
+    let Some(name) = path.file_name() else {
+        return Err(ContentError::AmbiguousBinding {
+            path: path.to_owned(),
+        });
+    };
+    for entry in std::fs::read_dir(directory)? {
+        if entry?.file_name() == name {
+            return Ok(());
+        }
+    }
+    Err(ContentError::AmbiguousBinding {
+        path: path.to_owned(),
+    })
+}
+
+pub(super) async fn guard_binding_aliases(
+    db: &Database,
+    instance: InstanceId,
+    root: &Path,
+    relative: &Path,
+    exclude: Option<i64>,
+) -> Result<()> {
+    use crate::utils::files::{self, identity::FileIdentity};
+    let mut connection = db.pool.acquire().await?;
+    let rows = binding_paths(&mut connection, instance).await?;
+    existing_binding_key(&rows, relative, exclude)?;
+    let target = files::child(root, relative)?;
+    let target_id = match FileIdentity::at(&target) {
+        Ok(identity) => identity,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    require_observed_name(&target)?;
+    let Some(target_parent) = target.parent() else {
+        return Err(ContentError::AmbiguousBinding { path: target });
+    };
+    let parent_id = FileIdentity::at(target_parent)?;
+    for (id, other, _) in rows {
+        let other = Path::new(&other);
+        if Some(id) == exclude || other == relative {
+            continue;
+        }
+        let other = files::child(root, other)?;
+        let other_id = match FileIdentity::at(&other) {
+            Ok(identity) => identity,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if target_id != other_id {
+            continue;
+        }
+        let Some(other_parent) = other.parent() else {
+            return Err(ContentError::AmbiguousBinding { path: target });
+        };
+        if parent_id == FileIdentity::at(other_parent)?
+            && (other.file_name() == target.file_name() || require_observed_name(&other).is_err())
+        {
+            return Err(ContentError::AmbiguousBinding { path: target });
+        }
+    }
     Ok(())
 }
 
@@ -408,14 +521,19 @@ pub(super) async fn reconcile_registered_mods(
     let registered = registered_mods(db, instance).await?;
     let verified = verified_paths(&registered, snapshot);
     let mut transaction = db.pool.begin().await?;
+    let mut existing = binding_paths(&mut transaction, instance).await?;
     for (entry, observed) in registered.into_iter().zip(verified) {
         let recorded = std::path::Path::new(&entry.relative_path);
         let rename = observed
             .filter(|path| *path != recorded)
             .and_then(|path| path.to_str());
-        if let Some(path) = rename {
-            let path = std::path::Path::new(path);
-            let key = crate::utils::files::path_key(path);
+        let relocation = rename.and_then(|name| {
+            let path = Path::new(name);
+            existing_binding_key(&existing, path, Some(entry.id))
+                .ok()
+                .map(|key| (path, key))
+        });
+        if let Some((path, key)) = relocation {
             let changed = sqlx::query(
                 "UPDATE instance_content SET relative_path=?, path_key=?, mod_enabled=?, presence=?
                  WHERE id=? AND NOT EXISTS(SELECT 1 FROM instance_content
@@ -435,6 +553,10 @@ pub(super) async fn reconcile_registered_mods(
             .execute(&mut *transaction)
             .await?;
             if changed.rows_affected() == 1 {
+                if let Some(row) = existing.iter_mut().find(|row| row.0 == entry.id) {
+                    row.1 = path.to_string_lossy().into_owned();
+                    row.2 = key;
+                }
                 continue;
             }
         }

@@ -82,15 +82,22 @@ async fn recover_one(
     }
     let record = instances.get(instance).await.map_err(ContentError::from)?;
     let root = files::child(paths.instances(), std::path::Path::new(&record.dir))?;
-    let mods = files::child(&root, std::path::Path::new("mods"))?;
-    fs::create_dir_all(&mods)?;
+    let instance_directory =
+        crate::data::ownership::ensure_instance_directory(db.layout_lease.as_deref(), &root)?;
+    let root = instance_directory.path();
+    let mods = files::child(root, std::path::Path::new("mods"))?;
+    let mods_directory = instance_directory.create_child(std::ffi::OsStr::new("mods"))?;
     let stage = tempfile::Builder::new()
         .prefix(".sonata-recovery-")
-        .tempdir_in(&root)?;
+        .tempdir_in(root)?;
+    let staged_directory = instance_directory
+        .open_relative(stage.path().strip_prefix(root).map_err(io::Error::other)?)?;
     for file in &mut expected_files {
         let path = files::child(&mods, std::path::Path::new(&file.name))?;
         match fs::symlink_metadata(&path) {
             Ok(metadata) => {
+                let relative = std::path::Path::new("mods").join(&file.name);
+                storage::guard_binding_aliases(db, instance, root, &relative, None).await?;
                 let matches = if metadata.is_file() {
                     let target = path.clone();
                     let expected = file.sha256.clone();
@@ -123,6 +130,9 @@ async fn recover_one(
         let expected = file.sha256.clone();
         let staged = stage.path().join(&file.name);
         let reader = store.clone();
+        let from = staged_directory.clone();
+        let to = mods_directory.clone();
+        let name = file.name.clone();
         async_std::task::spawn_blocking(move || -> Result<()> {
             let _access = reader;
             placement::copy_new(&object, &staged, &Cancellation::default())?;
@@ -131,7 +141,8 @@ async fn recover_one(
                     "content byte object is corrupt".into(),
                 ));
             }
-            files::publish::publish_new(staged, path)?;
+            let name = std::ffi::OsStr::new(&name);
+            from.publish(name, &to, name)?;
             Ok(())
         })
         .await?;
@@ -139,6 +150,7 @@ async fn recover_one(
     }
     #[cfg(test)]
     super::install::checkpoints::wait(id, "recovering").await;
+    mods_directory.verify_location()?;
     storage::complete(db, id, instance, &expected_files).await?;
     Ok(())
 }

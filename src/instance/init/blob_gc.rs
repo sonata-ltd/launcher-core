@@ -45,7 +45,7 @@ pub(super) async fn collect(paths: Arc<LauncherPaths>, minimum_age: Duration) ->
         })?;
         #[cfg(test)]
         tests::checkpoint(maintenance.root(), "snapshot").await;
-        let collection = Collection::new(maintenance.clone());
+        let collection = Collection::new(maintenance.clone())?;
         #[cfg(test)]
         let collection = collection.with_test_hook(|root, phase| {
             async_std::task::block_on(tests::checkpoint(root, phase))
