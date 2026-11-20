@@ -193,7 +193,10 @@ async fn local_failure_preserves_unknown_staging_and_persists_cleanup_diagnostic
 fn staging_creation_never_clobbers_existing_directory_or_adopts_a_foreign_owner() {
     let dir = tempfile::tempdir().unwrap();
     let id = Uuid::new_v4();
-    let path = ownership::create_staging(dir.path(), id, &ownership::Owner::new(id)).unwrap();
+    let path = ownership::create_staging(dir.path(), id, &ownership::Owner::new(id))
+        .unwrap()
+        .path()
+        .to_owned();
     fs::write(path.join("user-data"), b"keep").unwrap();
     assert!(ownership::create_staging(dir.path(), id, &ownership::Owner::new(id)).is_err());
     assert!(
@@ -675,6 +678,73 @@ async fn managed_publication_never_replaces_a_preexisting_destination() {
     service.fail(id, error).await;
     assert_eq!(fs::read(destination.join("user-data")).unwrap(), b"keep");
     assert_eq!(fs::read_dir(destination).unwrap().count(), 1);
+}
+
+#[async_std::test]
+async fn publication_preserves_a_replacement_generation_with_or_without_cancellation() {
+    for cancel_after_publish in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(ManagedJavaService::new(dir.path().into()));
+        service.initialize().await.unwrap();
+        let source = dir.path().join("fixture.tar.gz");
+        tar_fixture(&source);
+        let package = pin_archive(package(), &source);
+        let id = insert(
+            &service,
+            record(package.clone(), ManagedJavaStage::Downloading),
+        );
+        create_staging(&service, id);
+        let archive = service.staging(id).join("archive.part");
+        fs::copy(&source, &archive).unwrap();
+        let destination = dir
+            .path()
+            .join("managed")
+            .join(&package.id)
+            .join(id.to_string());
+        let previous = dir.path().join("previous");
+        let (arrived, resume) = blocking_hook(dir.path(), "published");
+        let cancel = Cancellation::new();
+        let worker_cancel = cancel.clone();
+        let worker = service.clone();
+        let install = task::spawn(async move {
+            worker
+                .install_archive(
+                    id,
+                    &package,
+                    &worker_cancel,
+                    archive,
+                    package.sha256.clone(),
+                )
+                .await
+        });
+        async_std::future::timeout(Duration::from_secs(10), arrived.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        fs::rename(&destination, &previous).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("user-data"), b"preserve these bytes").unwrap();
+        if cancel_after_publish {
+            cancel.cancel();
+        }
+        resume.send(()).unwrap();
+
+        let error = install.await.unwrap_err();
+
+        assert_eq!(
+            error.code,
+            if cancel_after_publish {
+                ManagedJavaErrorKind::Cancelled
+            } else {
+                ManagedJavaErrorKind::Storage
+            }
+        );
+        assert_eq!(
+            fs::read(destination.join("user-data")).unwrap(),
+            b"preserve these bytes"
+        );
+        assert!(extract::executable(&previous.join("jre")).is_file());
+    }
 }
 
 #[async_std::test]

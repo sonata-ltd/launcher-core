@@ -79,7 +79,10 @@ fn dead_owner(id: Uuid) -> ownership::Owner {
 }
 
 fn create_staging(service: &ManagedJavaService, id: Uuid) {
-    let path = ownership::create_staging(&service.root, id, &ownership::Owner::new(id)).unwrap();
+    let path = ownership::create_staging(&service.root, id, &ownership::Owner::new(id))
+        .unwrap()
+        .path()
+        .to_owned();
     let owner = service
         .entries
         .lock()

@@ -43,16 +43,17 @@ pub(crate) fn may_be_alive(_: u32) -> bool {
 }
 
 pub(crate) fn read_owner(path: &std::path::Path) -> Option<u32> {
-    use std::{fs, io::Read};
+    use std::fs;
     if !fs::symlink_metadata(path).ok()?.is_file() {
         return None;
     }
+    read_owner_from(fs::File::open(path).ok()?)
+}
+
+pub(crate) fn read_owner_from(file: impl std::io::Read) -> Option<u32> {
+    use std::io::Read;
     let mut pid = String::new();
-    fs::File::open(path)
-        .ok()?
-        .take(11)
-        .read_to_string(&mut pid)
-        .ok()?;
+    file.take(11).read_to_string(&mut pid).ok()?;
     if pid.len() > 10 {
         return None;
     }

@@ -61,7 +61,9 @@ impl Target {
 
     pub(super) fn matches(&self, hash: &str, cancel: &Cancellation) -> io::Result<bool> {
         self.directory.verify_location()?;
-        files::matches_open_file(self.directory.open_file(&self.name), hash, cancel)
+        let matched = files::matches_open_file(self.directory.open_file(&self.name), hash, cancel)?;
+        self.directory.verify_location()?;
+        Ok(matched)
     }
 
     pub(super) fn stage(&self) -> io::Result<(Partial, async_std::fs::File)> {

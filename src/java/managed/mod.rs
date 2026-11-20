@@ -496,6 +496,7 @@ impl ManagedJavaService {
         let staging =
             task::spawn_blocking(move || ownership::create_staging(&root, id, &owner)).await?;
         if let Some(archive) = bytes::cached(&self.root, package, cancel).await? {
+            drop(staging);
             self.update(id, |record| record.snapshot.downloaded_bytes = package.size);
             self.stage(id, ManagedJavaStage::VerifyingChecksum, cancel)
                 .await?;
@@ -503,11 +504,12 @@ impl ManagedJavaService {
                 .install_verified_archive(id, package, cancel, archive)
                 .await;
         }
-        let archive = staging.join("archive.part");
-        let digest = transfer::download(package, &archive, cancel, |bytes| {
+        let archive = staging.path().join("archive.part");
+        let digest = transfer::download(package, &staging, cancel, |bytes| {
             self.update(id, |record| record.snapshot.downloaded_bytes = bytes);
         })
         .await?;
+        drop(staging);
         self.install_archive(id, package, cancel, archive, digest)
             .await
     }
@@ -543,31 +545,37 @@ impl ManagedJavaService {
         cancel: &Cancellation,
         archive: bytes::Archive,
     ) -> Result<()> {
-        let staging = self.staging(id);
+        use crate::utils::files::identity::FileIdentity;
+        use std::ffi::OsStr;
+        const CONTENTS: &str = "contents";
+
         self.stage(id, ManagedJavaStage::Extracting, cancel).await?;
-        let destination = staging.join("contents");
         let worker_cancel = cancel.clone();
-        let worker_destination = destination.clone();
+        let root = self.root.clone();
         let format = package.format;
-        #[cfg(test)]
-        let checkpoint_root = self.root.clone();
-        let home = task::spawn_blocking(move || {
+        let (root, staging, contents, home) = task::spawn_blocking(move || {
             // Move the whole capability, not only its path (precise closure
             // capture must not leave admission in a cancellable caller future).
             let archive = archive;
             #[cfg(test)]
-            tests::ownership_checkpoint(&checkpoint_root, "extracting");
-            extract::extract(&archive.path, &worker_destination, format, &worker_cancel)
+            tests::ownership_checkpoint(&root, "extracting");
+            let root = ownership::open_root(&root)?;
+            let staging = root
+                .open_relative(&Path::new(".managed/staging").join(id.to_string()))
+                .map_err(storage)?;
+            let contents = staging
+                .create_private_child(OsStr::new(CONTENTS))
+                .map_err(storage)?;
+            let home = extract::extract_in(&archive.path, &contents, format, &worker_cancel)?;
+            Ok::<_, ManagedJavaError>((root, staging, contents, home))
         })
         .await?;
         cancel.check()?;
         let final_relative = PathBuf::from("managed")
             .join(&package.id)
             .join(id.to_string());
-        let final_path =
-            crate::utils::files::child(&self.root, &final_relative).map_err(storage)?;
         let relative_home = home
-            .strip_prefix(&destination)
+            .strip_prefix(contents.path())
             .map_err(|e| ManagedJavaError::caused_by(ManagedJavaErrorKind::Extract, e))?;
         let database = match &self.database {
             Some(database) => database
@@ -580,26 +588,45 @@ impl ManagedJavaService {
         let owner = ownership::HomeOwner::new(id, package, relative_home.to_owned(), database)?;
         let portable_home =
             crate::java::paths::portable(&final_relative.join(relative_home)).map_err(storage)?;
-        let owner_path = destination.clone();
-        task::spawn_blocking(move || owner.write(&owner_path)).await?;
+        let witness = task::spawn_blocking(move || {
+            owner.write_in(&contents)?;
+            contents.move_witness().map_err(storage)
+        })
+        .await?;
+        let identity = FileIdentity::from_handle(&witness).map_err(storage)?;
         #[cfg(test)]
         tests::ownership_checkpoint(&self.root, "home-owned");
         self.update(id, |record| {
             record.home = Some(PathBuf::from(portable_home))
         });
         self.persist(id).await?;
-        fs::create_dir_all(final_path.parent().expect("installation has parent"))
-            .await
-            .map_err(storage)?;
-        cancel.check()?;
-        if fs::symlink_metadata(&final_path).await.is_ok() {
-            return Err(storage("managed destination already exists"));
-        }
-        fs::rename(&destination, &final_path)
-            .await
-            .map_err(storage)?;
+        let worker_cancel = cancel.clone();
+        let published = task::spawn_blocking(move || {
+            worker_cancel.check()?;
+            let target = root.create_entry_parent(&final_relative).map_err(storage)?;
+            staging
+                .publish_directory(
+                    OsStr::new(CONTENTS),
+                    identity,
+                    &target,
+                    OsStr::new(&id.to_string()),
+                )
+                .map_err(|error| {
+                    let already_exists = error.kind() == std::io::ErrorKind::AlreadyExists;
+                    let mut error = storage(error);
+                    if already_exists {
+                        error.details =
+                            format!("managed destination already exists\n{}", error.details);
+                    }
+                    error
+                })?;
+            Ok::<_, ManagedJavaError>(target)
+        })
+        .await?;
         #[cfg(test)]
         tests::ownership_checkpoint(&self.root, "published");
+        let name = id.to_string();
+        let current_publication = published.verify_file(OsStr::new(&name), identity);
         // The commit and cancellation request share the lock: exactly one wins.
         let cancelled = {
             let mut entries = self.entries.lock().expect("managed entries poisoned");
@@ -607,12 +634,20 @@ impl ManagedJavaService {
             if cancel.check().is_err() {
                 true
             } else {
+                current_publication.map_err(storage)?;
                 record.snapshot.stage = ManagedJavaStage::AwaitingValidation;
                 false
             }
         };
         if cancelled {
-            fs::remove_dir_all(&final_path).await.map_err(storage)?;
+            let cleanup = task::spawn_blocking(move || -> std::io::Result<()> {
+                published.verify_file(OsStr::new(&name), FileIdentity::from_handle(&witness)?)?;
+                std::fs::remove_dir_all(published.path().join(&name))
+            })
+            .await;
+            if let Err(error) = cleanup {
+                tracing::warn!(%id, %error, "left managed Java home after cancelled publication");
+            }
             return cancel.check().map_err(Into::into);
         }
         self.persist(id).await?;
@@ -672,6 +707,7 @@ impl ManagedJavaService {
         error
     }
 
+    #[cfg(test)]
     fn staging(&self, id: Uuid) -> PathBuf {
         self.root.join(".managed/staging").join(id.to_string())
     }

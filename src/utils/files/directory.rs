@@ -269,7 +269,6 @@ impl Directory {
         let mut file = self.create_private_file(name)?;
         let identity = FileIdentity::from_handle(&file)?;
         let written = write(&mut file);
-        drop(file);
         let check_identity = || self.verify_file(name, identity);
         let result = written.and_then(|value| {
             check_identity()?;
@@ -278,6 +277,8 @@ impl Directory {
         if check_identity().is_ok() {
             let _ = self.unlink(name);
         }
+        // Keep the staged identity live until publication and cleanup finish.
+        drop(file);
         result
     }
 
@@ -447,6 +448,30 @@ impl Directory {
         FileIdentity::from_handle(&self.handle)
     }
 
+    /// Keep the directory identity live across a move. A Windows witness
+    /// permits deleting the old name while the directory chain remains pinned.
+    pub(crate) fn move_witness(&self) -> io::Result<File> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+                FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            let witness = fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(&self.path)?;
+            if FileIdentity::from_handle(&witness)? != self.identity()? {
+                return Err(io::Error::other("directory changed before publication"));
+            }
+            Ok(witness)
+        }
+        #[cfg(not(windows))]
+        self.handle.try_clone()
+    }
+
     pub(crate) fn unlink(&self, name: &OsStr) -> io::Result<()> {
         self.verify_location()?;
         #[cfg(unix)]
@@ -512,6 +537,60 @@ impl Directory {
         self.publish_relative(source, destination, name)
     }
 
+    /// Move a staged directory into a vacant name. A platform without an
+    /// exclusive directory rename cannot publish a managed installation.
+    pub(crate) fn publish_directory(
+        &self,
+        source: &OsStr,
+        identity: FileIdentity,
+        destination: &Directory,
+        name: &OsStr,
+    ) -> io::Result<()> {
+        self.verify_file(source, identity)?;
+        destination.verify_location()?;
+        #[cfg(unix)]
+        if self.rename_exclusive(&component(source)?, destination, &component(name)?)? {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            use std::{iter::once, os::windows::ffi::OsStrExt};
+            use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+
+            windows_component(source)?;
+            windows_component(name)?;
+            let source: Vec<_> = self
+                .path
+                .join(source)
+                .as_os_str()
+                .encode_wide()
+                .chain(once(0))
+                .collect();
+            let target: Vec<_> = destination
+                .path
+                .join(name)
+                .as_os_str()
+                .encode_wide()
+                .chain(once(0))
+                .collect();
+            // Both buffers are null terminated and their parent directories stay open.
+            let moved = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), 0) };
+            return if moved != 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            };
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = name;
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "exclusive directory publication is unavailable",
+            ))
+        }
+    }
+
     #[cfg(unix)]
     fn publish_relative(
         &self,
@@ -522,6 +601,28 @@ impl Directory {
         use std::os::fd::AsRawFd;
         let source = component(source)?;
         let name = component(name)?;
+        let from = self.handle.as_raw_fd();
+        let to = destination.handle.as_raw_fd();
+        if self.rename_exclusive(&source, destination, &name)? {
+            return Ok(());
+        }
+        // linkat fails if the destination exists. The staging owner is
+        // responsible for removing the original name after publication.
+        if unsafe { libc::linkat(from, source.as_ptr(), to, name.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(unix)]
+    fn rename_exclusive(
+        &self,
+        source: &std::ffi::CStr,
+        destination: &Directory,
+        name: &std::ffi::CStr,
+    ) -> io::Result<bool> {
+        use std::os::fd::AsRawFd;
         let from = self.handle.as_raw_fd();
         let to = destination.handle.as_raw_fd();
         #[cfg(target_os = "linux")]
@@ -536,7 +637,7 @@ impl Directory {
                 )
             };
             if renamed == 0 {
-                return Ok(());
+                return Ok(true);
             }
             let error = io::Error::last_os_error();
             if !matches!(
@@ -552,20 +653,15 @@ impl Directory {
                 libc::renameatx_np(from, source.as_ptr(), to, name.as_ptr(), libc::RENAME_EXCL)
             };
             if renamed == 0 {
-                return Ok(());
+                return Ok(true);
             }
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Unsupported {
                 return Err(error);
             }
         }
-        // linkat fails if the destination exists. The staging owner is
-        // responsible for removing the original name after publication.
-        if unsafe { libc::linkat(from, source.as_ptr(), to, name.as_ptr(), 0) } == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+        let _ = (from, to, source, name);
+        Ok(false)
     }
 
     #[cfg(not(unix))]

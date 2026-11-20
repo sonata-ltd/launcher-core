@@ -2,15 +2,17 @@
 //! Old/unknown ownership is preserved; PID reuse conservatively defers recovery.
 use super::{storage, ManagedJavaError, Result};
 use crate::utils::{
-    files,
+    files::{self, directory::Directory},
     object_store::{catalog::read_regular, ObjectStore, StoreAccess, StoreMaintenance},
     process,
 };
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
-    fs,
+    ffi::OsStr,
+    fs, io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use uuid::Uuid;
 
@@ -121,14 +123,14 @@ impl HomeOwner {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn write(&self, generation: &Path) -> Result<()> {
+        self.write_in(&Directory::open(generation).map_err(storage)?)
+    }
+
+    pub(super) fn write_in(&self, generation: &Arc<Directory>) -> Result<()> {
         self.validate()?;
-        let path = files::child(generation, Path::new(HOME_MARKER)).map_err(storage)?;
-        let mut file = tempfile::NamedTempFile::new_in(generation).map_err(storage)?;
-        serde_json::to_writer(&mut file, self).map_err(storage)?;
-        file.as_file().sync_all().map_err(storage)?;
-        file.persist_noclobber(path).map_err(storage)?;
-        Ok(())
+        write_marker(generation, HOME_MARKER, self)
     }
 
     pub(super) fn read(generation: &Path) -> Result<Self> {
@@ -195,22 +197,42 @@ fn staging(root: &Path, operation: Uuid) -> Result<PathBuf> {
     .map_err(storage)
 }
 
-pub(super) fn create_staging(root: &Path, operation: Uuid, owner: &Owner) -> Result<PathBuf> {
+pub(super) fn create_staging(
+    root: &Path,
+    operation: Uuid,
+    owner: &Owner,
+) -> Result<Arc<Directory>> {
     if !owner.local(operation) {
         return Err(storage("unowned managed staging writer"));
     }
-    let path = staging(root, operation)?;
-    fs::create_dir_all(path.parent().unwrap()).map_err(storage)?;
-    fs::create_dir(&path).map_err(storage)?;
+    let parent = open_root(root)?
+        .create_relative(Path::new(".managed/staging"))
+        .map_err(storage)?;
+    let directory = parent
+        .create_private_child(OsStr::new(&operation.to_string()))
+        .map_err(storage)?;
     #[cfg(test)]
     super::tests::ownership_checkpoint(root, "created");
-    let mut file = tempfile::NamedTempFile::new_in(&path).map_err(storage)?;
-    serde_json::to_writer(&mut file, owner).map_err(storage)?;
-    file.as_file().sync_all().map_err(storage)?;
-    file.persist_noclobber(path.join(MARKER)).map_err(storage)?;
+    write_marker(&directory, MARKER, owner)?;
     #[cfg(test)]
     super::tests::ownership_checkpoint(root, "staging");
-    Ok(path)
+    Ok(directory)
+}
+
+pub(super) fn open_root(root: &Path) -> Result<Arc<Directory>> {
+    Directory::open(&root.canonicalize().map_err(storage)?).map_err(storage)
+}
+
+fn write_marker(directory: &Arc<Directory>, name: &str, owner: &impl Serialize) -> Result<()> {
+    directory
+        .with_staged_file(
+            |file| {
+                serde_json::to_writer(&mut *file, owner).map_err(io::Error::other)?;
+                file.sync_all()
+            },
+            |staged, ()| directory.publish(staged, directory, OsStr::new(name)),
+        )
+        .map_err(storage)
 }
 
 pub(super) fn cleanup_staging(

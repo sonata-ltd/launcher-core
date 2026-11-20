@@ -142,12 +142,19 @@ pub(crate) fn copy_tree_replace(
     cancel: &Cancellation,
 ) -> io::Result<()> {
     cancel.check()?;
-    let mut pending = vec![(
-        Directory::open(source)?,
-        Directory::ensure_path(destination)?,
-    )];
-    while let Some((source, destination)) = pending.pop() {
+    let source_root = Directory::open(source)?;
+    let destination_root = Directory::ensure_path(destination)?;
+    let mut pending = vec![std::path::PathBuf::new()];
+    while let Some(relative) = pending.pop() {
         cancel.check()?;
+        let (source, destination) = if relative.as_os_str().is_empty() {
+            (source_root.clone(), destination_root.clone())
+        } else {
+            (
+                source_root.open_relative(&relative)?,
+                destination_root.create_relative(&relative)?,
+            )
+        };
         source.verify_location()?;
         destination.verify_location()?;
 
@@ -157,10 +164,7 @@ pub(crate) fn copy_tree_replace(
             let kind = entry.file_type()?;
             let name = entry.file_name();
             if kind.is_dir() {
-                pending.push((
-                    source.open_relative(Path::new(&name))?,
-                    destination.create_child(&name)?,
-                ));
+                pending.push(relative.join(name));
             } else if kind.is_file() {
                 copy_into(source.open_file(&name)?, &destination, &name, cancel)?;
             } else {

@@ -1,5 +1,7 @@
 use async_std::fs::File;
 use sha2::Sha256;
+use std::ffi::OsStr;
+#[cfg(test)]
 use std::path::Path;
 
 use super::model::*;
@@ -9,26 +11,31 @@ use crate::utils::{
         error::DownloadError,
         stream::{self, Length, Stream},
     },
+    files::directory::Directory,
 };
 
 pub(super) async fn download(
     package: &ManagedJavaPackage,
-    path: &Path,
+    directory: &Directory,
     cancel: &Cancellation,
     progress: impl Fn(u64),
 ) -> Result<String> {
     let (mut response, url) = stream::response(&package.url, true, None, cancel)
         .await
         .map_err(download_error)?;
-    let mut file = File::create(path)
-        .await
-        .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Download, error))?;
+    let name = OsStr::new("archive.part");
+    let path = directory.path().join(name);
+    let mut file = File::from(
+        directory
+            .create_private_file(name)
+            .map_err(|error| ManagedJavaError::caused_by(ManagedJavaErrorKind::Download, error))?,
+    );
     copy_body(
         &mut response,
         &mut file,
         Stream {
             url: url.as_str(),
-            destination: path,
+            destination: &path,
             length: Length::Exact(package.size),
             cancel,
         },

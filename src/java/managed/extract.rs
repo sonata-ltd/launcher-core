@@ -30,6 +30,7 @@ impl<R: Read> Read for CheckedReader<R> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn extract(
     archive: &Path,
     destination: &Path,
@@ -39,6 +40,7 @@ pub(super) fn extract(
     extract_bounded(archive, destination, format, cancel, LIMITS)
 }
 
+#[cfg(test)]
 fn extract_bounded(
     archive: &Path,
     destination: &Path,
@@ -46,9 +48,31 @@ fn extract_bounded(
     cancel: &Cancellation,
     limits: ArchiveLimits,
 ) -> Result<PathBuf> {
+    cancel.check()?;
+    let directory = Directory::ensure_path(destination)
+        .map_err(|error| archive_error(archive, destination, error))?;
+    extract_into(archive, &directory, format, cancel, limits)
+}
+
+pub(super) fn extract_in(
+    archive: &Path,
+    destination: &Arc<Directory>,
+    format: ArchiveFormat,
+    cancel: &Cancellation,
+) -> Result<PathBuf> {
+    extract_into(archive, destination, format, cancel, LIMITS)
+}
+
+fn extract_into(
+    archive: &Path,
+    destination: &Arc<Directory>,
+    format: ArchiveFormat,
+    cancel: &Cancellation,
+    limits: ArchiveLimits,
+) -> Result<PathBuf> {
     let run = || -> io::Result<()> {
-        fs::create_dir_all(destination)?;
-        let destination = Directory::open(destination)?;
+        cancel.check()?;
+        destination.verify_location()?;
         let file = fs::File::open(archive)?;
         let mut total = 0u64;
         match format {
@@ -57,7 +81,7 @@ fn extract_bounded(
                     inner: flate2::read::GzDecoder::new(file),
                     cancel: cancel.clone(),
                 };
-                extract_tar(reader, &destination, cancel, &limits)?;
+                extract_tar(reader, destination, cancel, &limits)?;
             }
             ArchiveFormat::Zip => {
                 let mut zip = zip::ZipArchive::new(file)?;
@@ -102,18 +126,22 @@ fn extract_bounded(
     };
     if let Err(error) = run() {
         cancel.check()?;
-        let mut error = ManagedJavaError::caused_by(super::ManagedJavaErrorKind::Extract, error);
-        error.details = format!(
-            "Archive: {}\nDestination: {}\n{}",
-            archive.display(),
-            destination.display(),
-            error.details,
-        );
-        return Err(error);
+        return Err(archive_error(archive, destination.path(), error));
     }
     cancel.check()?;
-    find_home(destination)
+    find_home(destination.path())
         .map_err(|e| ManagedJavaError::caused_by(super::ManagedJavaErrorKind::Extract, e))
+}
+
+fn archive_error(archive: &Path, destination: &Path, error: io::Error) -> ManagedJavaError {
+    let mut error = ManagedJavaError::caused_by(super::ManagedJavaErrorKind::Extract, error);
+    error.details = format!(
+        "Archive: {}\nDestination: {}\n{}",
+        archive.display(),
+        destination.display(),
+        error.details,
+    );
+    error
 }
 
 fn extract_tar(

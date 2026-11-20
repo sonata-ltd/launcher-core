@@ -1,12 +1,11 @@
 use std::{
     ffi::{OsStr, OsString},
+    fs,
     io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-
-use async_std::{fs, stream::StreamExt};
 
 use crate::utils::files::{directory::Directory, identity::FileIdentity};
 
@@ -95,110 +94,106 @@ pub async fn sweep_partials(root: &Path, min_age: Duration) -> usize {
 pub(super) async fn sweep_partials_with(
     root: &Path,
     min_age: Duration,
-    process_alive: impl Fn(u32) -> bool,
+    process_alive: impl Fn(u32) -> bool + Send + 'static,
 ) -> usize {
+    let root = root.to_owned();
+    async_std::task::spawn_blocking(move || {
+        match root.canonicalize().and_then(|path| Directory::open(&path)) {
+            Ok(directory) => sweep_in(directory, min_age, process_alive),
+            Err(error) if error.kind() == ErrorKind::NotFound => 0,
+            Err(error) => {
+                tracing::warn!(path = %root.display(), %error, "sweep: cannot open root");
+                0
+            }
+        }
+    })
+    .await
+}
+
+fn sweep_in(root: Arc<Directory>, min_age: Duration, process_alive: impl Fn(u32) -> bool) -> usize {
     let mut removed = 0usize;
-    let mut queue: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut queue = vec![PathBuf::new()];
 
-    while let Some(dir) = queue.pop() {
-        let mut entries = match fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == ErrorKind::NotFound => continue,
-            Err(e) => {
-                tracing::warn!(path = %dir.display(), error = %e, "sweep: cannot read directory");
-                continue;
-            }
+    while let Some(relative) = queue.pop() {
+        let opened = if relative.as_os_str().is_empty() {
+            Ok(root.clone())
+        } else {
+            root.open_relative(&relative)
         };
-
-        while let Some(entry) = entries.next().await {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    tracing::warn!(path = %dir.display(), error = %e, "sweep: unreadable entry");
-                    continue;
-                }
-            };
-
-            let path: PathBuf = entry.path().into();
-
-            let file_type = match entry.file_type().await {
-                Ok(ft) => ft,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "sweep: cannot stat");
-                    continue;
-                }
-            };
-
-            if file_type.is_dir() {
-                queue.push(path);
-                continue;
-            }
-
-            if !file_type.is_file() {
-                continue;
-            }
-
-            let orphan_marker = path.extension() == Some(OsStr::new(OWNER_EXTENSION))
-                && path
-                    .file_stem()
-                    .is_some_and(|stem| is_partial(Path::new(stem)));
-            if !is_partial(&path) && !orphan_marker {
-                continue;
-            }
-            let marker = if orphan_marker {
-                path.clone()
-            } else {
-                owner_path(&path)
-            };
-            let owner =
-                async_std::task::spawn_blocking(move || crate::utils::process::read_owner(&marker))
-                    .await;
-            if !owner.is_some_and(|pid| !process_alive(pid)) {
-                continue;
-            }
-            if orphan_marker {
-                let partial = path.with_file_name(path.file_stem().unwrap());
-                // If the partial still exists, its branch owns removal/order.
-                if !matches!(fs::symlink_metadata(partial).await, Err(e) if e.kind() == ErrorKind::NotFound)
-                {
-                    continue;
-                }
-            }
-
-            let modified = match entry.metadata().await.and_then(|m| m.modified()) {
-                Ok(modified) => modified,
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "sweep: no mtime");
-                    continue;
-                }
-            };
-
-            match modified.elapsed() {
-                Ok(age) if age >= min_age => {}
-                _ => continue,
-            }
-
-            match fs::remove_file(&path).await {
-                Ok(()) => {
-                    tracing::debug!(path = %path.display(), "sweep: removed partial download");
-                    if !orphan_marker {
-                        removed += 1;
-                        if let Err(error) = fs::remove_file(owner_path(&path)).await {
-                            if error.kind() != ErrorKind::NotFound {
-                                tracing::warn!(path = %path.display(), %error, "sweep: cannot remove owner marker");
-                            }
-                        }
+        let result = opened.and_then(|directory| {
+            directory.verify_location()?;
+            for entry in fs::read_dir(directory.path())? {
+                let result = entry.and_then(|entry| {
+                    let name = entry.file_name();
+                    let kind = entry.file_type()?;
+                    if kind.is_dir() {
+                        queue.push(relative.join(name));
+                    } else if kind.is_file() {
+                        removed += usize::from(sweep_entry(&directory, &name, min_age, &process_alive)?);
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    if error.kind() != ErrorKind::NotFound {
+                        tracing::debug!(path = %directory.path().display(), %error, "sweep: kept unverified partial");
                     }
                 }
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "sweep: cannot remove")
-                }
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            if error.kind() != ErrorKind::NotFound {
+                tracing::debug!(path = %root.path().join(&relative).display(), %error, "sweep: skipped unverified directory");
             }
         }
     }
 
     removed
+}
+
+fn sweep_entry(
+    directory: &Directory,
+    name: &OsStr,
+    min_age: Duration,
+    process_alive: &impl Fn(u32) -> bool,
+) -> io::Result<bool> {
+    let path = Path::new(name);
+    let partial_entry = is_partial(path);
+    let marker_name = if partial_entry {
+        owner_path(path).into_os_string()
+    } else if path.extension() == Some(OsStr::new(OWNER_EXTENSION)) {
+        let Some(partial) = path.file_stem().filter(|stem| is_partial(Path::new(stem))) else {
+            return Ok(false);
+        };
+        // The partial's branch owns deletion when both names exist.
+        directory.verify_location()?;
+        if !matches!(fs::symlink_metadata(directory.path().join(partial)), Err(error) if error.kind() == ErrorKind::NotFound)
+        {
+            return Ok(false);
+        }
+        name.to_owned()
+    } else {
+        return Ok(false);
+    };
+    let entry = directory.open_file(name)?;
+    let modified = entry.metadata()?.modified()?;
+    if !modified.elapsed().is_ok_and(|age| age >= min_age) {
+        return Ok(false);
+    }
+    let marker = directory.open_file(&marker_name)?;
+    if !crate::utils::process::read_owner_from(&marker).is_some_and(|pid| !process_alive(pid)) {
+        return Ok(false);
+    }
+    let marker_identity = FileIdentity::from_handle(&marker)?;
+    directory.verify_file(&marker_name, marker_identity)?;
+    directory.verify_file(name, FileIdentity::from_handle(&entry)?)?;
+    directory.unlink(name)?;
+    if partial_entry && directory.verify_file(&marker_name, marker_identity).is_ok() {
+        if let Err(error) = directory.unlink(&marker_name) {
+            tracing::debug!(path = %directory.path().join(&marker_name).display(), %error, "sweep: kept owner marker");
+        }
+    }
+    Ok(partial_entry)
 }
 
 pub fn is_partial(path: &Path) -> bool {
@@ -336,6 +331,30 @@ mod tests {
         );
         assert!(!dead.exists());
         assert!(live.exists());
+    }
+
+    #[async_std::test]
+    async fn retention_preserves_a_replaced_partial_even_with_a_dead_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let path = partial(root.path(), "old.jar");
+        let previous = root.path().join("previous");
+        std::fs::write(&path, b"old download").unwrap();
+        std::fs::write(owner_path(&path), b"41").unwrap();
+        let selected = path.clone();
+        let moved = previous.clone();
+
+        let removed = sweep_partials_with(root.path(), Duration::ZERO, move |pid| {
+            assert_eq!(pid, 41);
+            std::fs::rename(&selected, &moved).unwrap();
+            std::fs::write(&selected, b"preserve these bytes").unwrap();
+            false
+        })
+        .await;
+
+        assert_eq!(removed, 0);
+        assert_eq!(std::fs::read(&path).unwrap(), b"preserve these bytes");
+        assert_eq!(std::fs::read(previous).unwrap(), b"old download");
+        assert!(owner_path(&path).exists());
     }
 
     #[test]
