@@ -70,6 +70,7 @@ pub enum BusyReason {
 pub enum StalePlanReason {
     Expired,
     InventoryChanged,
+    RegisteredContentChanged,
     CompatibilityChanged,
 }
 

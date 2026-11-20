@@ -46,6 +46,7 @@ struct StoredPlan {
     preview: InstallPreview,
     releases: Vec<install::PlannedRelease>,
     signature: String,
+    registered_signature: String,
     compatibility: Compatibility,
     created: Instant,
 }
@@ -338,14 +339,31 @@ impl InstanceContentService {
         instance: InstanceId,
         roots: Vec<ProjectKey>,
     ) -> Result<InstallPreview> {
+        self.plan_install_with_catalog(instance, roots, &self.catalog)
+            .await
+    }
+
+    pub(super) async fn plan_install_with_catalog(
+        &self,
+        instance: InstanceId,
+        roots: Vec<ProjectKey>,
+        catalog: &impl catalog_plan::ReleaseCatalog,
+    ) -> Result<InstallPreview> {
         storage::ensure_no_pending(&self.db, instance).await?;
         let (root, compatibility) = self.context(instance).await?;
         let snapshot = super::inventory::snapshot(root.clone()).await?;
         let registered = storage::registered_mods(&self.db, instance).await?;
+        let registered_signature = storage::registered_signature(&registered)?;
+        let verified = storage::verified_paths(&registered, &snapshot);
+        let owners: HashMap<_, _> = registered
+            .iter()
+            .zip(verified.iter().copied())
+            .filter_map(|(entry, path)| path.map(|path| (path, entry)))
+            .collect();
         let mut installed: HashMap<ProjectKey, super::model::Candidate> = HashMap::new();
         let mut already_present = Vec::new();
-        for entry in &registered {
-            let Some(path) = entry.verified_path(&snapshot) else {
+        for (entry, path) in registered.iter().zip(verified) {
+            let Some(path) = path else {
                 continue;
             };
             if !path
@@ -391,7 +409,7 @@ impl InstanceContentService {
         }
         let all_releases = async_std::future::timeout(
             Duration::from_secs(90),
-            catalog_plan::resolve_with_installed(&self.catalog, &roots, &compatibility, installed),
+            catalog_plan::resolve_with_installed(catalog, &roots, &compatibility, installed),
         )
         .await
         .map_err(|_| ContentError::Timeout(Duration::from_secs(90)))??;
@@ -406,7 +424,8 @@ impl InstanceContentService {
                     "different projects create the same file name".into(),
                 ));
             }
-            let target = root.join("mods").join(&release.file.file_name);
+            let relative = std::path::Path::new("mods").join(&release.file.file_name);
+            let target = root.join(&relative);
             let already_installed = if std::fs::symlink_metadata(&target).is_ok() {
                 let file = release.file.clone();
                 let matches = async_std::task::spawn_blocking(move || -> Result<bool> {
@@ -428,9 +447,17 @@ impl InstanceContentService {
             } else {
                 false
             };
-            let existing = registered
-                .iter()
-                .any(|entry| entry.matches(&release.key.project, &snapshot));
+            let owner = owners.get(relative.as_path()).copied();
+            if owner.is_some_and(|entry| {
+                entry.project() != release.key.project || entry.release_id != release.key.release_id
+            }) {
+                return Err(ContentError::Invalid(
+                    "the destination is already registered to another release".into(),
+                ));
+            }
+            let existing = owners
+                .values()
+                .any(|entry| entry.project() == release.key.project);
             if existing && !already_installed {
                 return Err(ContentError::Invalid(
                     "another release of the project is already installed".into(),
@@ -445,11 +472,7 @@ impl InstanceContentService {
                 already_installed,
             });
             if !already_installed
-                || !registered.iter().any(|entry| {
-                    entry.matches(&release.key.project, &snapshot)
-                        && std::path::Path::new(&entry.relative_path)
-                            == std::path::Path::new("mods").join(&release.file.file_name)
-                })
+                || owner.is_none_or(|entry| std::path::Path::new(&entry.relative_path) != relative)
             {
                 releases.push(install::PlannedRelease {
                     release,
@@ -459,6 +482,12 @@ impl InstanceContentService {
         }
         if super::inventory::signature(root).await? != snapshot.signature {
             return Err(ContentError::StalePlan(StalePlanReason::InventoryChanged));
+        }
+        let current = storage::registered_mods(&self.db, instance).await?;
+        if storage::registered_signature(&current)? != registered_signature {
+            return Err(ContentError::StalePlan(
+                StalePlanReason::RegisteredContentChanged,
+            ));
         }
         let signature = snapshot.signature;
         let preview = InstallPreview {
@@ -485,6 +514,7 @@ impl InstanceContentService {
                 preview: preview.clone(),
                 releases,
                 signature,
+                registered_signature,
                 compatibility,
                 created: Instant::now(),
             },
@@ -493,18 +523,14 @@ impl InstanceContentService {
     }
 
     pub fn start_install(self: &Arc<Self>, plan_id: Uuid) -> Result<Uuid> {
-        let plan = {
-            let mut plans = self
-                .plans
-                .lock()
-                .map_err(|_| ContentError::Invalid("Plan lock poisoned".into()))?;
-            plans.retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
-            plans.remove(&plan_id)
-        }
-        .ok_or(ContentError::StalePlan(StalePlanReason::Expired))?;
-        if plan.created.elapsed() >= Duration::from_secs(300) {
-            return Err(ContentError::StalePlan(StalePlanReason::Expired));
-        }
+        let mut plans = self
+            .plans
+            .lock()
+            .map_err(|_| ContentError::Invalid("Plan lock poisoned".into()))?;
+        plans.retain(|_, plan| plan.created.elapsed() < PLAN_TTL);
+        let plan = plans
+            .get(&plan_id)
+            .ok_or(ContentError::StalePlan(StalePlanReason::Expired))?;
         if plan.releases.is_empty() {
             return Err(ContentError::Invalid(
                 "all selected files are already installed".into(),
@@ -515,6 +541,10 @@ impl InstanceContentService {
             .activity
             .reserve_content_change(instance)
             .map_err(ContentError::from)?;
+        let cancel = Cancel::default();
+        let ticket = self
+            .tasks
+            .admit("content installation", Some(cancel.clone()))?;
         let id = Uuid::new_v4();
         use crate::data::registry::operation::message::stage::OperationStage;
         let operation = self
@@ -532,7 +562,6 @@ impl InstanceContentService {
             )
             .owned_worker();
         let operation_id = operation.id();
-        let cancel = Cancel::default();
         {
             let mut jobs = self
                 .jobs
@@ -558,8 +587,12 @@ impl InstanceContentService {
                 },
             )?;
         }
+        let plan = plans
+            .remove(&plan_id)
+            .ok_or(ContentError::StalePlan(StalePlanReason::Expired))?;
+        drop(plans);
         let service = self.clone();
-        self.tasks.spawn("content installation", Some(cancel.clone()), async move {
+        ticket.spawn(async move {
             // Job владеет activity, а не GUI Task: закрытие страницы не даёт
             // запустить игру посередине установки и не теряет результат.
             let _activity = activity;
@@ -611,10 +644,7 @@ impl InstanceContentService {
                     tracing::warn!(error = %cleanup_error, "completed content journal cleanup failed");
                 }
             }
-        }).map_err(|error| {
-            self.jobs.lock().unwrap_or_else(|error| error.into_inner()).finish(id, ContentPhase::Failed, Some(Arc::new(ContentError::Task(error.clone()))));
-            ContentError::Task(error)
-        })?;
+        });
         Ok(id)
     }
 
@@ -643,6 +673,12 @@ impl InstanceContentService {
         let snapshot = super::inventory::snapshot(root.clone()).await?;
         if snapshot.signature != plan.signature {
             return Err(ContentError::StalePlan(StalePlanReason::InventoryChanged));
+        }
+        let registered = storage::registered_mods(&self.db, plan.preview.instance_id).await?;
+        if storage::registered_signature(&registered)? != plan.registered_signature {
+            return Err(ContentError::StalePlan(
+                StalePlanReason::RegisteredContentChanged,
+            ));
         }
         storage::reconcile_registered_mods(&self.db, plan.preview.instance_id, &snapshot).await?;
         self.mod_index

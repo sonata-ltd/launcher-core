@@ -1161,12 +1161,13 @@ async fn removed_registered_mod_does_not_block_publication_at_the_same_path() {
     let present = super::inventory::snapshot(fixture.root.clone())
         .await
         .unwrap();
-    assert!(registered[0].matches(&project, &present));
+    assert_eq!(registered[0].project(), project);
+    assert!(storage::verified_paths(&registered, &present)[0].is_some());
     std::fs::remove_file(&target).unwrap();
     let missing = super::inventory::snapshot(fixture.root.clone())
         .await
         .unwrap();
-    assert!(!registered[0].matches(&project, &missing));
+    assert!(storage::verified_paths(&registered, &missing)[0].is_none());
 
     let replacement = uuid::Uuid::new_v4();
     storage::prepare(&fixture.db, replacement, fixture.id, &files)

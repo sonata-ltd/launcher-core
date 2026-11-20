@@ -1,10 +1,14 @@
 //! Installed-aware planning regressions, real SQLite/files and no provider HTTP.
 use super::{fixture, prepared, Fixture};
 use crate::instance::content::{
+    catalog::{
+        types::{CatalogRelease, Compatibility, DownloadFile},
+        RequestBudget,
+    },
     error::ContentError,
     journal::{Placement, PublishedFile},
-    model::{Dependency, DependencyKind, ProjectKey, Provider},
-    resolve::graph::ResolveError,
+    model::{Dependency, DependencyKind, ProjectKey, Provider, ReleaseKey},
+    resolve::{catalog_plan::ReleaseCatalog, graph::ResolveError},
     service::InstanceContentService,
     storage,
     store::{storage as objects, ObjectStore},
@@ -62,6 +66,160 @@ fn project(name: &str) -> ProjectKey {
     ProjectKey {
         provider: Provider::Modrinth,
         project_id: name.into(),
+    }
+}
+
+struct LocalCatalog;
+
+impl ReleaseCatalog for LocalCatalog {
+    async fn choices(
+        &self,
+        project: &ProjectKey,
+        _exact: Option<&str>,
+        _compatibility: &Compatibility,
+        _budget: &mut RequestBudget,
+    ) -> Result<Vec<CatalogRelease>, ContentError> {
+        use sha1::{Digest, Sha1};
+        let bytes = b"already on disk";
+        Ok(vec![CatalogRelease {
+            key: ReleaseKey {
+                project: project.clone(),
+                release_id: "1".into(),
+            },
+            title: project.project_id.clone(),
+            file: DownloadFile {
+                file_name: "shared.jar".into(),
+                url: "https://example.invalid/no-download".into(),
+                size_bytes: bytes.len() as u64,
+                sha1: Some(format!("{:x}", Sha1::digest(bytes))),
+                sha512: None,
+            },
+            dependencies: vec![],
+        }])
+    }
+}
+
+async fn wait_for_job(
+    fixture: &Fixture,
+    content: &InstanceContentService,
+    id: uuid::Uuid,
+) -> super::super::api::ContentJobSnapshot {
+    async_std::future::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(job) = content.latest_job(fixture.id) {
+                if job.id == id
+                    && !job.active()
+                    && fixture
+                        .instances
+                        .activity()
+                        .reserve_content_change(fixture.id)
+                        .is_ok()
+                {
+                    return job;
+                }
+            }
+            async_std::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[async_std::test]
+async fn sql_only_adoption_invalidates_a_second_preview_without_touching_file_bytes() {
+    let fixture = fixture().await;
+    let path = fixture.root.join("mods/shared.jar");
+    std::fs::write(&path, b"already on disk").unwrap();
+    let content = std::sync::Arc::new(service(&fixture).await);
+    let left = content
+        .plan_install_with_catalog(fixture.id, vec![project("first")], &LocalCatalog)
+        .await
+        .unwrap();
+    let right = content
+        .plan_install_with_catalog(fixture.id, vec![project("second")], &LocalCatalog)
+        .await
+        .unwrap();
+    let first = content.start_install(left.id).unwrap();
+    assert!(wait_for_job(&fixture, &content, first)
+        .await
+        .cause
+        .is_none());
+    let second = content.start_install(right.id).unwrap();
+    let rejected = wait_for_job(&fixture, &content, second).await;
+    assert!(
+        matches!(rejected.cause.as_deref(), Some(ContentError::StalePlan(_))),
+        "{:?}",
+        rejected.cause
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"already on disk");
+    let registered = storage::registered_mods(&fixture.db, fixture.id)
+        .await
+        .unwrap();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].project().project_id, "first");
+    fixture.operations.tasks.shutdown().await;
+}
+
+#[async_std::test]
+async fn a_busy_instance_keeps_its_previously_built_preview_for_one_retry() {
+    let fixture = fixture().await;
+    std::fs::write(fixture.root.join("mods/shared.jar"), b"already on disk").unwrap();
+    let content = std::sync::Arc::new(service(&fixture).await);
+    let preview = content
+        .plan_install_with_catalog(fixture.id, vec![project("first")], &LocalCatalog)
+        .await
+        .unwrap();
+    let busy = fixture
+        .instances
+        .activity()
+        .reserve_content_change(fixture.id)
+        .unwrap();
+    assert!(matches!(
+        content.start_install(preview.id),
+        Err(ContentError::Busy(_))
+    ));
+    drop(busy);
+    let job = content.start_install(preview.id).unwrap();
+    assert!(wait_for_job(&fixture, &content, job).await.cause.is_none());
+    assert!(matches!(
+        content.start_install(preview.id),
+        Err(ContentError::StalePlan(_))
+    ));
+    fixture.operations.tasks.shutdown().await;
+}
+
+#[async_std::test]
+async fn exact_binding_reserves_a_file_against_another_historical_seed() {
+    for historical_first in [true, false] {
+        let fixture = fixture().await;
+        let entries = [
+            ("historical", "missing.jar", None),
+            ("current", "present.jar", Some(vec![])),
+        ];
+        let mut entries = Vec::from(entries);
+        if !historical_first {
+            entries.reverse();
+        }
+        for (name, file, dependencies) in entries {
+            register_mod(
+                &fixture,
+                project(name),
+                "1",
+                file,
+                b"same archive",
+                dependencies,
+            )
+            .await;
+        }
+        std::fs::remove_file(fixture.root.join("mods/missing.jar")).unwrap();
+        let content = service(&fixture).await;
+        let preview = content
+            .plan_install(fixture.id, vec![project("current")])
+            .await
+            .unwrap();
+        assert_eq!(preview.items.len(), 1);
+        assert_eq!(preview.items[0].file_name, "present.jar");
+        fixture.operations.tasks.shutdown().await;
     }
 }
 

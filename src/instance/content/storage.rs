@@ -5,6 +5,10 @@ use crate::{
     instance::content::error::{ContentError, Result},
     instance::model::InstanceId,
 };
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    path::Path,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
@@ -271,7 +275,7 @@ pub(super) async fn abandon(db: &Database, instance: InstanceId, operation: &str
     Ok(())
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, serde::Serialize)]
 pub(super) struct RegisteredMod {
     id: i64,
     pub relative_path: String,
@@ -300,40 +304,74 @@ impl RegisteredMod {
         })?;
         Ok(serde_json::from_str(json)?)
     }
+}
 
-    pub(super) fn verified_path<'a>(
-        &self,
-        snapshot: &'a super::inventory::ModSnapshot,
-    ) -> Option<&'a std::path::Path> {
-        let recorded = std::path::Path::new(&self.relative_path);
-        if snapshot
+pub(super) fn registered_signature(registered: &[RegisteredMod]) -> Result<String> {
+    Ok(crate::utils::files::sha256(&serde_json::to_vec(
+        registered,
+    )?))
+}
+
+/// An observed archive contributes evidence to at most one historical row.
+/// Exact matches reserve their path before any relocation claim is considered.
+pub(super) fn verified_paths<'a>(
+    registered: &[RegisteredMod],
+    snapshot: &'a super::inventory::ModSnapshot,
+) -> Vec<Option<&'a Path>> {
+    let mut verified = vec![None; registered.len()];
+    let mut exact = HashMap::<&Path, Option<usize>>::new();
+    let mut unresolved = Vec::new();
+    for (index, row) in registered.iter().enumerate() {
+        let Some((path, _)) = snapshot
             .archives
-            .get(recorded)
-            .is_some_and(|hash| hash.eq_ignore_ascii_case(&self.object_sha256))
-        {
-            return snapshot
-                .archives
-                .get_key_value(recorded)
-                .map(|(path, _)| path.as_path());
+            .get_key_value(Path::new(&row.relative_path))
+            .filter(|(_, hash)| hash.eq_ignore_ascii_case(&row.object_sha256))
+        else {
+            unresolved.push(index);
+            continue;
+        };
+        let path = path.as_path();
+        match exact.entry(path) {
+            Entry::Vacant(entry) => {
+                entry.insert(Some(index));
+                verified[index] = Some(path);
+            }
+            Entry::Occupied(mut entry) => {
+                if let Some(other) = entry.get_mut().take() {
+                    verified[other] = None;
+                }
+            }
         }
-        let mut paths = snapshot
-            .archives
-            .iter()
-            .filter(|(_, hash)| hash.eq_ignore_ascii_case(&self.object_sha256))
-            .map(|(path, _)| path.as_path());
-        let first = paths.next()?;
-        paths.next().is_none().then_some(first)
     }
-
-    pub(super) fn matches(
-        &self,
-        project: &super::model::ProjectKey,
-        snapshot: &super::inventory::ModSnapshot,
-    ) -> bool {
-        self.provider == project.provider
-            && self.project_id == project.project_id
-            && self.verified_path(snapshot).is_some()
+    if unresolved.is_empty() {
+        return verified;
     }
+    let mut by_digest = HashMap::<&str, Option<&Path>>::new();
+    for (path, digest) in &snapshot.archives {
+        by_digest
+            .entry(digest)
+            .and_modify(|match_| *match_ = None)
+            .or_insert(Some(path));
+    }
+    let mut relocated = HashMap::<&Path, Option<usize>>::new();
+    for index in unresolved {
+        let digest = registered[index].object_sha256.to_ascii_lowercase();
+        let Some(Some(path)) = by_digest.get(digest.as_str()).copied() else {
+            continue;
+        };
+        if !exact.contains_key(path) {
+            relocated
+                .entry(path)
+                .and_modify(|claim| *claim = None)
+                .or_insert(Some(index));
+        }
+    }
+    for (path, claim) in relocated {
+        if let Some(index) = claim {
+            verified[index] = Some(path);
+        }
+    }
+    verified
 }
 
 pub(super) async fn has_registered_mods(db: &Database, instance: InstanceId) -> Result<bool> {
@@ -354,7 +392,7 @@ pub(super) async fn registered_mods(
          JOIN content_objects AS o ON o.id=i.object_id
          JOIN content_provider_files AS p ON p.id=i.preferred_provider_file_id
           AND p.object_id=i.object_id
-         WHERE i.instance_id=? AND i.kind='mod'",
+         WHERE i.instance_id=? AND i.kind='mod' ORDER BY i.id",
     )
     .bind(instance.get())
     .fetch_all(&db.pool)
@@ -368,10 +406,10 @@ pub(super) async fn reconcile_registered_mods(
     snapshot: &super::inventory::ModSnapshot,
 ) -> Result<()> {
     let registered = registered_mods(db, instance).await?;
+    let verified = verified_paths(&registered, snapshot);
     let mut transaction = db.pool.begin().await?;
-    for entry in registered {
+    for (entry, observed) in registered.into_iter().zip(verified) {
         let recorded = std::path::Path::new(&entry.relative_path);
-        let observed = entry.verified_path(snapshot);
         let rename = observed
             .filter(|path| *path != recorded)
             .and_then(|path| path.to_str());

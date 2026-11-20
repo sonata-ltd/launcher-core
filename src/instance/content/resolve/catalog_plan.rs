@@ -8,7 +8,7 @@ use crate::instance::content::{
 use std::collections::{HashMap, HashSet, VecDeque};
 
 // A private seam for deterministic traversal tests; production still uses the bounded adapters.
-trait ReleaseCatalog {
+pub(in crate::instance::content) trait ReleaseCatalog {
     async fn choices(
         &self,
         project: &ProjectKey,
@@ -51,7 +51,7 @@ pub async fn resolve(
 }
 
 pub(in crate::instance::content) async fn resolve_with_installed(
-    catalog: &ContentCatalog,
+    catalog: &impl ReleaseCatalog,
     roots: &[ProjectKey],
     compatibility: &Compatibility,
     installed: HashMap<ProjectKey, Candidate>,
