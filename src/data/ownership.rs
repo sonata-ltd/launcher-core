@@ -39,8 +39,7 @@ impl LayoutLease {
         } else {
             Some(lock(&instances)?)
         };
-        let content = files::child(&root, Path::new("content-store"))?;
-        let content = ObjectStore::new(content).lock_exclusive()?;
+        let content = ObjectStore::beneath(&root, Path::new("content-store"))?.lock_exclusive()?;
         Ok(Self {
             _root: root_lock,
             _instances: instances_lock,

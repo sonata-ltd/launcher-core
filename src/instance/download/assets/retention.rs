@@ -59,11 +59,9 @@ pub(super) async fn attach(
 pub(super) async fn collect(assets: PathBuf, minimum_age: Duration) -> Result<usize> {
     async_std::task::spawn(async move {
         let assets = fs::canonicalize(assets).map_err(bytes_error)?;
-        let root = files::child(&assets, Path::new("objects/.sonata-cas"))
-            .map_err(|error| bytes_error(io::Error::other(error)))?;
         let maintenance = Arc::new(
-            ObjectStore::new(root)
-                .try_maintenance()
+            ObjectStore::beneath(&assets, Path::new("objects/.sonata-cas"))
+                .and_then(|store| store.try_maintenance())
                 .map_err(bytes_error)?,
         );
         let mut databases = LockedDatabases::open(maintenance.clone()).await?;

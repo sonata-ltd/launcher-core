@@ -6,7 +6,6 @@ use crate::{
     data::db::Database,
     utils::{
         cancellation::Cancellation,
-        files,
         object_store::{ObjectStore, StoreAccess},
         process_pin::ProcessPin,
     },
@@ -33,8 +32,9 @@ impl JavaRetention {
         super::retention::attach(Some(self.database.clone()), self.root.clone())
             .await
             .map_err(io::Error::other)?;
-        let root = files::child(&self.root, Path::new(".managed")).map_err(io::Error::other)?;
-        let access = ObjectStore::new(root).access(cancel).await?;
+        let access = ObjectStore::beneath(&self.root, Path::new(".managed"))?
+            .access(cancel)
+            .await?;
         JavaUse::admitted(access)
     }
 }

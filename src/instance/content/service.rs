@@ -183,7 +183,10 @@ impl InstanceContentService {
         let registry = instances.get_registry();
         let activity = instances.activity();
         let tasks = instances.tasks();
-        let store = Arc::new(ObjectStore::new(paths.root().join("content-store")));
+        let store = Arc::new(ObjectStore::beneath(
+            paths.root(),
+            std::path::Path::new("content-store"),
+        )?);
         let maintenance = store.try_maintenance()?;
         let cleanup_db = db.clone();
         async_std::task::spawn(async move {

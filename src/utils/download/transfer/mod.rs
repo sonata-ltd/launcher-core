@@ -206,7 +206,10 @@ pub(crate) async fn place_in(
 ) -> Result<String> {
     validate_hash(expected)?;
     cancel.check()?;
-    let access = ObjectStore::new(blobs.to_owned()).access(cancel).await;
+    let access = match ObjectStore::child_of(blobs) {
+        Ok(store) => store.access(cancel).await,
+        Err(error) => Err(error),
+    };
     cancel.check()?;
     let access = access?;
     let target = Arc::new(task::spawn_blocking(move || destination.bind()).await?);

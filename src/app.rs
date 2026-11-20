@@ -164,8 +164,8 @@ impl GlobalState {
                     crate::instance::launch::natives::sweep_stale(paths.instances().clone()).await;
                     let blobs = paths.libraries().join("blobs");
                     task::spawn_blocking(move || {
-                        let store = crate::utils::object_store::ObjectStore::new(blobs);
-                        if let Err(error) = store.sweep_staging() {
+                        let store = crate::utils::object_store::ObjectStore::child_of(&blobs);
+                        if let Err(error) = store.and_then(|store| store.sweep_staging()) {
                             tracing::warn!(%error, "runtime scratch maintenance deferred");
                         }
                     })

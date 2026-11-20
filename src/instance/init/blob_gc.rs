@@ -28,7 +28,7 @@ pub(super) async fn collect(paths: Arc<LauncherPaths>, minimum_age: Duration) ->
         }
         // Lock order is library -> blobs, as in admitted installation. Standalone
         // blob importers are excluded too; try rather than hold SQL while waiting.
-        let maintenance = Arc::new(ObjectStore::new(blobs).try_maintenance()?);
+        let maintenance = Arc::new(ObjectStore::child_of(&blobs)?.try_maintenance()?);
         let owners: HashSet<_> = RootCatalog::owners(&library)?
             .into_iter()
             .map(|owner| owner.identity)

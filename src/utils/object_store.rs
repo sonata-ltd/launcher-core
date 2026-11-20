@@ -24,11 +24,78 @@ pub(crate) use access::{StoreAccess, StoreLock, StoreMaintenance};
 
 pub(crate) struct ObjectStore {
     root: PathBuf,
+    /// Configured location; an alias here is followed once when opening.
+    anchor: PathBuf,
+    /// Launcher-owned subpath below the anchor, opened without following links.
+    beneath: PathBuf,
 }
 
 impl ObjectStore {
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// A store at a launcher-owned subpath of a configured root. The configured
+    /// root may be an alias; no component of `relative` may redirect.
+    pub(crate) fn beneath(anchor: &Path, relative: &Path) -> io::Result<Self> {
+        crate::utils::files::relative(relative).map_err(io::Error::other)?;
+        Ok(Self {
+            root: anchor.join(relative),
+            anchor: anchor.to_owned(),
+            beneath: relative.to_owned(),
+        })
+    }
+
+    /// Opens (creating when asked) the store root through the anchor. Returns
+    /// the resolved root path and its held directory.
+    fn open_root(
+        &self,
+        create: bool,
+    ) -> io::Result<
+        Option<(
+            PathBuf,
+            std::sync::Arc<crate::utils::files::directory::Directory>,
+        )>,
+    > {
+        use crate::utils::files::directory::Directory;
+        if create {
+            fs::create_dir_all(&self.anchor)?;
+        }
+        let anchor = match fs::canonicalize(&self.anchor) {
+            Ok(anchor) => anchor,
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let anchor = Directory::open(&anchor)?;
+        let directory = if self.beneath.as_os_str().is_empty() {
+            anchor
+        } else if create {
+            anchor.create_relative(&self.beneath)?
+        } else {
+            match anchor.open_optional(&self.beneath)? {
+                Some(directory) => directory,
+                None => return Ok(None),
+            }
+        };
+        Ok(Some((directory.path().to_owned(), directory)))
+    }
+
+    /// A launcher-owned store directory directly below its configured parent.
+    pub(crate) fn child_of(path: &Path) -> io::Result<Self> {
+        match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => Self::beneath(parent, Path::new(name)),
+            _ => Err(io::ErrorKind::InvalidInput.into()),
+        }
+    }
+
+    fn create_root(
+        &self,
+    ) -> io::Result<(
+        PathBuf,
+        std::sync::Arc<crate::utils::files::directory::Directory>,
+    )> {
+        self.open_root(true)?
+            .ok_or_else(|| io::ErrorKind::NotFound.into())
     }
 }
 
@@ -124,6 +191,50 @@ mod tests {
         assert!(second.lock_exclusive().is_ok());
     }
 
+    #[cfg(unix)]
+    fn redirected_store(temp: &Path) -> (ObjectStore, PathBuf) {
+        let actual = temp.join("actual");
+        fs::create_dir_all(actual.join("owned")).unwrap();
+        let configured = temp.join("configured");
+        std::os::unix::fs::symlink(&actual, &configured).unwrap();
+        let store = ObjectStore::beneath(&configured, Path::new("owned/store")).unwrap();
+        // A configured root alias is followed.
+        drop(store.try_access().unwrap());
+        // A launcher-owned component replaced after the store was resolved.
+        let elsewhere = temp.join("elsewhere");
+        fs::create_dir_all(elsewhere.join("store/staging/import-1")).unwrap();
+        fs::write(elsewhere.join("store/staging/import-1/.sonata-owner"), b"1").unwrap();
+        fs::rename(actual.join("owned"), temp.join("previous")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, actual.join("owned")).unwrap();
+        (store, elsewhere)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subpath_store_follows_a_configured_alias_but_not_a_redirected_owned_component() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, elsewhere) = redirected_store(temp.path());
+        let before = tree(&elsewhere);
+        assert!(store.try_access().is_err());
+        assert!(store.try_maintenance().is_err());
+        assert!(store.lock_exclusive().is_err());
+        assert!(store.root_key().is_err());
+        assert!(store.sweep_staging().is_err());
+        assert_eq!(tree(&elsewhere), before);
+    }
+
+    #[cfg(unix)]
+    fn tree(root: &Path) -> Vec<PathBuf> {
+        let mut found = vec![root.to_owned()];
+        if root.is_dir() {
+            for entry in fs::read_dir(root).unwrap() {
+                found.extend(tree(&entry.unwrap().path()));
+            }
+        }
+        found.sort();
+        found
+    }
+
     #[test]
     fn aliases_survive_root_relocation_and_never_substitute_unverified_bytes() {
         let temp = tempfile::tempdir().unwrap();
@@ -171,28 +282,35 @@ pub(crate) struct StoredObject {
 
 impl ObjectStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            anchor: root.clone(),
+            root,
+            beneath: PathBuf::new(),
+        }
     }
 
     /// Scratch-only retention, safe during other live imports. This never
     /// collects published objects, aliases or legacy files and requires no SQL
     /// roots. Imports from an exited process cannot register or publish later.
     pub(crate) fn sweep_staging(&self) -> io::Result<usize> {
-        owned_directory::sweep(&self.root.join("staging"), IMPORT_PREFIX)
+        let Some((_, root)) = self.open_root(false)? else {
+            return Ok(0);
+        };
+        match root.open_optional(Path::new("staging"))? {
+            Some(staging) => owned_directory::sweep_in(&staging, &[IMPORT_PREFIX]),
+            None => Ok(0),
+        }
     }
 
     pub(crate) fn root_key(&self) -> io::Result<Vec<u8>> {
-        fs::create_dir_all(&self.root)?;
-        Ok(crate::utils::files::path_key(&fs::canonicalize(
-            &self.root,
-        )?))
+        let (root, _) = self.create_root()?;
+        Ok(crate::utils::files::path_key(&root))
     }
 
     /// Content service ownership, distinct from the shared admission/exclusive
     /// maintenance barrier. Both follow the actual store through aliases.
     pub(crate) fn lock_exclusive(&self) -> io::Result<StoreLock> {
-        fs::create_dir_all(&self.root)?;
-        let root = crate::utils::files::directory::Directory::open(&self.root.canonicalize()?)?;
+        let (_, root) = self.create_root()?;
         let lock = root.open_lock(OsStr::new(".sonata-store.lock"))?;
         StoreLock::exclusive(lock)
     }

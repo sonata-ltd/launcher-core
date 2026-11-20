@@ -63,13 +63,11 @@ pub(super) fn resolve(root: &Path, path: &Path) -> Result<String> {
 
 pub(crate) async fn migrate(db: Arc<Database>, configured: PathBuf) -> Result<Report> {
     async_std::task::spawn(async move {
-        let scope = files::child(&configured, Path::new(".managed"))
-            .map_err(|e| DbError::InvalidInput(e.to_string()))?;
         // This is the same resource admission held by managed install/validation.
         // No bytes/record/identity are deleted; SQL is locked until commit even
         // when a migration caller is dropped.
-        let _maintenance = ObjectStore::new(scope)
-            .try_maintenance()
+        let _maintenance = ObjectStore::beneath(&configured, Path::new(".managed"))
+            .and_then(|store| store.try_maintenance())
             .map_err(|e| DbError::InvalidInput(format!("Java path upgrade: {e}")))?;
         let mut tx = db.pool.begin_with("BEGIN IMMEDIATE").await?;
         let rows: Vec<(i64, String, String)> = sqlx::query_as(

@@ -116,11 +116,11 @@ impl AssetsData {
     /// aliases and SQL metadata are deliberately not collected here.
     pub(crate) async fn sweep_imports(assets: PathBuf) {
         async_std::task::spawn_blocking(move || {
-            let result = crate::utils::files::child(&assets, Path::new("objects/.sonata-cas"))
-                .map_err(std::io::Error::other)
-                .and_then(|root| {
-                    crate::utils::object_store::ObjectStore::new(root).sweep_staging()
-                });
+            let result = crate::utils::object_store::ObjectStore::beneath(
+                &assets,
+                Path::new("objects/.sonata-cas"),
+            )
+            .and_then(|store| store.sweep_staging());
             match result {
                 Ok(removed) if removed > 0 => {
                     tracing::info!(removed, "cleaned up abandoned asset imports")

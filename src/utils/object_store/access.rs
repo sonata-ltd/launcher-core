@@ -78,11 +78,14 @@ impl StoreMaintenance {
 
 impl ObjectStore {
     fn access_file(&self) -> io::Result<(ObjectStore, Arc<Directory>, fs::File)> {
-        fs::create_dir_all(&self.root)?;
-        let root = fs::canonicalize(&self.root)?;
-        let directory = Directory::open(&root)?;
+        let (root, directory) = self.create_root()?;
         let file = directory.open_lock(std::ffi::OsStr::new(LOCK))?;
-        Ok((ObjectStore::new(root), directory, file))
+        let store = ObjectStore {
+            root,
+            anchor: self.anchor.clone(),
+            beneath: self.beneath.clone(),
+        };
+        Ok((store, directory, file))
     }
 
     pub(crate) fn try_access(&self) -> io::Result<StoreAccess> {

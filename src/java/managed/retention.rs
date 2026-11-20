@@ -17,13 +17,13 @@ use std::{
 };
 use uuid::Uuid;
 
-fn scope(root: &Path) -> Result<PathBuf> {
-    files::child(root, Path::new(".managed")).map_err(storage)
+fn scope(root: &Path) -> Result<ObjectStore> {
+    ObjectStore::beneath(root, Path::new(".managed")).map_err(storage)
 }
 
 pub(crate) async fn attach(database: Option<Arc<Database>>, root: PathBuf) -> Result<()> {
     async_std::task::spawn(async move {
-        let store = ObjectStore::new(scope(&root)?);
+        let store = scope(&root)?;
         let access = store.try_access().map_err(|error| {
             ManagedJavaError::new(
                 if error.kind() == io::ErrorKind::WouldBlock {
@@ -108,10 +108,9 @@ pub(crate) async fn snapshot(configured: &Path) -> Result<Snapshot> {
     if !process_pin::allows_cleanup(maintenance.root()).map_err(storage)? {
         return Err(storage("live or unknown managed Java process pin"));
     }
-    let archive_root = files::child(root, Path::new(".managed/bytes")).map_err(storage)?;
     let archive_maintenance = Arc::new(
-        ObjectStore::new(archive_root)
-            .try_maintenance()
+        ObjectStore::beneath(root, Path::new(".managed/bytes"))
+            .and_then(|store| store.try_maintenance())
             .map_err(storage)?,
     );
     let owners: HashSet<_> = RootCatalog::owners(&maintenance)

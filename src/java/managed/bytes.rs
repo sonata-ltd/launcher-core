@@ -28,8 +28,8 @@ fn error(error: io::Error) -> ManagedJavaError {
     )
 }
 
-fn root(root: &Path) -> Result<PathBuf> {
-    files::child(root, Path::new(".managed/bytes")).map_err(storage)
+fn store(root: &Path) -> Result<ObjectStore> {
+    ObjectStore::beneath(root, Path::new(".managed/bytes")).map_err(storage)
 }
 
 fn layout(root: &Path) -> io::Result<()> {
@@ -55,10 +55,7 @@ pub(super) async fn cached(
     cancel: &Cancellation,
 ) -> Result<Option<Archive>> {
     package(wanted)?;
-    let access = ObjectStore::new(root(root_path)?)
-        .access(cancel)
-        .await
-        .map_err(error)?;
+    let access = store(root_path)?.access(cancel).await.map_err(error)?;
     let wanted = wanted.clone();
     let cancel = cancel.clone();
     async_std::task::spawn_blocking(move || {
@@ -81,10 +78,7 @@ pub(super) async fn import(
     cancel: &Cancellation,
 ) -> Result<Archive> {
     package(wanted)?;
-    let access = ObjectStore::new(root(root_path)?)
-        .access(cancel)
-        .await
-        .map_err(error)?;
+    let access = store(root_path)?.access(cancel).await.map_err(error)?;
     let wanted = wanted.clone();
     let cancel = cancel.clone();
     async_std::task::spawn_blocking(move || {

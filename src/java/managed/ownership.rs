@@ -146,41 +146,39 @@ impl HomeOwner {
     }
 }
 
-fn managed_root(root: &Path) -> Result<PathBuf> {
-    files::child(root, Path::new(".managed")).map_err(storage)
+fn managed_store(root: &Path) -> Result<ObjectStore> {
+    ObjectStore::beneath(root, Path::new(".managed")).map_err(storage)
 }
 
 pub(super) async fn access(root: &Path) -> Result<StoreAccess> {
-    ObjectStore::new(managed_root(root)?)
+    managed_store(root)?
         .access(&crate::utils::cancellation::Cancellation::new())
         .await
         .map_err(storage)
 }
 
 pub(super) fn maintenance(root: &Path) -> Result<StoreMaintenance> {
-    ObjectStore::new(managed_root(root)?)
-        .try_maintenance()
-        .map_err(|error| {
-            ManagedJavaError::new(
-                if error.kind() == std::io::ErrorKind::WouldBlock {
-                    "busy"
-                } else {
-                    "storage"
-                },
-                error,
-            )
-        })
+    managed_store(root)?.try_maintenance().map_err(|error| {
+        ManagedJavaError::new(
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                "busy"
+            } else {
+                "storage"
+            },
+            error,
+        )
+    })
 }
 
 /// Shared admission allows independent operations, not concurrent writes to one
 /// operation record. Hold this exclusive scope through the owned task's finish.
 pub(super) fn operation(root: &Path, operation: Uuid) -> Result<StoreMaintenance> {
-    let scope = files::child(
+    ObjectStore::beneath(
         root,
         &PathBuf::from(".managed/operations/.locks").join(operation.to_string()),
     )
-    .map_err(storage)?;
-    ObjectStore::new(scope).try_maintenance().map_err(|error| {
+    .and_then(|store| store.try_maintenance())
+    .map_err(|error| {
         ManagedJavaError::new(
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 "busy"

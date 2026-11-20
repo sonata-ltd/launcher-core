@@ -32,7 +32,7 @@ pub(super) async fn recover(
     instances: &InstanceRegistry,
     filter: Option<InstanceId>,
 ) -> Result<Vec<RecoveryFailure>> {
-    let store = ObjectStore::new(paths.root().join("content-store"))
+    let store = ObjectStore::beneath(paths.root(), std::path::Path::new("content-store"))?
         .access(&Cancellation::default())
         .await?;
     let mut failures = Vec::new();

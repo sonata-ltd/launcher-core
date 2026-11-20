@@ -90,6 +90,11 @@ fn sweep_with(root: &Path, prefix: &str, process_alive: impl Fn(u32) -> bool) ->
     sweep_selected(root, &[prefix], process_alive)
 }
 
+/// Sweep a scratch root that the caller already holds open.
+pub(crate) fn sweep_in(root: &Arc<Directory>, prefixes: &[&str]) -> io::Result<usize> {
+    sweep_directory(root, prefixes, crate::utils::process::may_be_alive)
+}
+
 fn sweep_selected(
     root: &Path,
     prefixes: &[&str],
@@ -101,7 +106,14 @@ fn sweep_selected(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
         Err(error) => return Err(error),
     }
-    let root = Directory::open(root)?;
+    sweep_directory(&Directory::open(root)?, prefixes, process_alive)
+}
+
+fn sweep_directory(
+    root: &Arc<Directory>,
+    prefixes: &[&str],
+    process_alive: impl Fn(u32) -> bool,
+) -> io::Result<usize> {
     let mut removed = 0;
     for entry in fs::read_dir(root.path())? {
         let entry = entry?;

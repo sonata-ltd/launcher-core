@@ -159,9 +159,8 @@ pub(super) fn load(root: &Path) -> Result<Report> {
         .create_relative(Path::new("operations"))
         .map_err(storage)?;
     let directory = files::child(root, Path::new(".managed/operations")).map_err(storage)?;
-    let archive_root = files::child(root, Path::new(".managed/bytes")).map_err(storage)?;
-    crate::utils::object_store::ObjectStore::new(archive_root)
-        .sweep_staging()
+    crate::utils::object_store::ObjectStore::beneath(root, Path::new(".managed/bytes"))
+        .and_then(|store| store.sweep_staging())
         .map_err(storage)?;
     let mut report = Report {
         records: Vec::new(),
