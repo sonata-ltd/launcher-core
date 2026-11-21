@@ -131,6 +131,22 @@ Until it is restored, run the cargo pipeline directly (item 1).
 - Status rule: B01 moves from `PLATFORM VALIDATION PENDING` to `VERIFIED` only
   with this item and item 1 PASS on both native OSes.
 
+## 5b. F02 Linux processor confinement with real installers
+
+- Linux host with Landlock (ABI 3 or later; check `/sys/kernel/security/lsm`
+  contains `landlock`). Core commit `77807a1` or later.
+- Install, in a clean isolated root: one legacy Forge (1.12.2), one modern
+  Forge (1.20.x), one NeoForge (1.21.x). Expected: every install completes
+  and launches. Record any processor failure with its log
+  (`processor-*.log` in the installer work directory). A `Permission denied`
+  on a path outside the generation is FAIL and must be reported, not worked
+  around.
+- On a Linux host without Landlock (or with `lsm=` excluding it): expected
+  a `ProcessorConfinementUnavailable` error before any processor runs; no
+  unconfined run.
+- Status rule: this item does not change F02 `BLOCKED`; reads, network and
+  Windows/macOS remain open.
+
 ## 6. Clean install → prepare → launch
 
 - Isolated root, DB and profile. For vanilla, Fabric/Quilt, Forge and NeoForge,
@@ -182,6 +198,7 @@ Until it is restored, run the cargo pipeline directly (item 1).
 | 4 | | | PENDING | | |
 | 5 | | | PENDING | | |
 | 5a | | | PENDING | | |
+| 5b | | | PENDING | | |
 | 6 | | | PENDING | | |
 | 7 | | | PENDING | | |
 | 8 | | | PENDING | | |
