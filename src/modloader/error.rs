@@ -16,6 +16,9 @@ pub enum ModloaderError {
     #[error("processor classpath requires Java {minimum} or newer for this host")]
     ProcessorJavaUnavailable { minimum: u32 },
 
+    #[error("installer processors cannot be confined on this host: {0}")]
+    ProcessorConfinementUnavailable(String),
+
     #[error("processor failed: {0}")]
     Processor(String),
 

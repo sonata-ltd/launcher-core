@@ -20,6 +20,13 @@ pub(crate) struct Directory {
     _parent: Option<Arc<Directory>>,
 }
 
+#[cfg(unix)]
+impl std::os::fd::AsFd for Directory {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.handle.as_fd()
+    }
+}
+
 impl Directory {
     pub(crate) fn path(&self) -> &Path {
         &self.path

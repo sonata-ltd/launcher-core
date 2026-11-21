@@ -280,3 +280,31 @@ async fn processor_environment_is_not_inherited_and_temporary_files_stay_private
         ]
     );
 }
+
+#[cfg(target_os = "linux")]
+#[async_std::test]
+async fn processor_writes_stay_inside_the_retained_generation() {
+    let scope = tempfile::tempdir().unwrap();
+    let generation = scope.path().join("generation");
+    let elsewhere = scope.path().join("elsewhere");
+    fs::create_dir_all(&generation).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    let command = command(
+        &generation,
+        &format!(
+            "echo inside > '{inside}'; (echo outside 2>/dev/null > '{outside}'; /bin/sh -c \"echo child 2>/dev/null > '{child}'\") 2>/dev/null; exit 0",
+            inside = generation.join("output").display(),
+            outside = elsewhere.join("output").display(),
+            child = elsewhere.join("descendant").display(),
+        ),
+    );
+
+    run(command, &Cancellation::new(), |_| {}).await.unwrap();
+
+    assert_eq!(fs::read(generation.join("output")).unwrap(), b"inside\n");
+    assert_eq!(
+        fs::read_dir(&elsewhere).unwrap().count(),
+        0,
+        "writes outside the generation"
+    );
+}

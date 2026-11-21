@@ -1,6 +1,7 @@
 use super::output::{OutputCapture, OutputTail};
 use crate::data::registry::operation::message::output::OutputLine;
 use crate::modloader::error::{ModloaderError, Result};
+use crate::utils::process_confinement::{self, Confinement};
 use crate::utils::{
     cancellation::Cancellation,
     files::{self, directory::Directory},
@@ -36,7 +37,7 @@ const INHERITED_ENVIRONMENT: &[&str] = &["SystemRoot", "SystemDrive", "windir"];
 #[cfg(not(windows))]
 const INHERITED_ENVIRONMENT: &[&str] = &["LANG", "LC_ALL", "LC_CTYPE"];
 
-fn confine_environment(command: &mut Command, temporary: &std::path::Path) {
+fn confine_environment(command: &mut std::process::Command, temporary: &std::path::Path) {
     command.env_clear();
     for name in INHERITED_ENVIRONMENT {
         if let Some(value) = std::env::var_os(name) {
@@ -149,6 +150,14 @@ async fn run_with_log_limit(
         .map_err(|e| ModloaderError::Invalid(e.to_string()))?;
 
     let temporary = cwd.create_relative(std::path::Path::new(PROCESSOR_TEMP))?;
+    // Writes of the processor and its descendants stay inside the generation.
+    let confinement = Confinement::writable_beneath(&command.retention_root).map_err(|error| {
+        if process_confinement::is_unavailable(&error) {
+            ModloaderError::ProcessorConfinementUnavailable(error.to_string())
+        } else {
+            error.into()
+        }
+    })?;
     let pin = crate::utils::process_pin::ProcessPin::create_in(&command.retention_root)?;
     let java_pin = match java_use.map(|java_use| java_use.child_pin()).transpose() {
         Ok(pin) => pin,
@@ -159,20 +168,23 @@ async fn run_with_log_limit(
     };
     let pins: Vec<_> = std::iter::once(&pin).chain(java_pin.iter()).collect();
     crate::utils::process_pin::prepare_spawn(std::path::Path::new(&command.java), &pins)?;
-    let mut process = Command::new(&command.java);
+    let mut process = std::process::Command::new(&command.java);
     confine_environment(&mut process, temporary.path());
-    let child = process
+    process
         .arg(java_temporary_property(temporary.path()))
         .arg("-cp")
         .arg(classpath)
         .arg(&command.main_class)
         .args(&command.args)
-        .current_dir(cwd.path())
+        .current_dir(cwd.path());
+    confinement.apply(&mut process);
+    let child = Command::from(process)
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr)
         .kill_on_drop(true)
         .spawn()?;
+    drop(confinement);
     pin.record_child(child.id());
     if let Some(pin) = &java_pin {
         pin.record_child(child.id());
