@@ -14,6 +14,7 @@ pub(crate) mod object_store;
 pub(crate) mod platform;
 pub(crate) mod process;
 pub(crate) mod process_confinement;
+pub(crate) mod process_group;
 pub(crate) mod process_pin;
 pub mod url;
 

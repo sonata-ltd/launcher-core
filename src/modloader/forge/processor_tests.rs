@@ -308,3 +308,59 @@ async fn processor_writes_stay_inside_the_retained_generation() {
         "writes outside the generation"
     );
 }
+
+/// Absolute path of `sleep`; processors run without `PATH`.
+fn sleep_program() -> std::path::PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("sleep"))
+        .find(|candidate| candidate.is_file())
+        .unwrap()
+}
+
+#[async_std::test]
+async fn descendants_cannot_write_after_a_successful_processor_returns() {
+    let dir = tempfile::tempdir().unwrap();
+    let late = dir.path().join("late");
+    let command = command(
+        dir.path(),
+        &format!(
+            "( '{sleep}' 0.5; echo late > '{late}' ) & exit 0",
+            sleep = sleep_program().display(),
+            late = late.display()
+        ),
+    );
+
+    run(command, &Cancellation::new(), |_| {}).await.unwrap();
+    async_std::task::sleep(Duration::from_millis(1500)).await;
+
+    assert!(!late.exists(), "a descendant wrote after completion");
+    assert!(crate::utils::process_pin::allows_cleanup(dir.path()).unwrap());
+}
+
+#[async_std::test]
+async fn cancellation_stops_descendants_of_the_processor() {
+    let dir = tempfile::tempdir().unwrap();
+    let late = dir.path().join("late");
+    let command = command(
+        dir.path(),
+        &format!(
+            "( '{sleep}' 0.5; echo late > '{late}' ) & printf 'ready\\n'; '{sleep}' 30",
+            sleep = sleep_program().display(),
+            late = late.display()
+        ),
+    );
+    let cancel = Cancellation::new();
+    let trigger = cancel.clone();
+
+    let error = run(command, &cancel, move |lines| {
+        if lines.iter().any(|line| line.text == "ready") {
+            trigger.cancel();
+        }
+    })
+    .await
+    .unwrap_err();
+    async_std::task::sleep(Duration::from_millis(1500)).await;
+
+    assert!(error.is_cancelled());
+    assert!(!late.exists(), "a descendant wrote after cancellation");
+}

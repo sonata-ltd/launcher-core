@@ -2,6 +2,7 @@ use super::output::{OutputCapture, OutputTail};
 use crate::data::registry::operation::message::output::OutputLine;
 use crate::modloader::error::{ModloaderError, Result};
 use crate::utils::process_confinement::{self, Confinement};
+use crate::utils::process_group::ProcessGroup;
 use crate::utils::{
     cancellation::Cancellation,
     files::{self, directory::Directory},
@@ -178,6 +179,7 @@ async fn run_with_log_limit(
         .args(&command.args)
         .current_dir(cwd.path());
     confinement.apply(&mut process);
+    ProcessGroup::isolate(&mut process);
     let child = Command::from(process)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -185,14 +187,17 @@ async fn run_with_log_limit(
         .kill_on_drop(true)
         .spawn()?;
     drop(confinement);
+    let mut group = ProcessGroup::of_leader(child.id());
     pin.record_child(child.id());
     if let Some(pin) = &java_pin {
         pin.record_child(child.id());
     }
+    let outputs = command.outputs.clone();
     let mut process_exited = false;
     let result = run_child(
         command,
         child,
+        &group,
         cancel,
         &mut on_output,
         &mut tail,
@@ -200,16 +205,37 @@ async fn run_with_log_limit(
         &mut process_exited,
     )
     .await;
-    pin.finish(process_exited);
+    // Descendants must be gone before outputs are trusted or pins released.
+    let descendants_gone = group.terminate(DESCENDANT_EXIT_TIMEOUT).await;
+    let result = match result {
+        Ok(()) if !descendants_gone => Err(ModloaderError::Processor(
+            "processor descendants did not exit".into(),
+        )),
+        Ok(()) if !outputs.is_empty() => {
+            let token = cancel.clone();
+            if task::spawn_blocking(move || all_outputs_match(&outputs, &token)).await? {
+                Ok(())
+            } else {
+                Err(ModloaderError::Processor("output checksum mismatch".into()))
+            }
+        }
+        result => result,
+    };
+    let acknowledged = process_exited && descendants_gone;
+    pin.finish(acknowledged);
     if let Some(pin) = &java_pin {
-        pin.finish(process_exited);
+        pin.finish(acknowledged);
     }
     result
 }
 
+/// How long the process group may take to empty after SIGKILL.
+const DESCENDANT_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn run_child(
     command: ProcessorCommand,
     mut child: async_std::process::Child,
+    group: &ProcessGroup,
     cancel: &Cancellation,
     on_output: &mut (impl FnMut(Vec<OutputLine>) + Send),
     tail: &mut Option<OutputTail>,
@@ -225,6 +251,9 @@ async fn run_child(
         let drained = match capture.drain(if finished { 1024 * 1024 } else { 64 * 1024 }) {
             Ok(bytes) => bytes,
             Err(error) => {
+                if !*process_exited {
+                    group.kill();
+                }
                 if !*process_exited && child.kill().is_ok() {
                     *process_exited = child.status().await.is_ok();
                 }
@@ -246,6 +275,7 @@ async fn run_child(
 
         let cancelled = cancel.is_cancelled();
         if cancelled || started.elapsed() > Duration::from_secs(15 * 60) {
+            group.kill();
             let killed = child.kill();
             if killed.is_ok() {
                 *process_exited = child.status().await.is_ok();
@@ -268,13 +298,6 @@ async fn run_child(
         } else {
             let _ = cancel.run(task::sleep(Duration::from_millis(10))).await;
         }
-    }
-
-    let outputs = command.outputs;
-    let has_outputs = !outputs.is_empty();
-    let token = cancel.clone();
-    if has_outputs && !task::spawn_blocking(move || all_outputs_match(&outputs, &token)).await? {
-        return Err(ModloaderError::Processor("output checksum mismatch".into()));
     }
 
     Ok(())
