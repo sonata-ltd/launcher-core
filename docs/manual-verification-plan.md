@@ -144,6 +144,9 @@ Until it is restored, run the cargo pipeline directly (item 1).
 - On a Linux host without Landlock (or with `lsm=` excluding it): expected
   a `ProcessorConfinementUnavailable` error before any processor runs; no
   unconfined run.
+- During one modern Forge install, cancel while a processor runs. Expected:
+  within a few seconds `pgrep -f <installer work directory>` finds no
+  process, and the generation is not reported cleanable while one remains.
 - Status rule: this item does not change F02 `BLOCKED`; reads, network and
   Windows/macOS remain open.
 
